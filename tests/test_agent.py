@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 from src.agent.agent import (
     _TOOL_LABELS,
     SYSTEM_PROMPT_TEMPLATE,
+    _extract_ai_text,
     _get_tools,
     _is_tool_call_pairing_error,
     _summarize_tool_input,
@@ -583,3 +584,121 @@ class TestStreamAgentRegressions:
         assert answer["content"] != "No response generated."
         # aget_state should NOT have been called (recovery path skips it)
         mock_agent.aget_state.assert_not_called()
+
+
+class TestExtractAiText:
+    """Tests for _extract_ai_text helper."""
+
+    def test_string_content(self) -> None:
+        msg = AIMessage(content="Hello world")
+        assert _extract_ai_text(msg) == "Hello world"
+
+    def test_empty_string(self) -> None:
+        msg = AIMessage(content="")
+        assert _extract_ai_text(msg) == ""
+
+    def test_list_content_single_text_block(self) -> None:
+        """Anthropic returns content as a list of typed blocks."""
+        msg = AIMessage(content=[{"type": "text", "text": "Hello world"}])
+        assert _extract_ai_text(msg) == "Hello world"
+
+    def test_list_content_multiple_text_blocks(self) -> None:
+        msg = AIMessage(
+            content=[
+                {"type": "text", "text": "First part. "},
+                {"type": "text", "text": "Second part."},
+            ]
+        )
+        assert _extract_ai_text(msg) == "First part. Second part."
+
+    def test_list_content_with_non_text_blocks(self) -> None:
+        """Non-text blocks (e.g., tool_use) should be skipped."""
+        msg = AIMessage(
+            content=[
+                {"type": "tool_use", "id": "1", "name": "foo", "input": {}},
+                {"type": "text", "text": "The answer is 42."},
+            ]
+        )
+        assert _extract_ai_text(msg) == "The answer is 42."
+
+    def test_list_content_only_tool_use(self) -> None:
+        """If only tool_use blocks, no text should be extracted."""
+        msg = AIMessage(content=[{"type": "tool_use", "id": "1", "name": "foo", "input": {}}])
+        assert _extract_ai_text(msg) == ""
+
+    def test_list_content_plain_strings(self) -> None:
+        """Some providers return plain strings in the list."""
+        msg = AIMessage(content=["Hello ", "world"])
+        assert _extract_ai_text(msg) == "Hello world"
+
+    def test_empty_list(self) -> None:
+        msg = AIMessage(content=[])
+        assert _extract_ai_text(msg) == ""
+
+
+class TestAnthropicContentFormatRegressions:
+    """Regression: Anthropic returns AIMessage.content as a list of content blocks
+    (e.g., [{"type": "text", "text": "..."}]) instead of a plain string.
+    The isinstance(msg.content, str) check silently skipped every AIMessage,
+    causing 'No response generated.' for all queries when using Anthropic."""
+
+    @pytest.mark.integration
+    async def test_stream_agent_handles_list_content(self, mock_settings: object) -> None:
+        """stream_agent must extract text from list-format AIMessage content."""
+        mock_agent = AsyncMock()
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {"event": "on_chain_end", "name": "agent", "data": {}}
+
+        mock_agent.astream_events = fake_stream
+        # Anthropic-style content: list of typed blocks
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(
+                values={"messages": [AIMessage(content=[{"type": "text", "text": "No alerts are currently firing."}])]}
+            )
+        )
+
+        events = [e async for e in stream_agent(mock_agent, "any alerts?", session_id="s1")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "No alerts are currently firing."
+        assert answer["content"] != "No response generated."
+
+    @pytest.mark.integration
+    async def test_invoke_agent_handles_list_content(self, mock_settings: object) -> None:
+        """invoke_agent must also handle list-format content from Anthropic."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "messages": [AIMessage(content=[{"type": "text", "text": "CPU is at 42%."}])]
+        }
+
+        result = await invoke_agent(mock_agent, "What is CPU?", session_id="s1")
+        assert result == "CPU is at 42%."
+        assert result != "No response generated."
+
+    @pytest.mark.integration
+    async def test_stream_agent_skips_tool_use_only_messages(self, mock_settings: object) -> None:
+        """AIMessages with only tool_use blocks (no text) should be skipped."""
+        mock_agent = AsyncMock()
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {"event": "on_chain_end", "name": "agent", "data": {}}
+
+        mock_agent.astream_events = fake_stream
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(
+                values={
+                    "messages": [
+                        # First message: tool_use only (intermediate)
+                        AIMessage(content=[{"type": "tool_use", "id": "1", "name": "prom", "input": {}}]),
+                        # Second message: actual answer
+                        AIMessage(content=[{"type": "text", "text": "All systems operational."}]),
+                    ]
+                }
+            )
+        )
+
+        events = [e async for e in stream_agent(mock_agent, "status?", session_id="s1")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "All systems operational."

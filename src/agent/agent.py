@@ -84,6 +84,29 @@ def _get_memory_context() -> str:
         return ""
 
 
+def _extract_ai_text(msg: AIMessage) -> str:
+    """Extract text content from an AIMessage.
+
+    Anthropic returns content as a list of content blocks
+    (e.g., [{"type": "text", "text": "..."}]) while OpenAI returns a plain
+    string.  This helper normalises both forms to a single string.
+    """
+    content = msg.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
 def _extract_tool_names(messages: list[Any]) -> list[str]:
     """Extract tool names from AIMessage tool_calls in a message list."""
     tool_names: list[str] = []
@@ -358,9 +381,11 @@ async def invoke_agent(
 
     response_text = "No response generated."
     for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
-            response_text = msg.content
-            break
+        if isinstance(msg, AIMessage):
+            text = _extract_ai_text(msg)
+            if text:
+                response_text = text
+                break
 
     # Post-response: save query pattern + suggest incident recording
     suggestion = _post_response_actions(messages, message, response_text)
@@ -518,9 +543,11 @@ async def stream_agent(
             )
             all_messages = result.get("messages", [])
             for msg in reversed(all_messages):
-                if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
-                    response_text = msg.content
-                    break
+                if isinstance(msg, AIMessage):
+                    text = _extract_ai_text(msg)
+                    if text:
+                        response_text = text
+                        break
         else:
             yield {"type": "error", "content": f"Agent error: {exc}"}
             return
@@ -534,9 +561,11 @@ async def stream_agent(
             logger.debug("Failed to get state after streaming", exc_info=True)
 
         for msg in reversed(all_messages):
-            if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
-                response_text = msg.content
-                break
+            if isinstance(msg, AIMessage):
+                text = _extract_ai_text(msg)
+                if text:
+                    response_text = text
+                    break
 
     # Persist conversation history if configured
     if settings.conversation_history_dir and all_messages:

@@ -102,13 +102,11 @@ if prompt := st.chat_input("Ask about your infrastructure..."):
 
         def _render_status(tools: list[str], current: str = "") -> None:
             """Render the tool progress display."""
-            lines: list[str] = []
-            for tool_line in tools:
-                lines.append(f"- {tool_line}")
+            lines: list[str] = list(tools)
             if current:
-                lines.append(f"- :hourglass_flowing_sand: {current}")
+                lines.append(f":hourglass_flowing_sand: {current}")
             if lines:
-                status_area.markdown("\n".join(lines))
+                status_area.markdown("  \n".join(lines))
 
         try:
             with httpx.stream(

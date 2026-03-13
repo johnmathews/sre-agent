@@ -411,21 +411,29 @@ def _summarize_tool_input(tool_name: str, tool_input: Any) -> str:
     # For prometheus queries, show the PromQL expression
     if "query" in tool_input:
         query = tool_input["query"]
-        if isinstance(query, str) and len(query) <= 120:
-            return f"`{query}`"
-        if isinstance(query, str):
+        if isinstance(query, str) and query:
+            if len(query) <= 120:
+                return f"`{query}`"
             return f"`{query[:117]}...`"
     # For search tools, show the search term
     if "search_term" in tool_input:
-        return f"`{tool_input['search_term']}`"
+        val = tool_input["search_term"]
+        if isinstance(val, str) and val:
+            return f"`{val}`"
     if "pattern" in tool_input:
-        return f"`{tool_input['pattern']}`"
+        val = tool_input["pattern"]
+        if isinstance(val, str) and val:
+            return f"`{val}`"
     # For dashboard lookups
     if "uid" in tool_input:
-        return f"uid={tool_input['uid']}"
+        val = tool_input["uid"]
+        if val:
+            return f"uid={val}"
     # For guest config
     if "vmid" in tool_input:
-        return f"vmid={tool_input['vmid']}"
+        val = tool_input["vmid"]
+        if val:
+            return f"vmid={val}"
     return ""
 
 
@@ -464,7 +472,7 @@ async def stream_agent(
             {"messages": [HumanMessage(content=message)]},
             config=config,
             version="v2",
-            include_types=["tool", "chat_model"],
+            include_types=["tool"],
         ):
             event_type: str = event.get("event", "")
             event_name: str = event.get("name", "")
@@ -488,17 +496,6 @@ async def stream_agent(
                     "tool_name": event_name,
                 }
 
-            elif event_type == "on_chat_model_end":
-                # Capture the final AI message from the last LLM call
-                output = data.get("output")
-                if (
-                    isinstance(output, AIMessage)
-                    and isinstance(output.content, str)
-                    and output.content
-                    and not output.tool_calls
-                ):
-                    response_text = output.content
-
     except Exception as exc:
         if _is_tool_call_pairing_error(exc):
             fresh_id = f"{session_id}-{uuid4().hex[:6]}"
@@ -519,32 +516,37 @@ async def stream_agent(
                 {"messages": [HumanMessage(content=message)]},
                 config=fresh_config,
             )
-            messages: list[Any] = result.get("messages", [])
-            for msg in reversed(messages):
+            all_messages = result.get("messages", [])
+            for msg in reversed(all_messages):
                 if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
                     response_text = msg.content
                     break
         else:
             yield {"type": "error", "content": f"Agent error: {exc}"}
             return
-
-    # Persist conversation history if configured
-    if settings.conversation_history_dir:
-        # For streaming, we need to get messages from the checkpoint
+    else:
+        # Normal path (no exception) — extract the answer from checkpoint state,
+        # the authoritative source after streaming completes.
         try:
             snapshot = await agent.aget_state(config)  # pyright: ignore[reportUnknownMemberType]
             all_messages = snapshot.values.get("messages", [])  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         except Exception:
-            logger.debug("Failed to get state for conversation history", exc_info=True)
+            logger.debug("Failed to get state after streaming", exc_info=True)
 
-        if all_messages:
-            active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
-            save_conversation(
-                settings.conversation_history_dir,
-                effective_session_id,
-                all_messages,
-                active_model,
-            )
+        for msg in reversed(all_messages):
+            if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
+                response_text = msg.content
+                break
+
+    # Persist conversation history if configured
+    if settings.conversation_history_dir and all_messages:
+        active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
+        save_conversation(
+            settings.conversation_history_dir,
+            effective_session_id,
+            all_messages,
+            active_model,
+        )
 
     # Post-response actions
     suggestion = _post_response_actions(all_messages, message, response_text)

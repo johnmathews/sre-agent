@@ -313,22 +313,29 @@ class TestSummarizeToolInput:
         result = _summarize_tool_input("some_tool", "not a dict")
         assert result == ""
 
+    def test_empty_query_returns_empty(self) -> None:
+        """Empty string values must not produce empty backticks like ``."""
+        assert _summarize_tool_input("x", {"query": ""}) == ""
+        assert _summarize_tool_input("x", {"search_term": ""}) == ""
+        assert _summarize_tool_input("x", {"pattern": ""}) == ""
+        assert _summarize_tool_input("x", {"uid": ""}) == ""
+        assert _summarize_tool_input("x", {"vmid": ""}) == ""
+
 
 class TestStreamAgent:
-    """Tests for stream_agent async generator."""
+    """Tests for stream_agent async generator.
+
+    The answer is always extracted from checkpoint state (aget_state) after
+    streaming completes — the stream itself only yields tool progress events.
+    """
 
     @pytest.mark.integration
     async def test_emits_status_and_answer(self, mock_settings: object) -> None:
-        """Basic flow: status → answer."""
+        """Basic flow: status → answer extracted from checkpoint."""
         mock_agent = AsyncMock()
 
         async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-            # Simulate on_chat_model_end with a final answer
-            yield {
-                "event": "on_chat_model_end",
-                "name": "ChatOpenAI",
-                "data": {"output": AIMessage(content="CPU is at 42%.")},
-            }
+            yield {"event": "on_chain_end", "name": "agent", "data": {}}
 
         mock_agent.astream_events = fake_stream
         mock_agent.aget_state = AsyncMock(
@@ -361,11 +368,6 @@ class TestStreamAgent:
                 "name": "prometheus_instant_query",
                 "data": {"output": "up=1"},
             }
-            yield {
-                "event": "on_chat_model_end",
-                "name": "ChatOpenAI",
-                "data": {"output": AIMessage(content="All nodes are up.")},
-            }
 
         mock_agent.astream_events = fake_stream
         mock_agent.aget_state = AsyncMock(
@@ -381,35 +383,45 @@ class TestStreamAgent:
         tool_end = next(e for e in events if e["type"] == "tool_end")
         assert tool_end["tool_name"] == "prometheus_instant_query"
 
+        # Answer comes from checkpoint, not stream events
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "All nodes are up."
+
     @pytest.mark.integration
-    async def test_skips_intermediate_llm_with_tool_calls(self, mock_settings: object) -> None:
-        """AIMessages with tool_calls (intermediate) should not become the answer."""
+    async def test_answer_from_checkpoint_not_stream(self, mock_settings: object) -> None:
+        """The answer is extracted from checkpoint state, not stream events."""
         mock_agent = AsyncMock()
 
-        intermediate_msg = AIMessage(content="Let me check...")
-        intermediate_msg.tool_calls = [{"name": "prometheus_instant_query", "args": {}, "id": "1"}]
-
         async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-            # First LLM call — has tool_calls, should be skipped
+            # Stream only has tool events — no chat_model events needed
             yield {
-                "event": "on_chat_model_end",
-                "name": "ChatOpenAI",
-                "data": {"output": intermediate_msg},
+                "event": "on_tool_start",
+                "name": "runbook_search",
+                "data": {"input": {"query": "disk"}},
             }
-            # Final LLM call — no tool_calls, this is the answer
             yield {
-                "event": "on_chat_model_end",
-                "name": "ChatOpenAI",
-                "data": {"output": AIMessage(content="Final answer.")},
+                "event": "on_tool_end",
+                "name": "runbook_search",
+                "data": {"output": "some runbook content"},
             }
 
+        # Checkpoint has the final answer (as it would in real LangGraph)
         mock_agent.astream_events = fake_stream
-        mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(
+                values={
+                    "messages": [
+                        AIMessage(content="Let me check..."),  # intermediate
+                        AIMessage(content="The disk is healthy."),  # final
+                    ]
+                }
+            )
+        )
 
-        events = [e async for e in stream_agent(mock_agent, "test", session_id="s1")]
+        events = [e async for e in stream_agent(mock_agent, "disk status?", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
-        assert answer["content"] == "Final answer."
+        assert answer["content"] == "The disk is healthy."
 
     @pytest.mark.integration
     async def test_error_during_streaming(self, mock_settings: object) -> None:
@@ -455,11 +467,10 @@ class TestStreamAgent:
 
     @pytest.mark.integration
     async def test_fallback_response_text(self, mock_settings: object) -> None:
-        """When no AI message is emitted, the fallback text is used."""
+        """When checkpoint has no AI messages, the fallback text is used."""
         mock_agent = AsyncMock()
 
         async def empty_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-            # Emit no chat_model_end events
             yield {"event": "on_chain_end", "name": "agent", "data": {}}
 
         mock_agent.astream_events = empty_stream
@@ -469,3 +480,106 @@ class TestStreamAgent:
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "No response generated."
+
+
+# ---------------------------------------------------------------------------
+# Regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestStreamAgentRegressions:
+    """Regression tests for bugs found in the streaming UI."""
+
+    def test_empty_backticks_never_produced(self) -> None:
+        """Regression: _summarize_tool_input returned `` for empty/None values,
+        which rendered as visible empty backticks in the Streamlit UI."""
+        # Empty strings
+        for field in ("query", "search_term", "pattern"):
+            result = _summarize_tool_input("any_tool", {field: ""})
+            assert "``" not in result, f"Empty backticks for {field}=''"
+            assert result == ""
+
+        # None values
+        for field in ("query", "search_term", "pattern", "uid", "vmid"):
+            result = _summarize_tool_input("any_tool", {field: None})
+            assert "``" not in result, f"Empty backticks for {field}=None"
+            assert result == ""
+
+    def test_tool_start_content_no_trailing_empty_summary(self) -> None:
+        """Regression: tool_start content showed 'Label: ' with trailing colon+space
+        when the summary was empty, because the format string was always applied."""
+        label = _TOOL_LABELS.get("grafana_get_alerts", "Checking Grafana alerts")
+        summary = _summarize_tool_input("grafana_get_alerts", {})
+        # This mirrors the logic in stream_agent
+        content = f"{label}: {summary}" if summary else label
+        assert not content.endswith(": "), "Trailing ': ' when summary is empty"
+        assert content == label
+
+    @pytest.mark.integration
+    async def test_answer_not_no_response_generated(self, mock_settings: object) -> None:
+        """Regression: stream_agent always returned 'No response generated.' because
+        it tried to extract the answer from on_chat_model_end stream events, where
+        the output type (AIMessageChunk) didn't match isinstance(output, AIMessage).
+
+        Fix: answer is now extracted from checkpoint state via aget_state(), which
+        always contains proper AIMessage objects."""
+        mock_agent = AsyncMock()
+
+        # Simulate a stream with NO chat_model events at all — this is what
+        # happens when include_types=["tool"] filters them out
+        async def tool_only_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {
+                "event": "on_tool_start",
+                "name": "prometheus_instant_query",
+                "data": {"input": {"query": "up"}},
+            }
+            yield {
+                "event": "on_tool_end",
+                "name": "prometheus_instant_query",
+                "data": {"output": "up=1"},
+            }
+
+        mock_agent.astream_events = tool_only_stream
+        # Checkpoint has the real answer
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(values={"messages": [AIMessage(content="All 3 nodes are up and healthy.")]})
+        )
+
+        events = [e async for e in stream_agent(mock_agent, "are nodes up?", session_id="s1")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        # Must NOT be the fallback text
+        assert answer["content"] != "No response generated."
+        assert answer["content"] == "All 3 nodes are up and healthy."
+
+    @pytest.mark.integration
+    async def test_recovery_path_also_returns_answer(self, mock_settings: object) -> None:
+        """Regression: after corrupted-session recovery via ainvoke fallback, the code
+        fell through to aget_state() with the original (corrupted) config, which
+        overwrote the already-extracted answer with empty messages.
+
+        Fix: recovery path uses try/except/else so aget_state only runs on the
+        normal (non-exception) path."""
+        mock_agent = AsyncMock()
+
+        async def failing_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            raise Exception(
+                "An assistant message with 'tool_calls' must be followed by "
+                "tool messages responding to each 'tool_call_id'."
+            )
+            yield  # noqa: RET503
+
+        mock_agent.astream_events = failing_stream
+        # ainvoke fallback returns a real answer
+        mock_agent.ainvoke.return_value = {"messages": [AIMessage(content="Recovered successfully.")]}
+        # aget_state on the ORIGINAL config would return garbage — but it
+        # should NOT be called in the recovery path
+        mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
+
+        events = [e async for e in stream_agent(mock_agent, "test", session_id="bad")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "Recovered successfully."
+        assert answer["content"] != "No response generated."
+        # aget_state should NOT have been called (recovery path skips it)
+        mock_agent.aget_state.assert_not_called()

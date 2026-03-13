@@ -60,9 +60,10 @@ make chat
 
 # Or start the FastAPI server
 make serve
-# POST /ask     — send questions to the agent
-# POST /report  — generate a weekly reliability report
-# GET /health   — check infrastructure component status
+# POST /ask          — send questions to the agent (JSON response)
+# POST /ask/stream   — send questions with live SSE progress events
+# POST /report       — generate a weekly reliability report
+# GET /health        — check infrastructure component status
 
 # Start the Streamlit web UI (requires API server running)
 make ui
@@ -97,7 +98,7 @@ The project builds a single Docker image that runs as three services:
 | Service      | Port | Description                              |
 | ------------ | ---- | ---------------------------------------- |
 | `sre-ingest` | —    | One-shot: builds the Chroma vector store |
-| `sre-api`    | 8000 | FastAPI backend (`/ask`, `/health`, `/metrics`, `/report`) |
+| `sre-api`    | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
 | `sre-ui`     | 8501 | Streamlit web UI                         |
 
 The intended deployment is on a Linux host (VM, LXC, bare metal) on the same LAN as your Prometheus, Grafana, and

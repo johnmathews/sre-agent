@@ -7,11 +7,14 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from src.agent.agent import (
+    _TOOL_LABELS,
     SYSTEM_PROMPT_TEMPLATE,
     _get_tools,
     _is_tool_call_pairing_error,
+    _summarize_tool_input,
     build_agent,
     invoke_agent,
+    stream_agent,
 )
 
 
@@ -249,3 +252,220 @@ class TestInvokeAgent:
 
         with pytest.raises(RuntimeError, match="LLM still broken"):
             await invoke_agent(mock_agent, "hello", session_id="s1")
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+
+class TestToolLabels:
+    """Tool label dict covers all registered tools."""
+
+    def test_core_tools_have_labels(self) -> None:
+        core = [
+            "prometheus_instant_query",
+            "prometheus_range_query",
+            "prometheus_search_metrics",
+            "grafana_get_alerts",
+            "grafana_get_alert_rules",
+            "runbook_search",
+        ]
+        for name in core:
+            assert name in _TOOL_LABELS, f"Missing label for {name}"
+
+    def test_labels_are_human_readable(self) -> None:
+        for name, label in _TOOL_LABELS.items():
+            assert len(label) > 5, f"Label for {name} too short"
+            assert label[0].isupper(), f"Label for {name} should start uppercase"
+
+
+class TestSummarizeToolInput:
+    """_summarize_tool_input produces concise descriptions."""
+
+    def test_query_field(self) -> None:
+        result = _summarize_tool_input("prometheus_instant_query", {"query": "up{job='node'}"})
+        assert result == "`up{job='node'}`"
+
+    def test_long_query_truncated(self) -> None:
+        long_query = "a" * 200
+        result = _summarize_tool_input("prometheus_instant_query", {"query": long_query})
+        assert result.endswith("...`")
+        assert len(result) <= 125
+
+    def test_search_term_field(self) -> None:
+        result = _summarize_tool_input("prometheus_search_metrics", {"search_term": "cpu"})
+        assert result == "`cpu`"
+
+    def test_uid_field(self) -> None:
+        result = _summarize_tool_input("grafana_get_dashboard", {"uid": "abc123"})
+        assert result == "uid=abc123"
+
+    def test_vmid_field(self) -> None:
+        result = _summarize_tool_input("proxmox_get_guest_config", {"vmid": "100"})
+        assert result == "vmid=100"
+
+    def test_empty_for_unknown_fields(self) -> None:
+        result = _summarize_tool_input("some_tool", {"foo": "bar"})
+        assert result == ""
+
+    def test_non_dict_returns_empty(self) -> None:
+        result = _summarize_tool_input("some_tool", "not a dict")
+        assert result == ""
+
+
+class TestStreamAgent:
+    """Tests for stream_agent async generator."""
+
+    @pytest.mark.integration
+    async def test_emits_status_and_answer(self, mock_settings: object) -> None:
+        """Basic flow: status → answer."""
+        mock_agent = AsyncMock()
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            # Simulate on_chat_model_end with a final answer
+            yield {
+                "event": "on_chat_model_end",
+                "name": "ChatOpenAI",
+                "data": {"output": AIMessage(content="CPU is at 42%.")},
+            }
+
+        mock_agent.astream_events = fake_stream
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(values={"messages": [AIMessage(content="CPU is at 42%.")]})
+        )
+
+        events = [e async for e in stream_agent(mock_agent, "What is CPU?", session_id="s1")]
+
+        types = [e["type"] for e in events]
+        assert "status" in types
+        assert "answer" in types
+
+        answer_event = next(e for e in events if e["type"] == "answer")
+        assert answer_event["content"] == "CPU is at 42%."
+        assert answer_event["session_id"] == "s1"
+
+    @pytest.mark.integration
+    async def test_emits_tool_start_and_end(self, mock_settings: object) -> None:
+        """Tool events are yielded during streaming."""
+        mock_agent = AsyncMock()
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {
+                "event": "on_tool_start",
+                "name": "prometheus_instant_query",
+                "data": {"input": {"query": "up{job='node'}"}},
+            }
+            yield {
+                "event": "on_tool_end",
+                "name": "prometheus_instant_query",
+                "data": {"output": "up=1"},
+            }
+            yield {
+                "event": "on_chat_model_end",
+                "name": "ChatOpenAI",
+                "data": {"output": AIMessage(content="All nodes are up.")},
+            }
+
+        mock_agent.astream_events = fake_stream
+        mock_agent.aget_state = AsyncMock(
+            return_value=AsyncMock(values={"messages": [AIMessage(content="All nodes are up.")]})
+        )
+
+        events = [e async for e in stream_agent(mock_agent, "Are nodes up?", session_id="s1")]
+
+        tool_start = next(e for e in events if e["type"] == "tool_start")
+        assert "prometheus_instant_query" in tool_start["tool_name"]
+        assert "`up{job='node'}`" in tool_start["content"]
+
+        tool_end = next(e for e in events if e["type"] == "tool_end")
+        assert tool_end["tool_name"] == "prometheus_instant_query"
+
+    @pytest.mark.integration
+    async def test_skips_intermediate_llm_with_tool_calls(self, mock_settings: object) -> None:
+        """AIMessages with tool_calls (intermediate) should not become the answer."""
+        mock_agent = AsyncMock()
+
+        intermediate_msg = AIMessage(content="Let me check...")
+        intermediate_msg.tool_calls = [{"name": "prometheus_instant_query", "args": {}, "id": "1"}]
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            # First LLM call — has tool_calls, should be skipped
+            yield {
+                "event": "on_chat_model_end",
+                "name": "ChatOpenAI",
+                "data": {"output": intermediate_msg},
+            }
+            # Final LLM call — no tool_calls, this is the answer
+            yield {
+                "event": "on_chat_model_end",
+                "name": "ChatOpenAI",
+                "data": {"output": AIMessage(content="Final answer.")},
+            }
+
+        mock_agent.astream_events = fake_stream
+        mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
+
+        events = [e async for e in stream_agent(mock_agent, "test", session_id="s1")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "Final answer."
+
+    @pytest.mark.integration
+    async def test_error_during_streaming(self, mock_settings: object) -> None:
+        """Non-recoverable errors yield an error event."""
+        mock_agent = AsyncMock()
+
+        async def failing_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            raise RuntimeError("LLM exploded")
+            yield  # noqa: RET503 — make this an async generator
+
+        mock_agent.astream_events = failing_stream
+
+        events = [e async for e in stream_agent(mock_agent, "boom", session_id="s1")]
+
+        error_event = next(e for e in events if e["type"] == "error")
+        assert "LLM exploded" in error_event["content"]
+
+    @pytest.mark.integration
+    async def test_recovers_from_corrupted_session(self, mock_settings: object) -> None:
+        """Tool-call pairing errors trigger fallback to ainvoke."""
+        mock_agent = AsyncMock()
+
+        async def failing_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            raise Exception(
+                "An assistant message with 'tool_calls' must be followed by "
+                "tool messages responding to each 'tool_call_id'."
+            )
+            yield  # noqa: RET503
+
+        mock_agent.astream_events = failing_stream
+        mock_agent.ainvoke.return_value = {"messages": [AIMessage(content="Recovered.")]}
+
+        events = [e async for e in stream_agent(mock_agent, "hello", session_id="broken")]
+
+        types = [e["type"] for e in events]
+        assert "status" in types  # "Retrying with fresh session..."
+        assert "answer" in types
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "Recovered."
+        # Session ID should be different from original
+        assert answer["session_id"].startswith("broken-")
+
+    @pytest.mark.integration
+    async def test_fallback_response_text(self, mock_settings: object) -> None:
+        """When no AI message is emitted, the fallback text is used."""
+        mock_agent = AsyncMock()
+
+        async def empty_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            # Emit no chat_model_end events
+            yield {"event": "on_chain_end", "name": "agent", "data": {}}
+
+        mock_agent.astream_events = empty_stream
+        mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
+
+        events = [e async for e in stream_agent(mock_agent, "hello", session_id="s1")]
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "No response generated."

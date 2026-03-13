@@ -5,6 +5,7 @@ The agent is built once at startup and shared across requests.
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -16,8 +17,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
-from src.agent.agent import build_agent, invoke_agent
+from src.agent.agent import build_agent, invoke_agent, stream_agent
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
 from src.config import get_settings
 from src.observability.metrics import (
@@ -152,6 +154,50 @@ async def ask(request: AskRequest) -> AskResponse:
     REQUESTS_TOTAL.labels(endpoint="/ask", status="success").inc()
 
     return AskResponse(response=response, session_id=session_id)
+
+
+@app.post("/ask/stream")
+async def ask_stream(request: AskRequest) -> StreamingResponse:
+    """Stream agent progress as Server-Sent Events.
+
+    Events are JSON objects with ``type`` (status/tool_start/tool_end/answer/error)
+    and ``content`` fields, sent in SSE ``data:`` format.
+    """
+    session_id = request.session_id or uuid4().hex[:8]
+    REQUESTS_IN_PROGRESS.labels(endpoint="/ask").inc()
+    start = time.monotonic()
+
+    async def event_generator() -> AsyncIterator[str]:
+        try:
+            async for event in stream_agent(
+                app.state.agent,
+                request.question,
+                session_id=session_id,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event.get("type") == "answer":
+                    REQUESTS_TOTAL.labels(endpoint="/ask", status="success").inc()
+                elif event.get("type") == "error":
+                    REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
+        except Exception as exc:
+            logger.exception("Streaming agent invocation failed")
+            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+            REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
+        finally:
+            duration = time.monotonic() - start
+            REQUEST_DURATION.labels(endpoint="/ask").observe(duration)
+            REQUESTS_IN_PROGRESS.labels(endpoint="/ask").dec()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/health", response_model=HealthResponse)

@@ -3,6 +3,7 @@
 Talks to the FastAPI backend via httpx. Run with: make ui
 """
 
+import json
 import os
 from uuid import uuid4
 
@@ -92,28 +93,71 @@ if prompt := st.chat_input("Ask about your infrastructure..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Call the API
+    # Call the streaming API
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                resp = httpx.post(
-                    f"{API_URL}/ask",
-                    json={"question": prompt, "session_id": st.session_state.session_id},
-                    timeout=120.0,
-                )
-                resp.raise_for_status()
-                data: dict[str, str] = resp.json()
-                answer = data.get("response", "No response received.")
-                # Update session_id in case the server generated one
-                returned_sid = data.get("session_id")
-                if returned_sid:
-                    st.session_state.session_id = returned_sid
-            except httpx.ConnectError:
-                answer = "Cannot reach the API server. Make sure `make serve` is running."
-            except httpx.HTTPStatusError as exc:
-                answer = f"API error (HTTP {exc.response.status_code}): {exc.response.text}"
-            except Exception as exc:
-                answer = f"Unexpected error: {exc}"
+        status_area = st.empty()
+        answer_area = st.empty()
+        answer = ""
+        active_tools: list[str] = []
 
-        st.markdown(answer)
+        def _render_status(tools: list[str], current: str = "") -> None:
+            """Render the tool progress display."""
+            lines: list[str] = []
+            for tool_line in tools:
+                lines.append(f"- {tool_line}")
+            if current:
+                lines.append(f"- :hourglass_flowing_sand: {current}")
+            if lines:
+                status_area.markdown("\n".join(lines))
+
+        try:
+            with httpx.stream(
+                "POST",
+                f"{API_URL}/ask/stream",
+                json={"question": prompt, "session_id": st.session_state.session_id},
+                timeout=120.0,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    try:
+                        event: dict[str, str] = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_type = event.get("type", "")
+
+                    if event_type == "status":
+                        _render_status(active_tools, event.get("content", ""))
+
+                    elif event_type == "tool_start":
+                        content = event.get("content", "")
+                        _render_status(active_tools, content)
+
+                    elif event_type == "tool_end":
+                        content = event.get("content", "")
+                        active_tools.append(f":white_check_mark: {content}")
+                        _render_status(active_tools)
+
+                    elif event_type == "answer":
+                        answer = event.get("content", "No response received.")
+                        returned_sid = event.get("session_id")
+                        if returned_sid:
+                            st.session_state.session_id = returned_sid
+
+                    elif event_type == "error":
+                        answer = f"Error: {event.get('content', 'Unknown error')}"
+
+        except httpx.ConnectError:
+            answer = "Cannot reach the API server. Make sure `make serve` is running."
+        except httpx.HTTPStatusError as exc:
+            answer = f"API error (HTTP {exc.response.status_code}): {exc.response.text}"
+        except Exception as exc:
+            answer = f"Unexpected error: {exc}"
+
+        # Clear the status area and show the final answer
+        status_area.empty()
+        answer_area.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})

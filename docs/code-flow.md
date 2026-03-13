@@ -7,7 +7,8 @@
 A user question arrives via one of three interfaces:
 
 - **FastAPI** — `POST /ask` with JSON body `{"question": "...", "session_id": "..."}` (`src/api/main.py`)
-- **Streamlit UI** — chat input sends to FastAPI backend (`src/ui/streamlit_app.py`)
+- **FastAPI (streaming)** — `POST /ask/stream` with the same JSON body, returns Server-Sent Events (`src/api/main.py`)
+- **Streamlit UI** — chat input calls `/ask/stream` SSE endpoint for live tool progress (`src/ui/app.py`)
 - **CLI** — interactive REPL calls the agent directly (`src/cli.py`)
 
 ### 2. Agent Invocation
@@ -16,14 +17,35 @@ A user question arrives via one of three interfaces:
 src/api/main.py::ask()
   -> invoke_agent(agent, message, session_id)
     -> agent.ainvoke({"messages": [HumanMessage(content=message)]}, config)
+
+src/api/main.py::ask_stream()        (SSE endpoint)
+  -> stream_agent(agent, message, session_id)
+    -> agent.astream_events({"messages": [...]}, version="v2")
+    -> yields SSE events: status, tool_start, tool_end, answer, error
 ```
 
 The agent is built once at startup via `build_agent()` and stored in `app.state.agent`. At build time, the system prompt
 template is formatted with the current UTC date/time and a Prometheus retention cutoff (~90 days ago), so the agent
 always knows what "today" is and avoids querying stale time ranges. If the memory store is configured,
 `_get_memory_context()` loads open incidents and recent query patterns into the system prompt as additional context. Each
-request passes through `invoke_agent()` which wraps the LangGraph `ainvoke` call with a session-scoped config for
-conversation memory.
+request passes through `invoke_agent()` (batch) or `stream_agent()` (streaming) which wraps the LangGraph call with a
+session-scoped config for conversation memory.
+
+### Streaming Flow (SSE)
+
+`stream_agent()` uses LangGraph's `astream_events(version="v2")` filtered to `tool` and `chat_model` event types. It
+yields structured dicts as events:
+
+| Event type   | When emitted                        | Content                                      |
+| ------------ | ----------------------------------- | --------------------------------------------- |
+| `status`     | Start of processing                 | "Thinking..."                                 |
+| `tool_start` | Tool execution begins               | Human-readable label + input summary          |
+| `tool_end`   | Tool execution completes            | Label + "done"                                |
+| `answer`     | Final AI response (no tool_calls)   | Response text + session_id                    |
+| `error`      | Unrecoverable error                 | Error message                                 |
+
+The Streamlit UI consumes these events via `httpx.stream()`, rendering a live checklist of tool calls with progress
+indicators before displaying the final answer.
 
 ### 3. Tool Selection
 
@@ -169,10 +191,10 @@ Self-instrumentation metrics are collected at two levels:
 ### Request level (FastAPI)
 
 ```
-POST /ask
+POST /ask (and POST /ask/stream)
   -> REQUESTS_IN_PROGRESS.inc()
   -> start = time.monotonic()
-  -> invoke_agent(...)
+  -> invoke_agent(...) or stream_agent(...)
   -> REQUEST_DURATION.observe(elapsed)
   -> REQUESTS_TOTAL.labels(status="success"|"error").inc()
   -> REQUESTS_IN_PROGRESS.dec()  (in finally block — always runs)

@@ -3,6 +3,8 @@
 Uses TestClient with mocked agent and HTTP calls — no real services needed.
 """
 
+import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -253,3 +255,112 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "unhealthy"
         assert all(c["status"] == "unhealthy" for c in body["components"])
+
+
+# ---------------------------------------------------------------------------
+# POST /ask/stream
+# ---------------------------------------------------------------------------
+
+
+def _parse_sse_events(raw: str) -> list[dict[str, Any]]:
+    """Parse SSE response text into a list of event dicts."""
+    events: list[dict[str, Any]] = []
+    for line in raw.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("data: "):
+            payload = line[6:]
+            events.append(json.loads(payload))
+    return events
+
+
+class TestAskStreamEndpoint:
+    """Tests for POST /ask/stream (SSE)."""
+
+    @pytest.mark.integration
+    def test_streams_status_and_answer(self, client: TestClient) -> None:
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {"type": "status", "content": "Thinking..."}
+            yield {"type": "answer", "content": "CPU at 42%.", "session_id": "abc"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "CPU usage?"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/event-stream; charset=utf-8"
+
+        events = _parse_sse_events(resp.text)
+        types = [e["type"] for e in events]
+        assert "status" in types
+        assert "answer" in types
+
+        answer = next(e for e in events if e["type"] == "answer")
+        assert answer["content"] == "CPU at 42%."
+
+    @pytest.mark.integration
+    def test_streams_tool_events(self, client: TestClient) -> None:
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {"type": "status", "content": "Thinking..."}
+            yield {
+                "type": "tool_start",
+                "content": "Querying Prometheus: `up`",
+                "tool_name": "prometheus_instant_query",
+            }
+            yield {
+                "type": "tool_end",
+                "content": "Querying Prometheus — done",
+                "tool_name": "prometheus_instant_query",
+            }
+            yield {"type": "answer", "content": "All up.", "session_id": "s1"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "nodes up?"},
+            )
+
+        events = _parse_sse_events(resp.text)
+        tool_start = next(e for e in events if e["type"] == "tool_start")
+        assert tool_start["tool_name"] == "prometheus_instant_query"
+
+    @pytest.mark.integration
+    def test_server_generates_session_id(self, client: TestClient) -> None:
+        """When no session_id is provided, the server generates one."""
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            yield {"type": "answer", "content": "ok", "session_id": "generated"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "hello"},
+            )
+
+        events = _parse_sse_events(resp.text)
+        answer = next(e for e in events if e["type"] == "answer")
+        assert "session_id" in answer
+
+    @pytest.mark.integration
+    def test_stream_error_yields_error_event(self, client: TestClient) -> None:
+        async def failing_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            raise RuntimeError("LLM exploded")
+            yield  # noqa: RET503
+
+        with patch("src.api.main.stream_agent", return_value=failing_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "boom"},
+            )
+
+        # SSE endpoint returns 200 with error event in the stream
+        assert resp.status_code == 200
+        events = _parse_sse_events(resp.text)
+        error_event = next(e for e in events if e["type"] == "error")
+        assert "LLM exploded" in error_event["content"]
+
+    @pytest.mark.integration
+    def test_empty_question_returns_422(self, client: TestClient) -> None:
+        resp = client.post("/ask/stream", json={})
+        assert resp.status_code == 422

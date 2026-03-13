@@ -1,6 +1,7 @@
 """LangChain agent assembly — wires tools, system prompt, and memory together."""
 
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -367,3 +368,191 @@ async def invoke_agent(
         response_text += suggestion
 
     return response_text
+
+
+# ---------------------------------------------------------------------------
+# Streaming invocation (SSE-friendly)
+# ---------------------------------------------------------------------------
+
+# Human-readable labels for tools (keep in sync with tool registration)
+_TOOL_LABELS: dict[str, str] = {
+    "prometheus_search_metrics": "Searching Prometheus metrics",
+    "prometheus_instant_query": "Querying Prometheus",
+    "prometheus_range_query": "Querying Prometheus (range)",
+    "grafana_get_alerts": "Checking Grafana alerts",
+    "grafana_get_alert_rules": "Fetching Grafana alert rules",
+    "grafana_get_dashboard": "Loading Grafana dashboard",
+    "grafana_search_dashboards": "Searching Grafana dashboards",
+    "proxmox_list_guests": "Listing Proxmox VMs/CTs",
+    "proxmox_get_guest_config": "Fetching guest config",
+    "proxmox_node_status": "Checking Proxmox node status",
+    "proxmox_list_tasks": "Listing Proxmox tasks",
+    "truenas_pool_status": "Checking TrueNAS pools",
+    "truenas_list_shares": "Listing NFS/SMB shares",
+    "truenas_snapshots": "Listing TrueNAS snapshots",
+    "truenas_system_status": "Checking TrueNAS system status",
+    "truenas_apps": "Listing TrueNAS apps",
+    "hdd_power_status": "Checking HDD power states",
+    "loki_query_logs": "Querying Loki logs",
+    "loki_metric_query": "Running Loki metric query",
+    "loki_list_label_values": "Listing Loki label values",
+    "loki_correlate_changes": "Correlating log changes",
+    "pbs_datastore_status": "Checking PBS datastore",
+    "pbs_list_backups": "Listing PBS backups",
+    "pbs_list_tasks": "Listing PBS tasks",
+    "runbook_search": "Searching runbooks",
+}
+
+
+def _summarize_tool_input(tool_name: str, tool_input: Any) -> str:
+    """Create a brief human-readable summary of the tool input."""
+    if not isinstance(tool_input, dict):
+        return ""
+    # For prometheus queries, show the PromQL expression
+    if "query" in tool_input:
+        query = tool_input["query"]
+        if isinstance(query, str) and len(query) <= 120:
+            return f"`{query}`"
+        if isinstance(query, str):
+            return f"`{query[:117]}...`"
+    # For search tools, show the search term
+    if "search_term" in tool_input:
+        return f"`{tool_input['search_term']}`"
+    if "pattern" in tool_input:
+        return f"`{tool_input['pattern']}`"
+    # For dashboard lookups
+    if "uid" in tool_input:
+        return f"uid={tool_input['uid']}"
+    # For guest config
+    if "vmid" in tool_input:
+        return f"vmid={tool_input['vmid']}"
+    return ""
+
+
+async def stream_agent(
+    agent: AgentGraph,
+    message: str,
+    session_id: str = "default",
+) -> AsyncIterator[dict[str, str]]:
+    """Stream agent events as dicts suitable for SSE.
+
+    Yields dicts with keys:
+      - type: "status" | "tool_start" | "tool_end" | "answer" | "error"
+      - content: human-readable text
+      - tool_name (optional): raw tool name for tool events
+      - session_id (only on "answer"): the effective session ID
+
+    Uses astream_events(version="v2") to capture tool calls and
+    the final AI response in real time.
+    """
+    settings = get_settings()
+    effective_session_id = session_id
+
+    metrics_cb = MetricsCallbackHandler()
+    config: RunnableConfig = {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [metrics_cb],
+    }
+
+    yield {"type": "status", "content": "Thinking..."}
+
+    all_messages: list[Any] = []
+    response_text = "No response generated."
+
+    try:
+        async for event in agent.astream_events(  # pyright: ignore[reportUnknownMemberType]
+            {"messages": [HumanMessage(content=message)]},
+            config=config,
+            version="v2",
+            include_types=["tool", "chat_model"],
+        ):
+            event_type: str = event.get("event", "")
+            event_name: str = event.get("name", "")
+            data: dict[str, Any] = event.get("data", {})
+
+            if event_type == "on_tool_start":
+                label = _TOOL_LABELS.get(event_name, f"Running {event_name}")
+                summary = _summarize_tool_input(event_name, data.get("input"))
+                content = f"{label}: {summary}" if summary else label
+                yield {
+                    "type": "tool_start",
+                    "content": content,
+                    "tool_name": event_name,
+                }
+
+            elif event_type == "on_tool_end":
+                label = _TOOL_LABELS.get(event_name, event_name)
+                yield {
+                    "type": "tool_end",
+                    "content": f"{label} — done",
+                    "tool_name": event_name,
+                }
+
+            elif event_type == "on_chat_model_end":
+                # Capture the final AI message from the last LLM call
+                output = data.get("output")
+                if (
+                    isinstance(output, AIMessage)
+                    and isinstance(output.content, str)
+                    and output.content
+                    and not output.tool_calls
+                ):
+                    response_text = output.content
+
+    except Exception as exc:
+        if _is_tool_call_pairing_error(exc):
+            fresh_id = f"{session_id}-{uuid4().hex[:6]}"
+            effective_session_id = fresh_id
+            logger.warning(
+                "Session '%s' has corrupted tool-call history; retrying with fresh session '%s'",
+                session_id,
+                fresh_id,
+            )
+            yield {"type": "status", "content": "Retrying with fresh session..."}
+            fresh_cb = MetricsCallbackHandler()
+            fresh_config: RunnableConfig = {
+                "configurable": {"thread_id": fresh_id},
+                "callbacks": [fresh_cb],
+            }
+            # Fall back to non-streaming invoke for the retry
+            result: dict[str, Any] = await agent.ainvoke(
+                {"messages": [HumanMessage(content=message)]},
+                config=fresh_config,
+            )
+            messages: list[Any] = result.get("messages", [])
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
+                    response_text = msg.content
+                    break
+        else:
+            yield {"type": "error", "content": f"Agent error: {exc}"}
+            return
+
+    # Persist conversation history if configured
+    if settings.conversation_history_dir:
+        # For streaming, we need to get messages from the checkpoint
+        try:
+            snapshot = await agent.aget_state(config)  # pyright: ignore[reportUnknownMemberType]
+            all_messages = snapshot.values.get("messages", [])  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        except Exception:
+            logger.debug("Failed to get state for conversation history", exc_info=True)
+
+        if all_messages:
+            active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
+            save_conversation(
+                settings.conversation_history_dir,
+                effective_session_id,
+                all_messages,
+                active_model,
+            )
+
+    # Post-response actions
+    suggestion = _post_response_actions(all_messages, message, response_text)
+    if suggestion:
+        response_text += suggestion
+
+    yield {
+        "type": "answer",
+        "content": response_text,
+        "session_id": effective_session_id,
+    }

@@ -12,7 +12,7 @@ The agent uses two distinct data access patterns:
 ```
                          User Question
                               |
-                         FastAPI /ask
+                    FastAPI /ask or /ask/stream
                               |
                        LangChain Agent
                         (tool router)
@@ -144,8 +144,9 @@ Three layers:
    - **Cost estimation** — matches model name against a pricing table, falls back to conservative defaults for unknown
      models
 
-3. **FastAPI instrumentation** (`src/api/main.py`) — request-level timing/counting on `/ask` and `/report` + `/metrics`
-   endpoint + health gauge updates on `/health` + report metrics on `/report` + app info set at startup
+3. **FastAPI instrumentation** (`src/api/main.py`) — request-level timing/counting on `/ask`, `/ask/stream`, and
+   `/report` + `/metrics` endpoint + health gauge updates on `/health` + report metrics on `/report` + app info set at
+   startup
 
 ### Grafana Dashboard
 

@@ -241,6 +241,7 @@ _generate_narrative(collected_data)  → Single LLM call for executive summary
   |
   v
 format_report_markdown(report_data)  → Markdown with 7 sections
+format_report_html(report_data)      → HTML email with inline CSS
   |
   v
 _archive_report()                    → Memory store (auto-save, if configured)
@@ -264,8 +265,8 @@ for that section — the report is always generated, even with partial data.
 
 - **On-demand** — `POST /report` endpoint returns markdown + optional email delivery
 - **Scheduled** — APScheduler `AsyncIOScheduler` with configurable cron expression (`REPORT_SCHEDULE_CRON`)
-- **CLI** — `make report` prints to stdout
-- **Email** — plain-text markdown via Gmail SMTP with STARTTLS (if `SMTP_*` settings configured)
+- **CLI** — `make report` prints markdown to stdout
+- **Email** — multipart/alternative (HTML + plain-text fallback) via Gmail SMTP with STARTTLS (if `SMTP_*` configured). HTML uses inline CSS for email-client compatibility with styled tables, colored PASS/FAIL badges, and delta indicators.
 
 ### Metrics
 

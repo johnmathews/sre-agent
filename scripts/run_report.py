@@ -21,8 +21,8 @@ logging.basicConfig(
 async def main() -> None:
     """Generate and print the report."""
     try:
-        report = await generate_report()
-        print(report)
+        result = await generate_report()
+        print(result.markdown)
     except Exception as e:
         print(f"Failed to generate report: {e}", file=sys.stderr)
         sys.exit(1)

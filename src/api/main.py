@@ -361,10 +361,10 @@ async def report(request: ReportRequest | None = None) -> ReportResponse:
     start = time.monotonic()
 
     try:
-        markdown = await generate_report(lookback_days)
+        result = await generate_report(lookback_days)
         emailed = False
         if is_email_configured():
-            emailed = await asyncio.to_thread(send_report_email, markdown)
+            emailed = await asyncio.to_thread(send_report_email, result.markdown, result.html)
 
         duration = time.monotonic() - start
         REPORTS_TOTAL.labels(trigger="manual", status="success").inc()
@@ -373,7 +373,7 @@ async def report(request: ReportRequest | None = None) -> ReportResponse:
         REQUEST_DURATION.labels(endpoint="/report").observe(duration)
 
         return ReportResponse(
-            report=markdown,
+            report=result.markdown,
             emailed=emailed,
             timestamp=datetime.now(UTC).isoformat(),
         )

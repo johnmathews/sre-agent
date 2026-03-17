@@ -390,12 +390,15 @@ class TestGenerateReport:
             mock_llm.ainvoke = fake_ainvoke
             mock_llm_cls.return_value = mock_llm
 
-            report = await generate_report(7)
+            result = await generate_report(7)
 
-        assert "# Weekly Reliability Report" in report
-        assert "Test narrative summary." in report
-        assert "## Alert Summary" in report
-        assert "## SLO Status" in report
+        assert "# Weekly Reliability Report" in result.markdown
+        assert "Test narrative summary." in result.markdown
+        assert "## Alert Summary" in result.markdown
+        assert "## SLO Status" in result.markdown
+        # HTML output also generated
+        assert "<!DOCTYPE html>" in result.html
+        assert "Test narrative summary." in result.html
 
     @respx.mock
     async def test_report_with_all_services_down(self, mock_settings: Any) -> None:
@@ -416,11 +419,11 @@ class TestGenerateReport:
             mock_llm.ainvoke = fake_ainvoke
             mock_llm_cls.return_value = mock_llm
 
-            report = await generate_report(7)
+            result = await generate_report(7)
 
-        assert "# Weekly Reliability Report" in report
-        assert "Alert data unavailable" in report
-        assert "SLO data unavailable" in report
+        assert "# Weekly Reliability Report" in result.markdown
+        assert "Alert data unavailable" in result.markdown
+        assert "SLO data unavailable" in result.markdown
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +432,24 @@ class TestGenerateReport:
 
 
 class TestSendReportEmail:
-    def test_send_success(self, mock_settings: Any) -> None:
+    def test_send_success_html(self, mock_settings: Any) -> None:
+        """HTML email is sent as multipart/alternative."""
+        with patch("src.report.email.smtplib.SMTP") as mock_smtp_cls:
+            mock_server = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            result = send_report_email("# Test Report", "<h1>Test Report</h1>")
+
+        assert result is True
+        mock_server.starttls.assert_called_once()
+        mock_server.login.assert_called_once_with("test@test.com", "test-password")
+        mock_server.send_message.assert_called_once()
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_content_type() == "multipart/alternative"
+
+    def test_send_success_plain_only(self, mock_settings: Any) -> None:
+        """Plain-text fallback when no HTML provided."""
         with patch("src.report.email.smtplib.SMTP") as mock_smtp_cls:
             mock_server = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_server)
@@ -438,8 +458,6 @@ class TestSendReportEmail:
             result = send_report_email("# Test Report")
 
         assert result is True
-        mock_server.starttls.assert_called_once()
-        mock_server.login.assert_called_once_with("test@test.com", "test-password")
         mock_server.send_message.assert_called_once()
 
     def test_send_failure(self, mock_settings: Any) -> None:

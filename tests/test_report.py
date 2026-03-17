@@ -16,6 +16,7 @@ from src.report.generator import (
     _aggregate_by_normalized_name,
     _format_slo_row,
     _normalize_service_name,
+    format_report_html,
     format_report_markdown,
 )
 
@@ -358,6 +359,49 @@ class TestFormatBackupHealth:
         )
         md = format_report_markdown(data)
         assert "All backups are fresh" in md
+
+
+class TestFormatReportHtml:
+    def test_complete_report_html(self) -> None:
+        """HTML output contains all sections and proper structure."""
+        data = _complete_report_data()
+        html = format_report_html(data)
+        assert "<!DOCTYPE html>" in html
+        assert "Weekly Reliability Report" in html
+        assert "Executive Summary" in html
+        assert "Alert Summary" in html
+        assert "SLO Status" in html
+        assert "Tool Usage" in html
+        assert "Cost &amp; Token Usage" in html
+        assert "<table" in html
+
+    def test_html_pass_fail_badges(self) -> None:
+        """SLO table includes styled PASS/FAIL badges."""
+        data = _complete_report_data()
+        html = format_report_html(data)
+        assert "PASS" in html
+        assert "#d4edda" in html  # PASS badge background
+
+    def test_html_escapes_content(self) -> None:
+        """User-provided content is HTML-escaped."""
+        data = _complete_report_data()
+        data["narrative"] = "- Alert <script>alert(1)</script> status is fine"
+        html = format_report_html(data)
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_html_missing_sections(self) -> None:
+        """HTML renders gracefully when data sections are None."""
+        data = _complete_report_data()
+        data["alerts"] = None
+        data["slo_status"] = None
+        data["tool_usage"] = None
+        data["cost"] = None
+        html = format_report_html(data)
+        assert "Alert data unavailable" in html
+        assert "SLO data unavailable" in html
+        assert "Tool usage data unavailable" in html
+        assert "Cost data unavailable" in html
 
 
 class TestIsEmailConfigured:

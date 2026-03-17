@@ -26,9 +26,9 @@ async def _scheduled_report_job() -> None:
     """Async job executed by the scheduler: generate report, email, record metrics."""
     start = time.monotonic()
     try:
-        report = await generate_report()
+        result = await generate_report()
         if is_email_configured():
-            emailed = await asyncio.to_thread(send_report_email, report)
+            emailed = await asyncio.to_thread(send_report_email, result.markdown, result.html)
             if emailed:
                 logger.info("Scheduled report emailed successfully")
             else:

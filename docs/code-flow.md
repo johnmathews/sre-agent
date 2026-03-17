@@ -323,13 +323,16 @@ POST /report {lookback_days: 7}
                )
        -> _load_previous_report()              # Memory store (if configured)
        -> _generate_narrative(collected, prev)  # Single LLM call with prior context
-       -> format_report_markdown(report_data)   # Pure function
+       -> format_report_markdown(report_data)   # Pure function → markdown
+       -> format_report_html(report_data)       # Pure function → HTML email
        -> _archive_report(report_data, md)      # Memory store (if configured)
        -> _compute_post_report_baselines(days)  # Prometheus → Memory (if configured)
-  -> send_report_email(markdown)  (if SMTP configured)
+       -> return GeneratedReport(markdown, html)
+  -> send_report_email(result.markdown, result.html)  (if SMTP configured)
+       # Sends multipart/alternative: HTML + plain-text fallback
   -> REPORTS_TOTAL.labels(trigger="manual", status="success").inc()
   -> REPORT_DURATION.observe(elapsed)
-  -> return ReportResponse(report=markdown, emailed=bool, timestamp=iso)
+  -> return ReportResponse(report=result.markdown, emailed=bool, timestamp=iso)
 ```
 
 ### Scheduled (APScheduler)
@@ -339,8 +342,8 @@ start_scheduler()  (called in FastAPI lifespan)
   -> CronTrigger.from_crontab(settings.report_schedule_cron)
   -> AsyncIOScheduler.add_job(_scheduled_report_job)
   -> _scheduled_report_job()  (fires on cron schedule)
-       -> generate_report()
-       -> send_report_email()  (if configured)
+       -> generate_report()  → GeneratedReport(markdown, html)
+       -> send_report_email(result.markdown, result.html)  (if configured)
        -> REPORTS_TOTAL.labels(trigger="scheduled", status=...).inc()
 ```
 

@@ -7,15 +7,17 @@ report is always produced.
 """
 
 import asyncio
+import html as html_mod
 import json
 import logging
 import ssl
 from datetime import UTC, datetime
-from typing import NotRequired, TypedDict
+from typing import NamedTuple, NotRequired, TypedDict
 
 import httpx
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.agent.llm import create_llm
+from src.agent.llm import _is_oauth_token, create_llm
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,13 @@ class ReportData(TypedDict):
     loki_errors: LokiErrorSummary | None
     backup_health: NotRequired[BackupHealthData | None]
     narrative: str
+
+
+class GeneratedReport(NamedTuple):
+    """Both markdown and HTML renderings of a report."""
+
+    markdown: str
+    html: str
 
 
 # ---------------------------------------------------------------------------
@@ -639,8 +648,7 @@ async def _generate_narrative(
     settings = get_settings()
     try:
         llm = create_llm(settings, temperature=0.3)
-        prompt = (
-            "You are an SRE assistant writing a weekly reliability report summary. "
+        user_prompt = (
             "Given the following infrastructure data as JSON, write 3-5 concise bullet "
             "points (one line each, starting with '- '). Cover: alert status, any SLO "
             "violations (mention which components if per-component data is available), "
@@ -653,12 +661,19 @@ async def _generate_narrative(
         if previous_report:
             # Truncate to avoid blowing up the context window
             truncated = previous_report[:3000]
-            prompt += f"\n\nPrevious report for context (compare and note changes/trends):\n```\n{truncated}\n```"
-        response = await llm.ainvoke(prompt)
+            user_prompt += f"\n\nPrevious report for context (compare and note changes/trends):\n```\n{truncated}\n```"
+
+        # OAuth tokens require the system prompt to identify as Claude Code.
+        system_text = "You are an SRE assistant writing a weekly reliability report summary."
+        if settings.llm_provider == "anthropic" and _is_oauth_token(settings.anthropic_api_key):
+            system_text = "You are Claude Code, Anthropic's official CLI for Claude.\n\n" + system_text
+
+        messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
+        response = await llm.ainvoke(messages)
         return str(response.content)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to generate narrative")
-        return "Narrative unavailable — LLM call failed."
+        return f"Narrative unavailable — LLM call failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -901,12 +916,384 @@ def format_report_markdown(data: ReportData) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HTML formatter
+# ---------------------------------------------------------------------------
+
+# Inline styles for email-safe HTML (email clients ignore <style> blocks)
+_BODY_STYLE = (
+    "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; "
+    "color: #1a1a2e; background-color: #f8f9fa; margin: 0; padding: 0;"
+)
+_CONTAINER_STYLE = "max-width: 680px; margin: 0 auto; padding: 24px 20px;"
+_HEADER_STYLE = (
+    "font-size: 22px; font-weight: 700; color: #1a1a2e; "
+    "border-bottom: 3px solid #4361ee; padding-bottom: 12px; margin-bottom: 4px;"
+)
+_META_STYLE = "font-size: 13px; color: #6c757d; margin-bottom: 24px;"
+_SECTION_STYLE = (
+    "background: #ffffff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 16px;"
+)
+_H2_STYLE = "font-size: 16px; font-weight: 600; color: #1a1a2e; margin: 0 0 12px 0;"
+_TABLE_STYLE = (
+    "width: 100%; border-collapse: collapse; font-size: 13px; font-family: "
+    "'SF Mono', 'Fira Code', 'Consolas', monospace;"
+)
+_TH_STYLE = (
+    "text-align: left; padding: 8px 12px; border-bottom: 2px solid #dee2e6; "
+    "color: #495057; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;"
+)
+_TD_STYLE = "padding: 7px 12px; border-bottom: 1px solid #f0f0f0;"
+_TD_RIGHT_STYLE = _TD_STYLE + " text-align: right;"
+_PASS_STYLE = (
+    "display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; "
+    "font-weight: 600; background-color: #d4edda; color: #155724;"
+)
+_FAIL_STYLE = (
+    "display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; "
+    "font-weight: 600; background-color: #f8d7da; color: #721c24;"
+)
+_WARN_STYLE = (
+    "display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; "
+    "font-weight: 600; background-color: #fff3cd; color: #856404;"
+)
+_BULLET_STYLE = "margin: 4px 0; padding: 0; line-height: 1.6;"
+_CODE_STYLE = (
+    "font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; "
+    "background: #f6f8fa; padding: 8px 12px; border-radius: 4px; display: block; "
+    "overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #d63384; "
+    "border: 1px solid #e9ecef; margin: 4px 0;"
+)
+_STALE_STYLE = "color: #dc3545; font-weight: 600;"
+_DELTA_UP_STYLE = "color: #dc3545;"
+_DELTA_DOWN_STYLE = "color: #28a745;"
+_DELTA_NEW_STYLE = "color: #dc3545; font-weight: 600;"
+_FOOTER_STYLE = "font-size: 11px; color: #adb5bd; text-align: center; margin-top: 24px;"
+
+
+def _esc(text: str) -> str:
+    """HTML-escape a string."""
+    return html_mod.escape(str(text))
+
+
+def _html_table(
+    headers: list[str],
+    rows: list[list[str]],
+    right_align: set[int] | None = None,
+    raw_html_cols: set[int] | None = None,
+) -> str:
+    """Build an HTML table with inline styles.
+
+    Args:
+        headers: Column header strings.
+        rows: List of rows, each a list of cell strings.
+        right_align: Set of column indices to right-align.
+        raw_html_cols: Column indices whose cell content is already HTML (not escaped).
+    """
+    right_align = right_align or set()
+    raw_html_cols = raw_html_cols or set()
+    parts = [f'<table style="{_TABLE_STYLE}"><thead><tr>']
+    for i, h in enumerate(headers):
+        align = " text-align: right;" if i in right_align else ""
+        parts.append(f'<th style="{_TH_STYLE}{align}">{_esc(h)}</th>')
+    parts.append("</tr></thead><tbody>")
+    for ri, row in enumerate(rows):
+        bg = " background-color: #f8f9fa;" if ri % 2 == 1 else ""
+        parts.append(f'<tr style="{bg}">')
+        for i, cell in enumerate(row):
+            style = _TD_RIGHT_STYLE if i in right_align else _TD_STYLE
+            content = cell if i in raw_html_cols else _esc(cell)
+            parts.append(f'<td style="{style}">{content}</td>')
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _status_badge(status: str) -> str:
+    """Return an inline HTML badge for PASS/FAIL/WARN."""
+    styles = {"PASS": _PASS_STYLE, "FAIL": _FAIL_STYLE, "WARN": _WARN_STYLE}
+    style = styles.get(status)
+    if style:
+        return f'<span style="{style}">{_esc(status)}</span>'
+    return _esc(status)
+
+
+def _delta_html(delta_str: str) -> str:
+    """Wrap a delta string in colored HTML."""
+    if delta_str == "new":
+        return f'<span style="{_DELTA_NEW_STYLE}">new</span>'
+    if delta_str.startswith("+"):
+        return f'<span style="{_DELTA_UP_STYLE}">{_esc(delta_str)}</span>'
+    if delta_str.startswith("-"):
+        return f'<span style="{_DELTA_DOWN_STYLE}">{_esc(delta_str)}</span>'
+    return _esc(delta_str)
+
+
+def format_report_html(data: ReportData) -> str:
+    """Convert structured ReportData into an email-safe HTML document."""
+    sections: list[str] = []
+
+    # --- Executive Summary ---
+    narrative = data["narrative"]
+    narrative_html_lines: list[str] = []
+    for line in narrative.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            narrative_html_lines.append(f'<p style="{_BULLET_STYLE}">&bull; {_esc(stripped[2:])}</p>')
+        elif stripped:
+            narrative_html_lines.append(f'<p style="{_BULLET_STYLE}">{_esc(stripped)}</p>')
+    sections.append(
+        f'<div style="{_SECTION_STYLE}">'
+        f'<h2 style="{_H2_STYLE}">Executive Summary</h2>'
+        f"{''.join(narrative_html_lines)}"
+        f"</div>"
+    )
+
+    # --- Alert Summary ---
+    alerts = data.get("alerts")
+    alert_body = ""
+    if alerts is None:
+        alert_body = '<p style="color: #6c757d; font-style: italic;">Alert data unavailable.</p>'
+    else:
+        parts = [
+            f'<p style="{_BULLET_STYLE}">Total alert rules: <strong>{alerts["total_rules"]}</strong></p>',
+            f'<p style="{_BULLET_STYLE}">Currently active: <strong>{alerts["active_alerts"]}</strong></p>',
+        ]
+        if alerts["alerts_by_severity"]:
+            sev = ", ".join(f"{s}: {c}" for s, c in sorted(alerts["alerts_by_severity"].items()))
+            parts.append(f'<p style="{_BULLET_STYLE}">By severity: {_esc(sev)}</p>')
+        if alerts["active_alert_names"]:
+            names = ", ".join(alerts["active_alert_names"])
+            parts.append(f'<p style="{_BULLET_STYLE}">Active alerts: {_esc(names)}</p>')
+        alert_body = "".join(parts)
+    sections.append(f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">Alert Summary</h2>{alert_body}</div>')
+
+    # --- SLO Status ---
+    slo = data.get("slo_status")
+    if slo is None:
+        slo_body = '<p style="color: #6c757d; font-style: italic;">SLO data unavailable.</p>'
+    else:
+        slo_rows_raw = [
+            _format_slo_row("P95 Latency", "< 15s", slo["p95_latency_seconds"], higher_is_better=False),
+            _format_slo_row("Tool Success Rate", "> 99%", slo["tool_success_rate"]),
+            _format_slo_row("LLM Error Rate", "< 1%", slo["llm_error_rate"], higher_is_better=False),
+            _format_slo_row("Availability", "> 99.5%", slo["availability"]),
+        ]
+        # Replace status text with badges
+        slo_rows_html = [[r[0], r[1], r[2], _status_badge(r[3])] for r in slo_rows_raw]
+        slo_body = _html_table(
+            ["Metric", "Target", "Actual", "Status"],
+            slo_rows_html,
+            right_align={2},
+            raw_html_cols={3},
+        )
+        # Component availability
+        comp_avail = slo.get("component_availability", {})
+        if comp_avail:
+            degraded = {k: v for k, v in comp_avail.items() if v < 1.0}
+            if degraded:
+                comp_lines = [
+                    '<p style="margin-top: 12px; font-size: 13px; color: #495057;">'
+                    "Components with degraded availability:</p>"
+                ]
+                for comp, val in sorted(degraded.items(), key=lambda x: x[1]):
+                    pct_str = f"{val * 100:.2f}%"
+                    style = _WARN_STYLE if val >= 0.995 else _FAIL_STYLE
+                    comp_lines.append(
+                        f'<p style="{_BULLET_STYLE} font-size: 13px;">'
+                        f'&bull; {_esc(comp)}: <span style="{style}">{pct_str}</span></p>'
+                    )
+                slo_body += "".join(comp_lines)
+    sections.append(f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">SLO Status</h2>{slo_body}</div>')
+
+    # --- Tool Usage ---
+    usage = data.get("tool_usage")
+    if usage is None:
+        tool_body = '<p style="color: #6c757d; font-style: italic;">Tool usage data unavailable.</p>'
+    elif not usage["tool_calls"] or not any(v > 0 for v in usage["tool_calls"].values()):
+        tool_body = '<p style="color: #6c757d; font-style: italic;">No tool calls recorded in this period.</p>'
+    else:
+        active = {k: v for k, v in usage["tool_calls"].items() if v > 0}
+        inactive_count = len(usage["tool_calls"]) - len(active)
+        tool_rows: list[list[str]] = []
+        for tool_name, calls in sorted(active.items(), key=lambda x: x[1], reverse=True):
+            errors = usage["tool_errors"].get(tool_name, 0)
+            err_rate = f"{errors / calls * 100:.1f}%" if calls > 0 else "0.0%"
+            tool_rows.append([tool_name, str(calls), str(errors), err_rate])
+        tool_body = _html_table(
+            ["Tool", "Calls", "Errors", "Error Rate"],
+            tool_rows,
+            right_align={1, 2, 3},
+        )
+        if inactive_count > 0:
+            tool_body += (
+                f'<p style="font-size: 12px; color: #6c757d; margin-top: 8px;">'
+                f"{inactive_count} registered tools had no calls this period.</p>"
+            )
+    sections.append(f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">Tool Usage</h2>{tool_body}</div>')
+
+    # --- Cost & Token Usage ---
+    cost = data.get("cost")
+    if cost is None:
+        cost_body = '<p style="color: #6c757d; font-style: italic;">Cost data unavailable.</p>'
+    else:
+        cost_body = (
+            f'<p style="{_BULLET_STYLE}">Prompt tokens: <strong>{cost["prompt_tokens"]:,}</strong></p>'
+            f'<p style="{_BULLET_STYLE}">Completion tokens: <strong>{cost["completion_tokens"]:,}</strong></p>'
+            f'<p style="{_BULLET_STYLE}">Total tokens: <strong>{cost["total_tokens"]:,}</strong></p>'
+            f'<p style="{_BULLET_STYLE}">Estimated cost: '
+            f"<strong>${cost['estimated_cost_usd']:.4f}</strong></p>"
+        )
+    sections.append(
+        f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">Cost &amp; Token Usage</h2>{cost_body}</div>'
+    )
+
+    # --- Log Error Summary ---
+    loki = data.get("loki_errors")
+    if loki is not None:
+        if loki["errors_by_service"]:
+            # Total with delta
+            total_str = f"Total errors/critical logs: <strong>{loki['total_errors']:,}</strong>"
+            prev_total = loki.get("previous_total_errors")
+            if prev_total is not None:
+                delta = loki["total_errors"] - prev_total
+                if delta > 0:
+                    pct = (delta / prev_total * 100) if prev_total > 0 else 0.0
+                    total_str += (
+                        f' <span style="{_DELTA_UP_STYLE}">(up {delta:,} / {pct:.0f}% from previous period)</span>'
+                    )
+                elif delta < 0:
+                    pct = (abs(delta) / prev_total * 100) if prev_total > 0 else 0.0
+                    total_str += (
+                        f' <span style="{_DELTA_DOWN_STYLE}">'
+                        f"(down {abs(delta):,} / {pct:.0f}% from previous period)</span>"
+                    )
+                else:
+                    total_str += " (unchanged from previous period)"
+
+            # Per-service table
+            max_loki_rows = 10
+            sorted_services = sorted(loki["errors_by_service"].items(), key=lambda x: x[1], reverse=True)
+            shown = sorted_services[:max_loki_rows]
+            remaining = sorted_services[max_loki_rows:]
+
+            prev_by_service = loki.get("previous_errors_by_service")
+            if prev_by_service is not None:
+                loki_rows: list[list[str]] = []
+                for service, count in shown:
+                    prev_count = prev_by_service.get(service, 0)
+                    d = count - prev_count
+                    delta_str = f"+{d}" if d > 0 else str(d)
+                    if prev_count == 0 and count > 0:
+                        delta_str = "new"
+                    loki_rows.append([service, str(count), _delta_html(delta_str)])
+                loki_table = _html_table(
+                    ["Service", "Errors", "vs Prev"],
+                    loki_rows,
+                    right_align={1, 2},
+                    raw_html_cols={2},
+                )
+            else:
+                loki_rows_simple = [[service, str(count)] for service, count in shown]
+                loki_table = _html_table(["Service", "Errors"], loki_rows_simple, right_align={1})
+
+            remaining_html = ""
+            if remaining:
+                remaining_total = sum(c for _, c in remaining)
+                remaining_html = (
+                    f'<p style="font-size: 12px; color: #6c757d; margin-top: 4px;">'
+                    f"+ {len(remaining)} more services ({remaining_total:,} errors)</p>"
+                )
+
+            # Error samples
+            samples = loki.get("error_samples", {})
+            samples_html = ""
+            if samples:
+                sample_parts = ['<p style="margin-top: 12px; font-size: 13px; color: #495057;">Top error samples:</p>']
+                for service, sample in samples.items():
+                    sample_parts.append(
+                        f'<p style="margin: 2px 0; font-size: 12px;">'
+                        f"<strong>{_esc(service)}:</strong></p>"
+                        f'<code style="{_CODE_STYLE}">{_esc(sample)}</code>'
+                    )
+                samples_html = "".join(sample_parts)
+
+            loki_body = f'<p style="{_BULLET_STYLE}">{total_str}</p>{loki_table}{remaining_html}{samples_html}'
+        else:
+            loki_body = (
+                '<p style="color: #6c757d; font-style: italic;">No error/critical logs recorded in this period.</p>'
+            )
+        sections.append(
+            f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">Log Error Summary</h2>{loki_body}</div>'
+        )
+
+    # --- Backup Health ---
+    backup = data.get("backup_health")
+    if backup is not None:
+        backup_parts: list[str] = []
+        if backup["datastores"]:
+            for ds in backup["datastores"]:
+                total_tib = ds["total_bytes"] / (1024**4)
+                used_tib = ds["used_bytes"] / (1024**4)
+                backup_parts.append(
+                    f'<p style="{_BULLET_STYLE}">'
+                    f"<strong>{_esc(ds['store'])}:</strong> "
+                    f"{used_tib:.1f} / {total_tib:.1f} TiB ({ds['usage_percent']:.1f}% used)</p>"
+                )
+        if backup["backups"]:
+            backup_parts.append(
+                f'<p style="{_BULLET_STYLE}">Backup groups: '
+                f"<strong>{backup['total_count']}</strong> total, "
+                f"<strong>{backup['stale_count']}</strong> stale (&gt;24h)</p>"
+            )
+            stale = [b for b in backup["backups"] if b["stale"]]
+            if stale:
+                backup_parts.append(
+                    '<p style="margin-top: 8px; font-size: 13px; color: #495057;">'
+                    "Stale backups (last backup &gt;24h ago):</p>"
+                )
+                type_labels = {"vm": "VM", "ct": "CT", "host": "Host"}
+                for b in sorted(stale, key=lambda x: x["last_backup_ts"]):
+                    label = type_labels.get(b["backup_type"], b["backup_type"])
+                    age_h = (int(datetime.now(UTC).timestamp()) - b["last_backup_ts"]) / 3600
+                    backup_parts.append(
+                        f'<p style="{_BULLET_STYLE} font-size: 13px;">'
+                        f'&bull; <span style="{_STALE_STYLE}">'
+                        f"{_esc(label)}/{_esc(b['backup_id'])}</span>: "
+                        f"{age_h:.0f}h ago ({b['backup_count']} snapshots)</p>"
+                    )
+            else:
+                backup_parts.append(f'<p style="{_BULLET_STYLE}">All backups are fresh (&lt;24h).</p>')
+        else:
+            backup_parts.append('<p style="color: #6c757d; font-style: italic;">No backup groups found.</p>')
+        sections.append(
+            f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">Backup Health</h2>{"".join(backup_parts)}</div>'
+        )
+
+    # --- Assemble full HTML document ---
+    return (
+        "<!DOCTYPE html>"
+        '<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+        "<title>Weekly Reliability Report</title></head>"
+        f'<body style="{_BODY_STYLE}">'
+        f'<div style="{_CONTAINER_STYLE}">'
+        f'<h1 style="{_HEADER_STYLE}">Weekly Reliability Report</h1>'
+        f'<p style="{_META_STYLE}">'
+        f"Generated: {_esc(data['generated_at'])} &middot; "
+        f"Lookback: {data['lookback_days']} days</p>"
+        f"{''.join(sections)}"
+        f'<p style="{_FOOTER_STYLE}">Generated by SRE Assistant</p>'
+        f"</div></body></html>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
 
-async def generate_report(lookback_days: int | None = None) -> str:
-    """Generate a full weekly reliability report as markdown.
+async def generate_report(lookback_days: int | None = None) -> GeneratedReport:
+    """Generate a full weekly reliability report in both markdown and HTML.
 
     After generation, archives the report to the memory store (if configured)
     and triggers baseline computation. Loads the previous report to provide
@@ -916,7 +1303,7 @@ async def generate_report(lookback_days: int | None = None) -> str:
         lookback_days: Number of days to look back. Defaults to settings value.
 
     Returns:
-        Markdown-formatted report string.
+        A GeneratedReport with .markdown and .html fields.
     """
     settings = get_settings()
     days = lookback_days if lookback_days is not None else settings.report_lookback_days
@@ -941,12 +1328,13 @@ async def generate_report(lookback_days: int | None = None) -> str:
     )
 
     markdown = format_report_markdown(report_data)
+    html = format_report_html(report_data)
 
     # Archive report and compute baselines (non-blocking, best-effort)
     _archive_report(report_data, markdown)
     await _compute_post_report_baselines(days)
 
-    return markdown
+    return GeneratedReport(markdown=markdown, html=html)
 
 
 def _load_previous_report() -> str | None:

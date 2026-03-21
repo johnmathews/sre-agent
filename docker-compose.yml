@@ -31,13 +31,14 @@ services:
     profiles: ["setup"]
 
   sre-api:
-    build: .                                # or: image: sre-assistant
+    build: . # or: image: sre-assistant
     ports:
       - "${SRE_API_PORT:-8000}:8000"
     env_file: .env
     environment:
       - ANONYMIZED_TELEMETRY=False
     restart: unless-stopped
+    mem_limit: 384m
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
@@ -54,13 +55,14 @@ services:
       start_period: 15s
 
   sre-ui:
-    build: .                                # or: image: sre-assistant
+    build: . # or: image: sre-assistant
     command: ["streamlit", "run", "src/ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
     ports:
       - "8501:8501"
     restart: unless-stopped
     environment:
       - API_URL=http://sre-api:8000
+    mem_limit: 96m
     depends_on:
       sre-api:
         condition: service_healthy

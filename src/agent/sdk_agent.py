@@ -209,6 +209,7 @@ async def invoke_sdk_agent(
         disallowed_tools=options.disallowed_tools,
         permission_mode=options.permission_mode,
         max_turns=options.max_turns,
+        env=options.env,
     )
 
     # Load conversation history and build prompt with context
@@ -327,6 +328,7 @@ async def stream_sdk_agent(
         disallowed_tools=options.disallowed_tools,
         permission_mode=options.permission_mode,
         max_turns=options.max_turns,
+        env=options.env,
     )
 
     # Load history

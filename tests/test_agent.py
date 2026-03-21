@@ -11,11 +11,11 @@ from src.agent.agent import (
     SYSTEM_PROMPT_TEMPLATE,
     _extract_ai_text,
     _get_tools,
+    _invoke_langgraph_agent,
     _is_tool_call_pairing_error,
+    _stream_langgraph_agent,
     _summarize_tool_input,
     build_agent,
-    invoke_agent,
-    stream_agent,
 )
 
 
@@ -123,7 +123,8 @@ class TestBuildAgent:
     def test_builds_without_error(self, mock_settings: object) -> None:
         agent = build_agent()
         assert agent is not None
-        assert hasattr(agent, "invoke")
+        assert agent.provider == "openai"
+        assert agent.langgraph_agent is not None
 
     def test_custom_model_name(self, mock_settings: object) -> None:
         agent = build_agent(model_name="gpt-4o")
@@ -178,7 +179,7 @@ class TestInvokeAgent:
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {"messages": [AIMessage(content="CPU is at 42%.")]}
 
-        result = await invoke_agent(mock_agent, "What is CPU?", session_id="s1")
+        result = await _invoke_langgraph_agent(mock_agent, "What is CPU?", session_id="s1")
         assert result == "CPU is at 42%."
 
     @pytest.mark.integration
@@ -186,7 +187,7 @@ class TestInvokeAgent:
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {"messages": []}
 
-        result = await invoke_agent(mock_agent, "hello", session_id="s1")
+        result = await _invoke_langgraph_agent(mock_agent, "hello", session_id="s1")
         assert result == "No response generated."
 
     @pytest.mark.integration
@@ -208,7 +209,7 @@ class TestInvokeAgent:
             {"messages": [AIMessage(content="Recovered response.")]},
         ]
 
-        result = await invoke_agent(mock_agent, "hello?", session_id="broken-sess")
+        result = await _invoke_langgraph_agent(mock_agent, "hello?", session_id="broken-sess")
 
         assert result == "Recovered response."
         assert mock_agent.ainvoke.call_count == 2
@@ -226,7 +227,7 @@ class TestInvokeAgent:
         mock_agent.ainvoke.side_effect = RuntimeError("LLM exploded")
 
         with pytest.raises(RuntimeError, match="LLM exploded"):
-            await invoke_agent(mock_agent, "boom", session_id="s1")
+            await _invoke_langgraph_agent(mock_agent, "boom", session_id="s1")
 
     @pytest.mark.integration
     async def test_timeout_error_propagates(self, mock_settings: object) -> None:
@@ -235,7 +236,7 @@ class TestInvokeAgent:
         mock_agent.ainvoke.side_effect = TimeoutError("timed out")
 
         with pytest.raises(TimeoutError, match="timed out"):
-            await invoke_agent(mock_agent, "slow query", session_id="s1")
+            await _invoke_langgraph_agent(mock_agent, "slow query", session_id="s1")
 
     @pytest.mark.integration
     async def test_recovery_failure_propagates(self, mock_settings: object) -> None:
@@ -252,7 +253,7 @@ class TestInvokeAgent:
         ]
 
         with pytest.raises(RuntimeError, match="LLM still broken"):
-            await invoke_agent(mock_agent, "hello", session_id="s1")
+            await _invoke_langgraph_agent(mock_agent, "hello", session_id="s1")
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +344,7 @@ class TestStreamAgent:
             return_value=AsyncMock(values={"messages": [AIMessage(content="CPU is at 42%.")]})
         )
 
-        events = [e async for e in stream_agent(mock_agent, "What is CPU?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "What is CPU?", session_id="s1")]
 
         types = [e["type"] for e in events]
         assert "status" in types
@@ -375,7 +376,7 @@ class TestStreamAgent:
             return_value=AsyncMock(values={"messages": [AIMessage(content="All nodes are up.")]})
         )
 
-        events = [e async for e in stream_agent(mock_agent, "Are nodes up?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "Are nodes up?", session_id="s1")]
 
         tool_start = next(e for e in events if e["type"] == "tool_start")
         assert "prometheus_instant_query" in tool_start["tool_name"]
@@ -419,7 +420,7 @@ class TestStreamAgent:
             )
         )
 
-        events = [e async for e in stream_agent(mock_agent, "disk status?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "disk status?", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "The disk is healthy."
@@ -435,7 +436,7 @@ class TestStreamAgent:
 
         mock_agent.astream_events = failing_stream
 
-        events = [e async for e in stream_agent(mock_agent, "boom", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "boom", session_id="s1")]
 
         error_event = next(e for e in events if e["type"] == "error")
         assert "LLM exploded" in error_event["content"]
@@ -455,7 +456,7 @@ class TestStreamAgent:
         mock_agent.astream_events = failing_stream
         mock_agent.ainvoke.return_value = {"messages": [AIMessage(content="Recovered.")]}
 
-        events = [e async for e in stream_agent(mock_agent, "hello", session_id="broken")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "hello", session_id="broken")]
 
         types = [e["type"] for e in events]
         assert "status" in types  # "Retrying with fresh session..."
@@ -477,7 +478,7 @@ class TestStreamAgent:
         mock_agent.astream_events = empty_stream
         mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
 
-        events = [e async for e in stream_agent(mock_agent, "hello", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "hello", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "No response generated."
@@ -546,7 +547,7 @@ class TestStreamAgentRegressions:
             return_value=AsyncMock(values={"messages": [AIMessage(content="All 3 nodes are up and healthy.")]})
         )
 
-        events = [e async for e in stream_agent(mock_agent, "are nodes up?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "are nodes up?", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
         # Must NOT be the fallback text
@@ -577,7 +578,7 @@ class TestStreamAgentRegressions:
         # should NOT be called in the recovery path
         mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": []}))
 
-        events = [e async for e in stream_agent(mock_agent, "test", session_id="bad")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "test", session_id="bad")]
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "Recovered successfully."
@@ -658,7 +659,7 @@ class TestAnthropicContentFormatRegressions:
             )
         )
 
-        events = [e async for e in stream_agent(mock_agent, "any alerts?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "any alerts?", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "No alerts are currently firing."
@@ -672,7 +673,7 @@ class TestAnthropicContentFormatRegressions:
             "messages": [AIMessage(content=[{"type": "text", "text": "CPU is at 42%."}])]
         }
 
-        result = await invoke_agent(mock_agent, "What is CPU?", session_id="s1")
+        result = await _invoke_langgraph_agent(mock_agent, "What is CPU?", session_id="s1")
         assert result == "CPU is at 42%."
         assert result != "No response generated."
 
@@ -698,7 +699,7 @@ class TestAnthropicContentFormatRegressions:
             )
         )
 
-        events = [e async for e in stream_agent(mock_agent, "status?", session_id="s1")]
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "status?", session_id="s1")]
 
         answer = next(e for e in events if e["type"] == "answer")
         assert answer["content"] == "All systems operational."

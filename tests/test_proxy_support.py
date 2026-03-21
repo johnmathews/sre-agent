@@ -274,23 +274,20 @@ class TestAgentBuilderBaseUrl:
 
 @pytest.mark.integration
 class TestAgentBuilderAnthropicProvider:
-    """Verify build_agent uses ChatAnthropic when llm_provider=anthropic."""
+    """Verify build_agent uses SDK path when llm_provider=anthropic."""
 
-    def test_anthropic_provider_creates_chat_anthropic(self, mock_settings: MagicMock) -> None:
+    def test_anthropic_provider_creates_sdk_agent(self, mock_settings: MagicMock) -> None:
         mock_settings.llm_provider = "anthropic"
         mock_settings.anthropic_api_key = "sk-ant-test"
         mock_settings.anthropic_model = "claude-sonnet-4-20250514"
-        with (
-            patch("src.agent.llm.ChatAnthropic") as mock_llm_cls,
-            patch("src.agent.agent.create_agent") as mock_create,
-        ):
-            mock_create.return_value = MagicMock()
+        with patch("src.agent.sdk_agent.build_mcp_server") as mock_mcp:
+            mock_mcp.return_value = MagicMock()
             from src.agent.agent import build_agent
 
-            build_agent()
-            mock_llm_cls.assert_called_once()
-            call_kwargs = mock_llm_cls.call_args.kwargs
-            assert call_kwargs["max_tokens"] == 4096
+            agent = build_agent()
+            assert agent.provider == "anthropic"
+            assert agent.sdk_options is not None
+            assert agent.langgraph_agent is None
 
 
 @pytest.mark.integration
@@ -353,26 +350,6 @@ class TestInvokeAgentModelName:
     """Verify invoke_agent passes the correct model name to save_conversation."""
 
     @pytest.mark.asyncio
-    async def test_anthropic_model_saved_in_conversation_history(self, mock_settings: MagicMock) -> None:
-        mock_settings.llm_provider = "anthropic"
-        mock_settings.anthropic_model = "claude-sonnet-4-20250514"
-        mock_settings.conversation_history_dir = "/tmp/test-convos"
-
-        from langchain_core.messages import AIMessage
-
-        fake_result = {"messages": [AIMessage(content="Test response")]}
-        fake_agent = MagicMock()
-        fake_agent.ainvoke = AsyncMock(return_value=fake_result)
-
-        with patch("src.agent.agent.save_conversation") as mock_save:
-            from src.agent.agent import invoke_agent
-
-            await invoke_agent(fake_agent, "hello", session_id="test-session")
-            mock_save.assert_called_once()
-            _, _, _, model_arg = mock_save.call_args.args
-            assert model_arg == "claude-sonnet-4-20250514"
-
-    @pytest.mark.asyncio
     async def test_openai_model_saved_in_conversation_history(self, mock_settings: MagicMock) -> None:
         mock_settings.llm_provider = "openai"
         mock_settings.openai_model = "gpt-4o-mini"
@@ -385,9 +362,9 @@ class TestInvokeAgentModelName:
         fake_agent.ainvoke = AsyncMock(return_value=fake_result)
 
         with patch("src.agent.agent.save_conversation") as mock_save:
-            from src.agent.agent import invoke_agent
+            from src.agent.agent import _invoke_langgraph_agent
 
-            await invoke_agent(fake_agent, "hello", session_id="test-session")
+            await _invoke_langgraph_agent(fake_agent, "hello", session_id="test-session")
             mock_save.assert_called_once()
             _, _, _, model_arg = mock_save.call_args.args
             assert model_arg == "gpt-4o-mini"

@@ -1,7 +1,13 @@
-"""LangChain agent assembly — wires tools, system prompt, and memory together."""
+"""LangChain agent assembly — wires tools, system prompt, and memory together.
+
+Supports two backend paths:
+- ``LLM_PROVIDER=openai`` — LangGraph agent with LangChain tools
+- ``LLM_PROVIDER=anthropic`` — Claude Agent SDK with MCP tools (via CLI subprocess)
+"""
 
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,7 +20,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.history import save_conversation
-from src.agent.llm import _is_oauth_token, create_llm
+from src.agent.llm import create_llm
 from src.agent.tools.grafana_alerts import grafana_get_alert_rules, grafana_get_alerts
 from src.agent.tools.grafana_dashboards import grafana_get_dashboard, grafana_search_dashboards
 from src.agent.tools.loki import (
@@ -60,6 +66,20 @@ type AgentGraph = Any
 
 _PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
 SYSTEM_PROMPT_TEMPLATE = _PROMPT_PATH.read_text()
+
+
+# ---------------------------------------------------------------------------
+# SREAgent — unified wrapper for both backend paths
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SREAgent:
+    """Unified agent handle supporting both OpenAI (LangGraph) and Anthropic (SDK) paths."""
+
+    provider: str  # "anthropic" | "openai"
+    langgraph_agent: AgentGraph | None = None
+    sdk_options: Any = field(default=None)  # ClaudeAgentOptions (lazy import)
 
 
 def _get_memory_context() -> str:
@@ -252,24 +272,36 @@ def _get_tools() -> list[BaseTool]:
 def build_agent(
     model_name: str | None = None,
     temperature: float = 0.0,
-) -> AgentGraph:
+) -> SREAgent:
     """Build and return the SRE assistant agent.
+
+    For ``LLM_PROVIDER=anthropic``, builds a Claude Agent SDK agent that
+    communicates via MCP tools through the CLI subprocess.
+    For ``LLM_PROVIDER=openai``, builds the existing LangGraph agent.
 
     Args:
         model_name: LLM model to use. Defaults to the configured provider's model.
         temperature: LLM temperature (0.0 for deterministic tool-calling).
 
     Returns:
-        A compiled LangGraph agent with tool-calling and conversation memory.
+        An SREAgent wrapping either the SDK options or the LangGraph agent.
     """
     settings = get_settings()
 
+    # --- Anthropic / SDK path ---
+    if settings.llm_provider == "anthropic":
+        from src.agent.sdk_agent import build_sdk_options
+
+        sdk_options = build_sdk_options(settings, model_override=model_name)
+        resolved_model = model_name or settings.anthropic_model
+        logger.info("Building SDK agent with model=%s", resolved_model)
+        return SREAgent(provider="anthropic", sdk_options=sdk_options)
+
+    # --- OpenAI / LangGraph path ---
     llm = create_llm(settings, temperature=temperature, model_override=model_name)
 
     tools = _get_tools()
-    resolved_model = model_name or (
-        settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
-    )
+    resolved_model = model_name or settings.openai_model
     logger.info("Building agent with model=%s, %d tools: %s", resolved_model, len(tools), [t.name for t in tools])
 
     now = datetime.now(UTC)
@@ -279,23 +311,19 @@ def build_agent(
         .replace("{retention_cutoff}", (now - timedelta(days=90)).strftime("%Y-%m-%d"))
     )
 
-    # OAuth tokens require the system prompt to identify as Claude Code.
-    if settings.llm_provider == "anthropic" and _is_oauth_token(settings.anthropic_api_key):
-        system_prompt = "You are Claude Code, Anthropic's official CLI for Claude.\n\n" + system_prompt
-
     # Inject dynamic context from memory store (best-effort, never fails build)
     system_prompt += _get_memory_context()
 
     checkpointer = MemorySaver()
 
-    agent: AgentGraph = create_agent(
+    langgraph_agent: AgentGraph = create_agent(
         model=llm,
         tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
     )
 
-    return agent
+    return SREAgent(provider="openai", langgraph_agent=langgraph_agent)
 
 
 def _is_tool_call_pairing_error(exc: BaseException) -> bool:
@@ -310,26 +338,39 @@ def _is_tool_call_pairing_error(exc: BaseException) -> bool:
 
 
 async def invoke_agent(
-    agent: AgentGraph,
+    agent: SREAgent,
     message: str,
     session_id: str = "default",
 ) -> str:
     """Send a message to the agent and return the text response.
 
-    Uses ainvoke because the tools are async (httpx-based).
-
-    If a previous request left orphaned tool_calls in the session checkpoint
-    (e.g., due to a timeout), this function detects the resulting OpenAI 400
-    error and retries with a fresh session to avoid a permanently broken state.
+    Dispatches to the SDK path for Anthropic or the LangGraph path for OpenAI.
 
     Args:
-        agent: The compiled agent from build_agent().
+        agent: The SREAgent from build_agent().
         message: User's question.
         session_id: Conversation session ID for memory isolation.
 
     Returns:
         The agent's text response.
     """
+    # --- Anthropic / SDK path ---
+    if agent.provider == "anthropic":
+        from src.agent.sdk_agent import invoke_sdk_agent
+
+        return await invoke_sdk_agent(agent.sdk_options, message, session_id)
+
+    # --- OpenAI / LangGraph path ---
+    assert agent.langgraph_agent is not None
+    return await _invoke_langgraph_agent(agent.langgraph_agent, message, session_id)
+
+
+async def _invoke_langgraph_agent(
+    agent: AgentGraph,
+    message: str,
+    session_id: str = "default",
+) -> str:
+    """LangGraph invoke implementation (OpenAI path)."""
     settings = get_settings()
     effective_session_id = session_id
 
@@ -346,7 +387,6 @@ async def invoke_agent(
         )
     except Exception as exc:
         if _is_tool_call_pairing_error(exc):
-            # Session history is corrupted — retry with a fresh thread to unblock
             fresh_id = f"{session_id}-{uuid4().hex[:6]}"
             effective_session_id = fresh_id
             logger.warning(
@@ -366,12 +406,10 @@ async def invoke_agent(
         else:
             raise
 
-    # Extract the last AI message from the result
     messages: list[Any] = result.get("messages", [])
 
-    # Persist full conversation history if configured
     if settings.conversation_history_dir:
-        active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
+        active_model = settings.openai_model
         save_conversation(
             settings.conversation_history_dir,
             effective_session_id,
@@ -387,7 +425,6 @@ async def invoke_agent(
                 response_text = text
                 break
 
-    # Post-response: save query pattern + suggest incident recording
     suggestion = _post_response_actions(messages, message, response_text)
     if suggestion:
         response_text += suggestion
@@ -463,21 +500,40 @@ def _summarize_tool_input(tool_name: str, tool_input: Any) -> str:
 
 
 async def stream_agent(
-    agent: AgentGraph,
+    agent: SREAgent,
     message: str,
     session_id: str = "default",
 ) -> AsyncIterator[dict[str, str]]:
     """Stream agent events as dicts suitable for SSE.
+
+    Dispatches to the SDK streaming path for Anthropic or LangGraph for OpenAI.
 
     Yields dicts with keys:
       - type: "status" | "tool_start" | "tool_end" | "answer" | "error"
       - content: human-readable text
       - tool_name (optional): raw tool name for tool events
       - session_id (only on "answer"): the effective session ID
-
-    Uses astream_events(version="v2") to capture tool calls and
-    the final AI response in real time.
     """
+    # --- Anthropic / SDK path ---
+    if agent.provider == "anthropic":
+        from src.agent.sdk_agent import stream_sdk_agent
+
+        async for event in stream_sdk_agent(agent.sdk_options, message, session_id):
+            yield event
+        return
+
+    # --- OpenAI / LangGraph path ---
+    assert agent.langgraph_agent is not None
+    async for event in _stream_langgraph_agent(agent.langgraph_agent, message, session_id):
+        yield event
+
+
+async def _stream_langgraph_agent(
+    agent: AgentGraph,
+    message: str,
+    session_id: str = "default",
+) -> AsyncIterator[dict[str, str]]:
+    """LangGraph streaming implementation (OpenAI path)."""
     settings = get_settings()
     effective_session_id = session_id
 
@@ -536,7 +592,6 @@ async def stream_agent(
                 "configurable": {"thread_id": fresh_id},
                 "callbacks": [fresh_cb],
             }
-            # Fall back to non-streaming invoke for the retry
             result: dict[str, Any] = await agent.ainvoke(
                 {"messages": [HumanMessage(content=message)]},
                 config=fresh_config,
@@ -552,8 +607,6 @@ async def stream_agent(
             yield {"type": "error", "content": f"Agent error: {exc}"}
             return
     else:
-        # Normal path (no exception) — extract the answer from checkpoint state,
-        # the authoritative source after streaming completes.
         try:
             snapshot = await agent.aget_state(config)  # pyright: ignore[reportUnknownMemberType]
             all_messages = snapshot.values.get("messages", [])  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
@@ -567,9 +620,8 @@ async def stream_agent(
                     response_text = text
                     break
 
-    # Persist conversation history if configured
     if settings.conversation_history_dir and all_messages:
-        active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
+        active_model = settings.openai_model
         save_conversation(
             settings.conversation_history_dir,
             effective_session_id,
@@ -577,7 +629,6 @@ async def stream_agent(
             active_model,
         )
 
-    # Post-response actions
     suggestion = _post_response_actions(all_messages, message, response_text)
     if suggestion:
         response_text += suggestion

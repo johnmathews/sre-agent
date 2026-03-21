@@ -172,7 +172,7 @@ class TestInvokeAgentHistorySaving:
 
     @pytest.mark.integration
     async def test_saves_history_when_dir_configured(self, mock_settings: Any) -> None:
-        from src.agent.agent import invoke_agent
+        from src.agent.agent import _invoke_langgraph_agent
 
         mock_settings.conversation_history_dir = "/tmp/test-history"  # type: ignore[attr-defined]
 
@@ -185,7 +185,7 @@ class TestInvokeAgentHistorySaving:
         }
 
         with patch("src.agent.agent.save_conversation") as mock_save:
-            result = await invoke_agent(mock_agent, "hello", session_id="s1")
+            result = await _invoke_langgraph_agent(mock_agent, "hello", session_id="s1")
 
         assert result == "hi there"
         mock_save.assert_called_once_with(
@@ -197,7 +197,7 @@ class TestInvokeAgentHistorySaving:
 
     @pytest.mark.integration
     async def test_skips_history_when_dir_empty(self, mock_settings: Any) -> None:
-        from src.agent.agent import invoke_agent
+        from src.agent.agent import _invoke_langgraph_agent
 
         mock_settings.conversation_history_dir = ""  # type: ignore[attr-defined]
 
@@ -205,13 +205,13 @@ class TestInvokeAgentHistorySaving:
         mock_agent.ainvoke.return_value = {"messages": [AIMessage(content="response")]}
 
         with patch("src.agent.agent.save_conversation") as mock_save:
-            await invoke_agent(mock_agent, "hello", session_id="s1")
+            await _invoke_langgraph_agent(mock_agent, "hello", session_id="s1")
 
         mock_save.assert_not_called()
 
     @pytest.mark.integration
     async def test_uses_fresh_session_id_on_recovery(self, mock_settings: Any) -> None:
-        from src.agent.agent import invoke_agent
+        from src.agent.agent import _invoke_langgraph_agent
 
         mock_settings.conversation_history_dir = "/tmp/test-history"  # type: ignore[attr-defined]
 
@@ -227,7 +227,7 @@ class TestInvokeAgentHistorySaving:
         ]
 
         with patch("src.agent.agent.save_conversation") as mock_save:
-            result = await invoke_agent(mock_agent, "hello", session_id="broken")
+            result = await _invoke_langgraph_agent(mock_agent, "hello", session_id="broken")
 
         assert result == "recovered"
         # The saved session_id should be the fresh one, not "broken"

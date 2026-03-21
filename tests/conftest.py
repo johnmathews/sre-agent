@@ -119,5 +119,7 @@ def mock_settings() -> Generator[Any]:
         patch("src.report.scheduler.get_settings", return_value=fake_settings),
         patch("src.memory.store.get_settings", return_value=fake_settings),
         patch("src.memory.baselines.get_settings", return_value=fake_settings),
+        patch("src.agent.mcp_tools.get_settings", return_value=fake_settings),
+        patch("src.agent.sdk_agent.get_settings", return_value=fake_settings),
     ):
         yield fake_settings

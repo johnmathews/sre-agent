@@ -13,23 +13,30 @@ A user question arrives via one of three interfaces:
 
 ### 2. Agent Invocation
 
+The agent is built once at startup via `build_agent()` and stored in `app.state.agent` as an `SREAgent` dataclass.
+`build_agent()` detects `LLM_PROVIDER` and constructs either an SDK agent (Anthropic) or LangGraph agent (OpenAI).
+
+**OpenAI / LangGraph path:**
 ```
 src/api/main.py::ask()
-  -> invoke_agent(agent, message, session_id)
-    -> agent.ainvoke({"messages": [HumanMessage(content=message)]}, config)
-
-src/api/main.py::ask_stream()        (SSE endpoint)
-  -> stream_agent(agent, message, session_id)
-    -> agent.astream_events({"messages": [...]}, version="v2")
-    -> yields SSE events: status, tool_start, tool_end, answer, error
+  -> invoke_agent(SREAgent, message, session_id)
+    -> _invoke_langgraph_agent(agent.langgraph_agent, ...)
+      -> agent.ainvoke({"messages": [HumanMessage(content=message)]}, config)
 ```
 
-The agent is built once at startup via `build_agent()` and stored in `app.state.agent`. At build time, the system prompt
-template is formatted with the current UTC date/time and a Prometheus retention cutoff (~90 days ago), so the agent
-always knows what "today" is and avoids querying stale time ranges. If the memory store is configured,
-`_get_memory_context()` loads open incidents and recent query patterns into the system prompt as additional context. Each
-request passes through `invoke_agent()` (batch) or `stream_agent()` (streaming) which wraps the LangGraph call with a
-session-scoped config for conversation memory.
+**Anthropic / SDK path:**
+```
+src/api/main.py::ask()
+  -> invoke_agent(SREAgent, message, session_id)
+    -> invoke_sdk_agent(agent.sdk_options, message, session_id)
+      -> query(prompt=full_prompt, options=options)  # claude-agent-sdk
+```
+
+The SDK path uses MCP tools (`src/agent/mcp_tools.py`) that wrap the same LangChain tool functions. The system prompt
+is built fresh each call with current timestamps and `mcp__sre__` tool name prefixes. Conversation history is injected
+into the prompt (context stuffing) since each `query()` call is stateless.
+
+For both paths, `invoke_agent()` and `stream_agent()` dispatch based on `SREAgent.provider`.
 
 ### Streaming Flow (SSE)
 

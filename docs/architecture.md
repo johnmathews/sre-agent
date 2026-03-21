@@ -2,8 +2,16 @@
 
 ## System Overview
 
-The HomeLab SRE Assistant is a LangChain-based AI agent that connects to live infrastructure telemetry and a knowledge
-base to answer operational questions about a Proxmox homelab with 80+ services.
+The HomeLab SRE Assistant is an AI agent that connects to live infrastructure telemetry and a knowledge base to answer
+operational questions about a Proxmox homelab with 80+ services.
+
+The agent supports two LLM backend paths, selected via `LLM_PROVIDER`:
+
+- **OpenAI path** (`LLM_PROVIDER=openai`) — LangChain/LangGraph agent with LangChain `@tool` functions
+- **Anthropic path** (`LLM_PROVIDER=anthropic`) — Claude Agent SDK via MCP tools through the Claude Code CLI subprocess
+
+Both paths share the same tool business logic, system prompt, and observability metrics. The SDK path enables Opus access
+via OAuth tokens from Claude Max/Pro subscriptions.
 
 ## Data Flow
 
@@ -57,7 +65,9 @@ The LangChain agent decides which approach to use based on the question.
 ```
 HomeLab SRE Assistant
   |
-  +-- LLM API (OpenAI or Anthropic, selected via LLM_PROVIDER)
+  +-- LLM Backend
+  |     +-- OpenAI API (LLM_PROVIDER=openai, via LangChain)
+  |     +-- Claude Agent SDK (LLM_PROVIDER=anthropic, via CLI subprocess)
   |
   +-- Prometheus (metrics, scraping pve_exporter, node_exporter, cadvisor, etc.)
   |

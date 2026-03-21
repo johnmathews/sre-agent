@@ -24,6 +24,10 @@ services:
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR}:/app/conversations
+      # Claude Agent SDK: mount host credentials for OAuth token auth.
+      # Required when LLM_PROVIDER=anthropic. The CLI subprocess reads
+      # auth tokens from this directory. Read-only mount.
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/root/.claude:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 30s

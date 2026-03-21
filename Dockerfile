@@ -37,6 +37,11 @@ COPY --from=builder /app/runbooks/ runbooks/
 # Put the venv on PATH so `python`, `uvicorn`, `streamlit` resolve from it
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Claude Agent SDK: the bundled CLI binary needs to be executable.
+# The pip wheel includes it at _bundled/claude inside the package.
+# Ensure it has execute permission (some container runtimes strip it).
+RUN chmod +x .venv/lib/python*/site-packages/claude_agent_sdk/_bundled/claude 2>/dev/null || true
+
 EXPOSE 8000 8501
 
 # Default: run the FastAPI API server

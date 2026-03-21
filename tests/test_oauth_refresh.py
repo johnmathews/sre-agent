@@ -43,16 +43,20 @@ def test_refresh_when_token_expired(tmp_path: Path) -> None:
 
     new_access = "sk-ant-oat01-new-access"
     new_refresh = "sk-ant-ort01-new-refresh"
-    mock_response = type("R", (), {
-        "status_code": 200,
-        "json": lambda self: {
-            "access_token": new_access,
-            "refresh_token": new_refresh,
-            "expires_in": 28800,
-            "token_type": "Bearer",
+    mock_response = type(
+        "R",
+        (),
+        {
+            "status_code": 200,
+            "json": lambda self: {
+                "access_token": new_access,
+                "refresh_token": new_refresh,
+                "expires_in": 28800,
+                "token_type": "Bearer",
+            },
+            "text": "",
         },
-        "text": "",
-    })()
+    )()
 
     with (
         patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),
@@ -73,16 +77,20 @@ def test_refresh_within_buffer(tmp_path: Path) -> None:
     near_expiry_ms = int((time.time() + 120) * 1000)
     creds_path.write_text(json.dumps(_make_creds(near_expiry_ms)))
 
-    mock_response = type("R", (), {
-        "status_code": 200,
-        "json": lambda self: {
-            "access_token": "sk-ant-oat01-refreshed",
-            "refresh_token": "sk-ant-ort01-refreshed",
-            "expires_in": 28800,
-            "token_type": "Bearer",
+    mock_response = type(
+        "R",
+        (),
+        {
+            "status_code": 200,
+            "json": lambda self: {
+                "access_token": "sk-ant-oat01-refreshed",
+                "refresh_token": "sk-ant-ort01-refreshed",
+                "expires_in": 28800,
+                "token_type": "Bearer",
+            },
+            "text": "",
         },
-        "text": "",
-    })()
+    )()
 
     with (
         patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),
@@ -112,11 +120,15 @@ def test_refresh_failure_does_not_raise(tmp_path: Path) -> None:
     past_ms = int((time.time() - 60) * 1000)
     creds_path.write_text(json.dumps(_make_creds(past_ms)))
 
-    mock_response = type("R", (), {
-        "status_code": 400,
-        "json": lambda self: {"error": "invalid_grant"},
-        "text": '{"error": "invalid_grant"}',
-    })()
+    mock_response = type(
+        "R",
+        (),
+        {
+            "status_code": 400,
+            "json": lambda self: {"error": "invalid_grant"},
+            "text": '{"error": "invalid_grant"}',
+        },
+    )()
 
     with (
         patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),

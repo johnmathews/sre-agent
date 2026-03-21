@@ -101,3 +101,10 @@ class TestBuildSdkOptions:
             mock_mcp.return_value = MagicMock()
             options = build_sdk_options()
             assert options.max_turns == 10
+
+    def test_env_strips_anthropic_api_key(self) -> None:
+        """ANTHROPIC_API_KEY must be cleared so the CLI uses OAuth credentials."""
+        with patch("src.agent.sdk_agent.build_mcp_server") as mock_mcp:
+            mock_mcp.return_value = MagicMock()
+            options = build_sdk_options()
+            assert options.env.get("ANTHROPIC_API_KEY") == ""

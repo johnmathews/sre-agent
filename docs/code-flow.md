@@ -29,6 +29,7 @@ src/api/main.py::ask()
 src/api/main.py::ask()
   -> invoke_agent(SREAgent, message, session_id)
     -> invoke_sdk_agent(agent.sdk_options, message, session_id)
+      -> ensure_valid_token()  # refresh OAuth access token if expired
       -> query(prompt=full_prompt, options=options)  # claude-agent-sdk
 ```
 

@@ -67,6 +67,9 @@ Node.js runtime needed in the container.
 The `ANTHROPIC_API_KEY` env var is required by the config validator but not used by the SDK path. Set it to any
 non-empty placeholder; actual auth comes from the mounted credentials directory.
 
+**Post-deploy fix:** The `ANTHROPIC_API_KEY` env var leaked into the CLI subprocess, causing "Invalid API key" errors.
+See `journal/260321-fix-sdk-oauth-auth.md` for the full investigation.
+
 ## Test Impact
 
 741 existing tests still pass. 28 new tests added (769 total). Test changes:

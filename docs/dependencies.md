@@ -102,21 +102,27 @@ Two authentication methods are supported, configured via `ANTHROPIC_API_KEY`:
 Usage-based billing. Set `ANTHROPIC_API_KEY` to the key value — the agent sends it as the standard `x-api-key` header.
 
 **OAuth token** (`sk-ant-oat*`): From a Claude Max/Pro subscription via `claude setup-token`. Flat-rate billing
-(included in the subscription). The agent auto-detects the token prefix and switches to OAuth mode, which requires:
+(included in the subscription). Two different code paths handle OAuth depending on the LLM provider:
 
-- `Authorization: Bearer {token}` instead of `x-api-key`
-- `anthropic-beta: claude-code-20250219,oauth-2025-04-20` header
-- `user-agent: claude-cli/{version}` and `x-app: cli` headers
-- System prompt prefixed with `"You are Claude Code, Anthropic's official CLI for Claude."`
-- Suppression of the `x-api-key` header via the SDK's `Omit` sentinel
+**LangChain path** (`LLM_PROVIDER=openai` with Anthropic override, or direct `ChatAnthropic` usage): The agent
+auto-detects the `sk-ant-oat` prefix and switches to OAuth mode in `src/agent/llm.py::create_anthropic_chat()`,
+injecting `Authorization: Bearer`, `anthropic-beta`, `user-agent`, and `x-app` headers. The placeholder `x-api-key`
+header is suppressed via the SDK's `Omit` sentinel.
 
-All of this is handled automatically in `src/agent/llm.py::create_anthropic_chat()`. The detection is based on the
-token prefix — no configuration beyond setting `ANTHROPIC_API_KEY` is needed.
+**SDK path** (`LLM_PROVIDER=anthropic`): The Claude Agent SDK spawns a CLI subprocess that reads OAuth credentials
+from `$CLAUDE_CONFIG_DIR/.credentials.json`. Two critical details:
 
-`ChatAnthropic` (langchain-anthropic) does not expose the underlying SDK's `auth_token` parameter, so the OAuth headers
-are injected via `default_headers` and the placeholder `x-api-key` is suppressed by patching the SDK client's
-`_custom_headers` with the `Omit` sentinel after construction. This causes the SDK's `_merge_mappings` to strip the
-`X-Api-Key` entry from outgoing requests.
+1. **`ANTHROPIC_API_KEY` must be stripped** from the subprocess environment. The CLI's auth precedence treats
+   `ANTHROPIC_API_KEY` as an `X-Api-Key` header (item 3), which fails when the value is an OAuth token. The SDK
+   options set `env={"ANTHROPIC_API_KEY": ""}` so the CLI falls through to OAuth credentials (item 5).
+
+2. **OAuth access tokens expire every ~8 hours.** The CLI does not auto-refresh them in headless/Docker environments.
+   `src/agent/oauth_refresh.py` checks `expiresAt` before each query and refreshes via
+   `POST https://api.anthropic.com/v1/oauth/token` using the stored refresh token. The `.claude` directory must be
+   mounted read-write in Docker so the refreshed token can be saved.
+
+The `ANTHROPIC_API_KEY` env var is still required by the `Settings` validator but is not used by the SDK path for
+authentication — actual auth comes from the mounted credentials directory.
 
 ### Prometheus
 

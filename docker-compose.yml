@@ -1,5 +1,12 @@
-# Local dev / reference docker-compose.
-# Production deployment on the Infra VM uses an Ansible-templated compose file.
+# Docker Compose for the SRE Assistant.
+#
+# Standalone usage:
+#   docker compose --profile setup run sre-ingest   # build vector store (first time)
+#   docker compose up -d                             # start API + UI
+#
+# To embed into an existing stack, copy the sre-api and sre-ui services into
+# your compose file. See docker-compose.reference.yml for a copy-paste snippet
+# with inline comments explaining every field.
 
 services:
   sre-ingest:
@@ -23,10 +30,11 @@ services:
     restart: unless-stopped
     volumes:
       - chroma_data:/app/.chroma_db
-      - ${CONVERSATION_HISTORY_HOST_DIR}:/app/conversations
+      - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
       # Claude Agent SDK: mount host credentials for OAuth token auth.
       # Required when LLM_PROVIDER=anthropic. The CLI subprocess reads
       # auth tokens from this directory. Read-only mount.
+      # Harmless no-op when using LLM_PROVIDER=openai.
       - ${CLAUDE_CONFIG_DIR:-~/.claude}:/root/.claude:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]

@@ -13,7 +13,8 @@
 # Prerequisites for LLM_PROVIDER=anthropic:
 #   1. Install Claude Code on the Docker host: npm install -g @anthropic-ai/claude-code
 #   2. Authenticate: claude login  (or: claude setup-token for headless/SSH)
-#   3. Tokens are stored in ~/.claude/ and mounted read-only into the container
+#   3. Tokens are stored in ~/.claude/ and mounted read-write into the container
+#      (read-write so the CLI can auto-refresh short-lived OAuth access tokens)
 #
 # Required env vars — see .env.example for the full list with descriptions.
 #   LLM_PROVIDER, PROMETHEUS_URL, GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN
@@ -37,14 +38,17 @@ services:
     env_file: .env
     environment:
       - ANONYMIZED_TELEMETRY=False
+      - CLAUDE_CONFIG_DIR=/app/.claude
+      - HOME=/app
     restart: unless-stopped
     mem_limit: 384m
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
       # Claude Agent SDK: OAuth credentials for LLM_PROVIDER=anthropic.
+      # Read-write so the CLI can auto-refresh short-lived OAuth access tokens.
       # Harmless empty-dir mount when using LLM_PROVIDER=openai.
-      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/app/.claude
       # Uncomment to persist the memory store SQLite DB:
       # - ./sre-memory.db:/app/memory.db
     healthcheck:

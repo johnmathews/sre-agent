@@ -141,6 +141,13 @@ def build_sdk_options(
         disallowed_tools=_BLOCKED_BUILTINS,
         permission_mode="bypassPermissions",
         max_turns=10,
+        # Strip ANTHROPIC_API_KEY from the CLI subprocess environment.
+        # The app's Settings validator requires this env var, but the CLI
+        # must NOT see it: the CLI treats ANTHROPIC_API_KEY as an X-Api-Key
+        # header (auth precedence item 3), which fails when the value is an
+        # OAuth token (sk-ant-oat*).  The CLI should fall through to OAuth
+        # credentials in .credentials.json (auth precedence item 5).
+        env={"ANTHROPIC_API_KEY": ""},
     )
     return options
 
@@ -188,6 +195,9 @@ async def invoke_sdk_agent(
     Each call is stateless from the SDK's perspective. Conversation
     continuity is achieved by injecting prior turns into the prompt.
     """
+    from src.agent.oauth_refresh import ensure_valid_token
+
+    ensure_valid_token()
     settings = get_settings()
 
     # Rebuild system prompt with fresh timestamps each call
@@ -303,6 +313,9 @@ async def stream_sdk_agent(
       - content: human-readable text
       - session_id (only on "answer"): the session ID
     """
+    from src.agent.oauth_refresh import ensure_valid_token
+
+    ensure_valid_token()
     settings = get_settings()
 
     # Rebuild system prompt with fresh timestamps

@@ -54,6 +54,19 @@ All four pre-step assumptions verified before any code changes:
 - Custom MCP tool registered and called successfully
 - `disallowed_tools` blocks built-in tools (Read, Write, Bash, etc.)
 
+## Docker Deployment
+
+The SDK bundles a platform-specific native CLI binary inside the pip wheel (Mach-O for macOS, ELF for Linux). No
+Node.js runtime needed in the container.
+
+- **Dockerfile** — `chmod +x` on the bundled binary (some runtimes strip execute permission)
+- **docker-compose.yml** — mounts `~/.claude/` read-only into the container for OAuth auth. Harmless no-op when using
+  OpenAI. Memory limits: 384m API, 96m UI.
+- **`.env.example`** — documents the auth setup flow (`claude login` → mount creds)
+
+The `ANTHROPIC_API_KEY` env var is required by the config validator but not used by the SDK path. Set it to any
+non-empty placeholder; actual auth comes from the mounted credentials directory.
+
 ## Test Impact
 
 741 existing tests still pass. 28 new tests added (769 total). Test changes:

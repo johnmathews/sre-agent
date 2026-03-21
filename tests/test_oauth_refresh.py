@@ -5,9 +5,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-from src.agent.oauth_refresh import _REFRESH_BUFFER_MS, _credentials_path, ensure_valid_token
+from src.agent.oauth_refresh import ensure_valid_token
 
 
 def _make_creds(expires_at: int, refresh_token: str = "sk-ant-ort01-fake") -> dict[str, object]:

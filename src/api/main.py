@@ -325,6 +325,16 @@ async def health() -> HealthResponse:
         except Exception as exc:
             components.append(ComponentHealth(name="pbs", status="unhealthy", detail=str(exc)))
 
+    # --- OAuth token (SDK path only) ---
+    if settings.llm_provider == "anthropic":
+        try:
+            from src.agent.oauth_refresh import get_token_health
+
+            token_status, token_detail = get_token_health()
+            components.append(ComponentHealth(name="oauth_token", status=token_status, detail=token_detail))
+        except Exception as exc:
+            components.append(ComponentHealth(name="oauth_token", status="unhealthy", detail=str(exc)))
+
     # --- Vector store ---
     if CHROMA_PERSIST_DIR.is_dir():
         components.append(ComponentHealth(name="vector_store", status="healthy"))

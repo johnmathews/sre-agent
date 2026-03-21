@@ -108,6 +108,26 @@ REPORT_DURATION = Histogram(
 )
 
 # ---------------------------------------------------------------------------
+# OAuth token metrics (SDK / Anthropic path)
+# ---------------------------------------------------------------------------
+
+OAUTH_TOKEN_EXPIRY = Gauge(
+    "sre_assistant_oauth_token_expiry_seconds",
+    "Unix timestamp when the current OAuth access token expires (0 = no token)",
+)
+
+OAUTH_TOKEN_REMAINING = Gauge(
+    "sre_assistant_oauth_token_remaining_seconds",
+    "Seconds until the OAuth access token expires (negative = expired)",
+)
+
+OAUTH_REFRESH_TOTAL = Counter(
+    "sre_assistant_oauth_refresh_total",
+    "Total OAuth token refresh attempts",
+    labelnames=["status"],
+)
+
+# ---------------------------------------------------------------------------
 # Cost pricing (USD per token) — GPT-4o-mini as default
 # ---------------------------------------------------------------------------
 

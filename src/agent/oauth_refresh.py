@@ -35,6 +35,16 @@ def _credentials_path() -> Path:
     return Path(config_dir) / ".credentials.json"
 
 
+def _update_token_metrics(expires_at_ms: float) -> None:
+    """Update Prometheus gauges for token expiry."""
+    from src.observability.metrics import OAUTH_TOKEN_EXPIRY, OAUTH_TOKEN_REMAINING
+
+    expiry_s = expires_at_ms / 1000
+    remaining_s = expiry_s - time.time()
+    OAUTH_TOKEN_EXPIRY.set(expiry_s)
+    OAUTH_TOKEN_REMAINING.set(remaining_s)
+
+
 def ensure_valid_token() -> None:
     """Check the OAuth access token and refresh it if expired or near-expiry.
 
@@ -67,6 +77,9 @@ def _refresh_if_needed() -> None:
         logger.debug("No expiresAt in credentials — skipping refresh")
         return
 
+    # Always update metrics so Prometheus has visibility
+    _update_token_metrics(float(expires_at))
+
     now_ms = int(time.time() * 1000)
     if now_ms < expires_at - _REFRESH_BUFFER_MS:
         logger.debug("Token still valid (expires in %ds)", (expires_at - now_ms) / 1000)
@@ -87,6 +100,8 @@ def _do_refresh(
     refresh_token: str,
 ) -> None:
     """Call the OAuth token endpoint and save the new credentials."""
+    from src.observability.metrics import OAUTH_REFRESH_TOTAL
+
     resp = httpx.post(
         _OAUTH_TOKEN_URL,
         json={
@@ -100,6 +115,7 @@ def _do_refresh(
     )
 
     if resp.status_code != 200:
+        OAUTH_REFRESH_TOTAL.labels(status="error").inc()
         logger.warning(
             "OAuth refresh returned HTTP %d: %s",
             resp.status_code,
@@ -113,6 +129,7 @@ def _do_refresh(
     expires_in = data.get("expires_in")
 
     if not isinstance(new_access, str) or not isinstance(expires_in, (int, float)):
+        OAUTH_REFRESH_TOTAL.labels(status="error").inc()
         logger.warning("OAuth refresh response missing expected fields: %s", list(data.keys()))
         return
 
@@ -120,7 +137,8 @@ def _do_refresh(
     oauth["accessToken"] = new_access
     if isinstance(new_refresh, str) and new_refresh:
         oauth["refreshToken"] = new_refresh
-    oauth["expiresAt"] = int((time.time() + float(expires_in)) * 1000)
+    new_expiry_ms = int((time.time() + float(expires_in)) * 1000)
+    oauth["expiresAt"] = new_expiry_ms
 
     new_creds = {"claudeAiOauth": oauth}
 
@@ -129,7 +147,54 @@ def _do_refresh(
     tmp_path.write_text(json.dumps(new_creds))
     tmp_path.rename(creds_path)
 
+    OAUTH_REFRESH_TOTAL.labels(status="success").inc()
+    _update_token_metrics(float(new_expiry_ms))
+
     logger.info(
         "OAuth token refreshed successfully (expires in %ds)",
         int(float(expires_in)),
     )
+
+
+def get_token_health() -> tuple[str, str | None]:
+    """Check OAuth token status for the health endpoint.
+
+    Returns:
+        (status, detail) — status is "healthy", "degraded", or "unhealthy".
+    """
+    creds_path = _credentials_path()
+    if not creds_path.exists():
+        return ("healthy", "no credentials file (not using OAuth)")
+
+    try:
+        creds: dict[str, object] = json.loads(creds_path.read_text())
+    except Exception:
+        return ("unhealthy", "cannot read credentials file")
+
+    oauth = creds.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return ("healthy", "no OAuth credentials (not using OAuth)")
+
+    expires_at = oauth.get("expiresAt")
+    if not isinstance(expires_at, (int, float)):
+        return ("unhealthy", "missing expiresAt in credentials")
+
+    now_ms = int(time.time() * 1000)
+    remaining_ms = int(expires_at) - now_ms
+    remaining_hours = remaining_ms / (1000 * 3600)
+
+    refresh_token = oauth.get("refreshToken")
+    has_refresh = isinstance(refresh_token, str) and len(refresh_token) > 0
+
+    if remaining_ms < 0:
+        if has_refresh:
+            return ("degraded", f"access token expired {-remaining_hours:.1f}h ago, refresh token available")
+        return ("unhealthy", f"access token expired {-remaining_hours:.1f}h ago, no refresh token")
+
+    if remaining_hours < 1:
+        return ("degraded", f"access token expires in {remaining_hours * 60:.0f}m")
+
+    if not has_refresh:
+        return ("degraded", f"access token valid ({remaining_hours:.1f}h), but no refresh token")
+
+    return ("healthy", f"access token valid ({remaining_hours:.1f}h), refresh token present")

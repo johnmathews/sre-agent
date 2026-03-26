@@ -116,8 +116,8 @@ class TestAskEndpoint:
         assert resp.json()["response"] == "Recovered after session reset."
 
     @pytest.mark.integration
-    def test_timeout_returns_500(self, client: TestClient) -> None:
-        """A timeout that escapes invoke_agent surfaces as a 500."""
+    def test_timeout_returns_504(self, client: TestClient) -> None:
+        """A timeout from the request timeout guard returns 504 Gateway Timeout."""
         with patch(
             "src.api.main.invoke_agent",
             new_callable=AsyncMock,
@@ -125,7 +125,7 @@ class TestAskEndpoint:
         ):
             resp = client.post("/ask", json={"question": "slow"})
 
-        assert resp.status_code == 500
+        assert resp.status_code == 504
         assert "timed out" in resp.json()["detail"]
 
 

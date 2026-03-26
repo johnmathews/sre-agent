@@ -102,6 +102,18 @@ Every external dependency has explicit error handling:
 All tools set `handle_tool_error = True` so errors are returned to the LLM as text (not raised as exceptions), allowing
 the agent to report failures gracefully to the user.
 
+### Request Timeout
+
+The `/ask` endpoint enforces a configurable timeout (default 120s, set via `REQUEST_TIMEOUT_SECONDS` env var). Requests
+that exceed this limit return HTTP 504 Gateway Timeout. This prevents long-running agent queries from holding connections
+indefinitely, which is critical when external services (like a morning report generator) send multiple concurrent queries.
+
+### Concurrency
+
+The production Dockerfile runs uvicorn with 2 workers to handle concurrent requests. The OAuth token refresh uses an
+`asyncio.Lock` to prevent concurrent requests from racing on single-use refresh tokens. The `hdd_power_status` tool
+parallelizes its independent API calls (Prometheus + TrueNAS) using `asyncio.create_task` to reduce wall-clock time.
+
 ### Query Correctness Safeguards
 
 The Prometheus tools include defense-in-depth against common query mistakes:

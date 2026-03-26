@@ -197,7 +197,7 @@ async def invoke_sdk_agent(
     """
     from src.agent.oauth_refresh import ensure_valid_token
 
-    ensure_valid_token()
+    await ensure_valid_token()
     settings = get_settings()
 
     # Rebuild system prompt with fresh timestamps each call
@@ -222,18 +222,28 @@ async def invoke_sdk_agent(
     # Call the SDK
     all_messages: list[Message] = []
     result_msg: ResultMessage | None = None
-    response_text = "No response generated."
+    last_text_block = ""
 
     async for msg in query(prompt=full_prompt, options=options):
         all_messages.append(msg)
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock) and block.text:
-                    response_text = block.text
+                    last_text_block = block.text
         elif isinstance(msg, ResultMessage):
             result_msg = msg
             if msg.is_error:
                 logger.warning("SDK query returned error: %s", msg.result)
+
+    # Prefer ResultMessage.result (the final synthesized answer) over
+    # intermediate AssistantMessage text blocks (which may be "thinking" text
+    # like "Let me check..." from mid-loop ReAct reasoning).
+    if result_msg and isinstance(result_msg.result, str) and result_msg.result.strip():
+        response_text = result_msg.result
+    elif last_text_block:
+        response_text = last_text_block
+    else:
+        response_text = "No response generated."
 
     # Record observability metrics
     record_sdk_metrics(all_messages, result_msg)
@@ -316,7 +326,7 @@ async def stream_sdk_agent(
     """
     from src.agent.oauth_refresh import ensure_valid_token
 
-    ensure_valid_token()
+    await ensure_valid_token()
     settings = get_settings()
 
     # Rebuild system prompt with fresh timestamps
@@ -342,7 +352,7 @@ async def stream_sdk_agent(
 
     all_messages: list[Message] = []
     result_msg: ResultMessage | None = None
-    response_text = "No response generated."
+    last_text_block = ""
 
     try:
         async for msg in query(prompt=full_prompt, options=options):
@@ -354,13 +364,21 @@ async def stream_sdk_agent(
                         label = _TOOL_LABELS.get(short_name, f"Running {short_name}")
                         yield {"type": "tool_start", "content": label, "tool_name": short_name}
                     elif isinstance(block, TextBlock) and block.text:
-                        response_text = block.text
+                        last_text_block = block.text
             elif isinstance(msg, ResultMessage):
                 result_msg = msg
     except Exception as exc:
         logger.exception("SDK streaming failed")
         yield {"type": "error", "content": f"Agent error: {exc}"}
         return
+
+    # Prefer ResultMessage.result over intermediate AssistantMessage text
+    if result_msg and isinstance(result_msg.result, str) and result_msg.result.strip():
+        response_text = result_msg.result
+    elif last_text_block:
+        response_text = last_text_block
+    else:
+        response_text = "No response generated."
 
     # Record metrics
     record_sdk_metrics(all_messages, result_msg)

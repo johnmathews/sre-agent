@@ -99,6 +99,8 @@ def mock_settings() -> Generator[Any]:
             "conversation_history_dir": "",
             # Agent memory store
             "memory_db_path": "",
+            # Request timeout
+            "request_timeout_seconds": 120,
         },
     )()
     with (

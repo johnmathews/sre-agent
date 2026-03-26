@@ -132,15 +132,30 @@ async def metrics() -> Response:
 async def ask(request: AskRequest) -> AskResponse:
     """Send a question to the SRE assistant and get a response."""
     session_id = request.session_id or uuid4().hex[:8]
+    settings = get_settings()
     REQUESTS_IN_PROGRESS.labels(endpoint="/ask").inc()
     start = time.monotonic()
 
     try:
-        response = await invoke_agent(
+        coro = invoke_agent(
             app.state.agent,
             request.question,
             session_id=session_id,
         )
+        timeout = settings.request_timeout_seconds
+        if timeout > 0:
+            response = await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            response = await coro
+    except TimeoutError:
+        duration = time.monotonic() - start
+        REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
+        REQUEST_DURATION.labels(endpoint="/ask").observe(duration)
+        logger.warning("Request timed out after %.1fs", duration)
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request timed out after {duration:.0f}s",
+        ) from None
     except Exception as exc:
         REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
         REQUEST_DURATION.labels(endpoint="/ask").observe(time.monotonic() - start)

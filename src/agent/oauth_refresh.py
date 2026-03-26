@@ -14,6 +14,7 @@ Flow:
      with the (possibly stale) token and surface its own auth error.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 _OAUTH_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 _CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _REFRESH_BUFFER_MS = 5 * 60 * 1000  # refresh 5 minutes before expiry
+
+# Prevents concurrent refresh attempts from racing on single-use refresh tokens.
+_refresh_lock = asyncio.Lock()
 
 
 def _credentials_path() -> Path:
@@ -45,26 +49,30 @@ def _update_token_metrics(expires_at_ms: float) -> None:
     OAUTH_TOKEN_REMAINING.set(remaining_s)
 
 
-def ensure_valid_token() -> None:
+async def ensure_valid_token() -> None:
     """Check the OAuth access token and refresh it if expired or near-expiry.
 
     This is a best-effort operation — any failure is logged and swallowed
     so it never blocks the agent from attempting its query.
+
+    Uses an asyncio.Lock to prevent concurrent callers from racing on
+    single-use refresh tokens.
     """
     try:
-        _refresh_if_needed()
+        async with _refresh_lock:
+            await _refresh_if_needed()
     except Exception:
         logger.warning("OAuth token refresh failed", exc_info=True)
 
 
-def _refresh_if_needed() -> None:
+async def _refresh_if_needed() -> None:
     """Read credentials, check expiry, refresh if needed."""
     creds_path = _credentials_path()
     if not creds_path.exists():
         logger.debug("No credentials file at %s — skipping refresh", creds_path)
         return
 
-    creds_text = creds_path.read_text()
+    creds_text = await asyncio.to_thread(creds_path.read_text)
     creds: dict[str, object] = json.loads(creds_text)
 
     oauth = creds.get("claudeAiOauth")
@@ -91,10 +99,10 @@ def _refresh_if_needed() -> None:
         return
 
     logger.info("OAuth access token expired or near-expiry, refreshing...")
-    _do_refresh(creds_path, oauth, refresh_token)
+    await _do_refresh(creds_path, oauth, refresh_token)
 
 
-def _do_refresh(
+async def _do_refresh(
     creds_path: Path,
     oauth: dict[str, object],
     refresh_token: str,
@@ -102,17 +110,17 @@ def _do_refresh(
     """Call the OAuth token endpoint and save the new credentials."""
     from src.observability.metrics import OAUTH_REFRESH_TOTAL
 
-    resp = httpx.post(
-        _OAUTH_TOKEN_URL,
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": _CLAUDE_CODE_CLIENT_ID,
-        },
-        headers={"Content-Type": "application/json"},
-        follow_redirects=True,
-        timeout=15.0,
-    )
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            _OAUTH_TOKEN_URL,
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLAUDE_CODE_CLIENT_ID,
+            },
+            headers={"Content-Type": "application/json"},
+            follow_redirects=True,
+        )
 
     if resp.status_code != 200:
         OAUTH_REFRESH_TOTAL.labels(status="error").inc()
@@ -144,8 +152,8 @@ def _do_refresh(
 
     # Atomic write: write to temp file then rename
     tmp_path = creds_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(new_creds))
-    tmp_path.rename(creds_path)
+    await asyncio.to_thread(tmp_path.write_text, json.dumps(new_creds))
+    await asyncio.to_thread(tmp_path.rename, creds_path)
 
     OAUTH_REFRESH_TOTAL.labels(status="success").inc()
     _update_token_metrics(float(new_expiry_ms))

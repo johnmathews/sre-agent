@@ -1,0 +1,138 @@
+"""Tests for SDK agent response extraction — verifying ResultMessage.result is preferred."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.agent.sdk_agent import invoke_sdk_agent
+
+
+def _make_assistant_message(text: str) -> MagicMock:
+    """Create a mock AssistantMessage with a TextBlock."""
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    block = MagicMock(spec=TextBlock)
+    block.text = text
+    # Make isinstance checks work
+    block.__class__ = TextBlock
+
+    msg = MagicMock(spec=AssistantMessage)
+    msg.content = [block]
+    msg.__class__ = AssistantMessage
+    return msg
+
+
+def _make_result_message(result_text: str, is_error: bool = False) -> MagicMock:
+    """Create a mock ResultMessage."""
+    from claude_agent_sdk.types import ResultMessage
+
+    msg = MagicMock(spec=ResultMessage)
+    msg.result = result_text
+    msg.is_error = is_error
+    msg.__class__ = ResultMessage
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_prefers_result_message_over_assistant_text(mock_settings: object) -> None:
+    """The final response should come from ResultMessage.result, not intermediate TextBlocks."""
+    thinking_msg = _make_assistant_message("Let me check the spinup transition times...")
+    result_msg = _make_result_message("The tank pool HDDs were in standby for 18.5 hours.")
+
+    async def mock_query(**kwargs: object):  # type: ignore[no-untyped-def]
+        yield thinking_msg
+        yield result_msg
+
+    options = MagicMock()
+    options.model = "test-model"
+    options.env = {}
+
+    with (
+        patch("src.agent.sdk_agent.query", side_effect=mock_query),
+        patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock),
+        patch("src.agent.sdk_agent.record_sdk_metrics"),
+        patch("src.agent.sdk_agent.extract_tool_names", return_value=[]),
+        patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"),
+        patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options),
+    ):
+        response = await invoke_sdk_agent(options, "How long were HDDs spun down?")
+
+    assert "18.5 hours" in response
+    assert "Let me check" not in response
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_last_text_block_when_no_result(mock_settings: object) -> None:
+    """When no ResultMessage is received, fall back to the last TextBlock."""
+    text_msg = _make_assistant_message("The CPU is at 42%.")
+
+    async def mock_query(**kwargs: object):  # type: ignore[no-untyped-def]
+        yield text_msg
+
+    options = MagicMock()
+    options.model = "test-model"
+    options.env = {}
+
+    with (
+        patch("src.agent.sdk_agent.query", side_effect=mock_query),
+        patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock),
+        patch("src.agent.sdk_agent.record_sdk_metrics"),
+        patch("src.agent.sdk_agent.extract_tool_names", return_value=[]),
+        patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"),
+        patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options),
+    ):
+        response = await invoke_sdk_agent(options, "What is CPU?")
+
+    assert "42%" in response
+
+
+@pytest.mark.asyncio
+async def test_empty_result_falls_back_to_text_block(mock_settings: object) -> None:
+    """When ResultMessage.result is empty, fall back to last TextBlock."""
+    text_msg = _make_assistant_message("CPU usage is 42%.")
+    result_msg = _make_result_message("   ")  # whitespace-only result
+
+    async def mock_query(**kwargs: object):  # type: ignore[no-untyped-def]
+        yield text_msg
+        yield result_msg
+
+    options = MagicMock()
+    options.model = "test-model"
+    options.env = {}
+
+    with (
+        patch("src.agent.sdk_agent.query", side_effect=mock_query),
+        patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock),
+        patch("src.agent.sdk_agent.record_sdk_metrics"),
+        patch("src.agent.sdk_agent.extract_tool_names", return_value=[]),
+        patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"),
+        patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options),
+    ):
+        response = await invoke_sdk_agent(options, "What is CPU?")
+
+    assert "42%" in response
+
+
+@pytest.mark.asyncio
+async def test_no_messages_returns_default(mock_settings: object) -> None:
+    """When no messages are received at all, return the default."""
+
+    async def mock_query(**kwargs: object):  # type: ignore[no-untyped-def]
+        return
+        yield  # make this an async generator
+
+    options = MagicMock()
+    options.model = "test-model"
+    options.env = {}
+
+    with (
+        patch("src.agent.sdk_agent.query", side_effect=mock_query),
+        patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock),
+        patch("src.agent.sdk_agent.record_sdk_metrics"),
+        patch("src.agent.sdk_agent.extract_tool_names", return_value=[]),
+        patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"),
+        patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options),
+    ):
+        response = await invoke_sdk_agent(options, "hello")
+
+    assert response == "No response generated."

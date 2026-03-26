@@ -41,7 +41,7 @@ services:
       - CLAUDE_CONFIG_DIR=/app/.claude
       - HOME=/app
     restart: unless-stopped
-    mem_limit: 384m
+    mem_limit: 768m  # 2 uvicorn workers + SDK CLI subprocesses need headroom
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations

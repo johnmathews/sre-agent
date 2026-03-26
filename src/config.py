@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # Agent memory store (optional — empty string means disabled)
     memory_db_path: str = ""
 
+    # Request timeout (seconds) for the /ask endpoint.  0 = no timeout.
+    request_timeout_seconds: int = 120
+
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""
     pbs_api_token: str = ""

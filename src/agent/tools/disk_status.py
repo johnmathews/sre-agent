@@ -4,6 +4,7 @@ Combines Prometheus disk_power_state metrics with TrueNAS disk inventory to prod
 human-readable HDD summaries without requiring the LLM to chain multiple queries.
 """
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -477,6 +478,25 @@ TOOL_DESCRIPTION = (
 )
 
 
+async def _safe_truenas_disks() -> list[TruenasDiskEntry]:
+    """Fetch TrueNAS disk inventory, returning [] on failure."""
+    try:
+        disks_raw = await _truenas_get("/disk")
+        return disks_raw if isinstance(disks_raw, list) else []
+    except Exception:
+        logger.warning("Failed to fetch TrueNAS disk inventory; showing device IDs only")
+        return []
+
+
+async def _safe_get_stats(dur_int: int) -> dict[str, DiskStats]:
+    """Fetch per-disk stats, returning {} on failure."""
+    try:
+        return await _get_stats(dur_int)
+    except Exception:
+        logger.warning("Failed to query stats for %ds", dur_int, exc_info=True)
+        return {}
+
+
 @tool("hdd_power_status", args_schema=HddPowerStatusInput)  # pyright: ignore[reportUnknownParameterType]
 async def hdd_power_status(
     duration: str = "24h",
@@ -491,39 +511,50 @@ async def hdd_power_status(
 
     settings = get_settings()
 
-    # Step 1: Get ALL current power states from Prometheus (no pool filter in PromQL)
+    # --- Phase 1: Fire independent API calls in parallel ---
+    # Current power states (Prometheus instant) + TrueNAS disk inventory + stats (range query)
+    # are all independent and can run concurrently.
+    power_task = asyncio.create_task(_get_current_power_states())
+    stats_task = asyncio.create_task(_safe_get_stats(dur_int))
+    truenas_task = asyncio.create_task(_safe_truenas_disks()) if settings.truenas_url else None
+
+    # Await all tasks (power_states may raise — that's intentional)
     try:
-        power_states = await _get_current_power_states()
+        power_states = await power_task
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to Prometheus: {e}") from e
     except httpx.TimeoutException as e:
-        raise ToolException(f"Prometheus query timed out after {PROM_TIMEOUT}s: {e}") from e
+        raise ToolException(
+            f"Prometheus query timed out after {PROM_TIMEOUT}s: {e}"
+        ) from e
     except httpx.HTTPStatusError as e:
-        raise ToolException(f"Prometheus API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
+        raise ToolException(
+            f"Prometheus API error: HTTP {e.response.status_code} - {e.response.text[:500]}"
+        ) from e
 
     if not power_states:
         raise ToolException("No disk_power_state metrics found. Check that disk-status-exporter is running on TrueNAS.")
 
-    # Step 2: Get disk inventory from TrueNAS (if configured)
+    period_stats = await stats_task
+    truenas_disks: list[TruenasDiskEntry] = await truenas_task if truenas_task else []
+
+    # --- Phase 2: Build disk lookup + enrich pools (needs truenas_disks) ---
     disk_lookup: dict[str, TruenasDiskEntry] = {}
-    if settings.truenas_url:
-        try:
-            disks_raw = await _truenas_get("/disk")
-            disks: list[TruenasDiskEntry] = disks_raw if isinstance(disks_raw, list) else []
-            disk_lookup = _build_disk_lookup(disks)
-        except Exception:
-            logger.warning("Failed to fetch TrueNAS disk inventory; showing device IDs only")
+    if truenas_disks:
+        disk_lookup = _build_disk_lookup(truenas_disks)
         if disk_lookup:
-            # /disk may return pool as null — enrich from /pool topology
             await _enrich_disk_pools(disk_lookup)
 
-    # Step 3: Apply pool filter in Python (not PromQL — the metric may lack a pool label)
+    # Apply pool filter in Python (not PromQL — the metric may lack a pool label)
     pool_device_ids: set[str] | None = None
     if pool:
         pool_device_ids = _resolve_pool_filter(pool, power_states, disk_lookup)
         power_states = [s for s in power_states if s.get("metric", {}).get("device_id", "unknown") in pool_device_ids]
 
-    # Step 4: Cross-reference and format current state
+    if pool_device_ids is not None:
+        period_stats = {k: v for k, v in period_stats.items() if k in pool_device_ids}
+
+    # --- Format current state ---
     lines: list[str] = ["HDD Power Status:\n"]
 
     active_disks: list[str] = []
@@ -537,12 +568,10 @@ async def hdd_power_status(
         power_value = float(str(value_pair[1])) if len(value_pair) > 1 else -1
         power_int = int(power_value)
 
-        # Cross-reference with TrueNAS disk inventory
         hex_key = _extract_hex(device_id)
         disk_entry = disk_lookup.get(hex_key)
         disk_name = _format_disk_name(disk_entry, device_id)
         state_label = _format_power_state(power_value)
-        # Prefer TrueNAS pool (enriched from /pool topology) over Prometheus label
         entry_pool = disk_entry.get("pool", "") if disk_entry else ""
         pool_display = entry_pool or series_pool
         pool_str = f" [pool: {pool_display}]" if pool_display else ""
@@ -569,19 +598,10 @@ async def hdd_power_status(
         lines.append(f"Other ({len(other_disks)}):")
         lines.extend(other_disks)
 
-    # Step 5: Get stats for the requested duration (change counts + time-in-state)
-    period_stats: dict[str, DiskStats] = {}
-    try:
-        period_stats = await _get_stats(dur_int)
-        if pool_device_ids is not None:
-            period_stats = {k: v for k, v in period_stats.items() if k in pool_device_ids}
-    except Exception:
-        logger.warning("Failed to query stats for %s", duration, exc_info=True)
-
+    # --- Stats (already fetched in phase 1) ---
     if period_stats:
         total_changes = sum(s.change_count for s in period_stats.values())
         lines.append(f"\nLast {duration}: {total_changes} state change(s) total")
-        # Build pool lookup from current power states (metrics have pool label)
         pool_by_device: dict[str, str] = {}
         for series in power_states:
             did = series.get("metric", {}).get("device_id", "unknown")
@@ -590,7 +610,6 @@ async def hdd_power_status(
             hex_key = _extract_hex(device_id)
             disk_entry = disk_lookup.get(hex_key)
             disk_name = _format_disk_name(disk_entry, device_id)
-            # Prefer TrueNAS pool over Prometheus label
             entry_pool = disk_entry.get("pool", "") if disk_entry else ""
             dev_pool = entry_pool or pool_by_device.get(device_id, "")
             pool_str = f" [pool: {dev_pool}]" if dev_pool else ""
@@ -599,37 +618,47 @@ async def hdd_power_status(
                 f"standby {stats.standby_pct}%, active {stats.active_pct}%"
             )
 
-    # Step 6: Find last state transitions
+    # --- Phase 3: Transition history ---
+    # Use stats data to check if the requested duration already has transitions.
+    # This avoids the progressive-widening loop re-querying the same time ranges.
+    has_changes_in_stats = any(s.change_count > 0 for s in period_stats.values())
+
     lines.append("\nLast power state change:")
     try:
-        window, _ = await _find_transition_window()
-        if window is None:
-            lines.append(
-                "  No power state changes detected in the last 7 days. "
-                "All disks have been in their current state for at least 7 days."
-            )
+        if has_changes_in_stats:
+            # We know the requested duration has transitions — use it directly
+            # instead of progressively widening from 1h → 6h → 24h → 7d.
+            transitions = await _find_transition_times(duration)
         else:
+            # Stats didn't show changes — check wider windows
+            window, _ = await _find_transition_window()
+            if window is None:
+                lines.append(
+                    "  No power state changes detected in the last 7 days. "
+                    "All disks have been in their current state for at least 7 days."
+                )
+                return "\n".join(lines)
             transitions = await _find_transition_times(window)
-            if pool_device_ids is not None:
-                transitions = {k: v for k, v in transitions.items() if k in pool_device_ids}
-            if not transitions:
-                lines.append(f"  Changes detected in the last {window} but could not pinpoint exact times.")
-            else:
-                for device_id, transition_desc in transitions.items():
-                    hex_key = _extract_hex(device_id)
+
+        if pool_device_ids is not None:
+            transitions = {k: v for k, v in transitions.items() if k in pool_device_ids}
+        if not transitions:
+            lines.append("  Changes detected but could not pinpoint exact times.")
+        else:
+            for device_id, transition_desc in transitions.items():
+                hex_key = _extract_hex(device_id)
+                disk_entry = disk_lookup.get(hex_key)
+                disk_name = _format_disk_name(disk_entry, device_id)
+                lines.append(f"  {disk_name} — {transition_desc}")
+
+            transition_hex_keys = {_extract_hex(did) for did in transitions}
+            for series in power_states:
+                device_id = series.get("metric", {}).get("device_id", "unknown")
+                hex_key = _extract_hex(device_id)
+                if hex_key not in transition_hex_keys:
                     disk_entry = disk_lookup.get(hex_key)
                     disk_name = _format_disk_name(disk_entry, device_id)
-                    lines.append(f"  {disk_name} — {transition_desc}")
-
-                # Note any disks without transitions in this window
-                transition_hex_keys = {_extract_hex(did) for did in transitions}
-                for series in power_states:
-                    device_id = series.get("metric", {}).get("device_id", "unknown")
-                    hex_key = _extract_hex(device_id)
-                    if hex_key not in transition_hex_keys:
-                        disk_entry = disk_lookup.get(hex_key)
-                        disk_name = _format_disk_name(disk_entry, device_id)
-                        lines.append(f"  {disk_name} — no change in the last {window}")
+                    lines.append(f"  {disk_name} — no change in the last {duration}")
 
     except Exception:
         logger.warning("Failed to query transition history", exc_info=True)

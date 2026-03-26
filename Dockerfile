@@ -45,4 +45,6 @@ RUN chmod +x .venv/lib/python*/site-packages/claude_agent_sdk/_bundled/claude 2>
 EXPOSE 8000 8501
 
 # Default: run the FastAPI API server
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 2 workers to handle concurrent requests (morning report fires multiple queries).
+# --timeout-keep-alive prevents idle connections from being dropped mid-response.
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "130"]

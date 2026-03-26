@@ -62,6 +62,11 @@ def _record_sdk_metrics_inner(
     # LLM call count — one per request (SDK abstraction)
     LLM_CALLS_TOTAL.labels(status="success").inc()
 
+    # Per-tool duration (approximate, from message-yield timestamps)
+    if tool_durations:
+        for tool_name, duration in tool_durations:
+            TOOL_CALL_DURATION.labels(tool_name=tool_name).observe(duration)
+
     if result is None:
         return
 
@@ -85,11 +90,6 @@ def _record_sdk_metrics_inner(
             LLM_TOKEN_USAGE.labels(type="cache_read").inc(cache_read)
         if cache_creation:
             LLM_TOKEN_USAGE.labels(type="cache_creation").inc(cache_creation)
-
-    # Per-tool duration (approximate, from message-yield timestamps)
-    if tool_durations:
-        for tool_name, duration in tool_durations:
-            TOOL_CALL_DURATION.labels(tool_name=tool_name).observe(duration)
 
 
 def extract_tool_names(messages: list[SdkMessage]) -> list[str]:

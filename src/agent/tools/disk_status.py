@@ -524,13 +524,9 @@ async def hdd_power_status(
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to Prometheus: {e}") from e
     except httpx.TimeoutException as e:
-        raise ToolException(
-            f"Prometheus query timed out after {PROM_TIMEOUT}s: {e}"
-        ) from e
+        raise ToolException(f"Prometheus query timed out after {PROM_TIMEOUT}s: {e}") from e
     except httpx.HTTPStatusError as e:
-        raise ToolException(
-            f"Prometheus API error: HTTP {e.response.status_code} - {e.response.text[:500]}"
-        ) from e
+        raise ToolException(f"Prometheus API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
 
     if not power_states:
         raise ToolException("No disk_power_state metrics found. Check that disk-status-exporter is running on TrueNAS.")

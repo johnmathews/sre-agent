@@ -202,18 +202,24 @@ async def test_concurrent_refresh_serialized(tmp_path: Path) -> None:
         call_count += 1
         # Simulate the refresh updating the credentials file
         new_expiry = int((time.time() + 28800) * 1000)
-        creds_path.write_text(json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "sk-ant-oat01-refreshed",
-                "refreshToken": "sk-ant-ort01-refreshed",
-                "expiresAt": new_expiry,
-                "scopes": ["user:inference"],
-                "subscriptionType": "max",
-                "rateLimitTier": "default_claude_max_5x",
-            }
-        }))
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "sk-ant-oat01-refreshed",
+                        "refreshToken": "sk-ant-ort01-refreshed",
+                        "expiresAt": new_expiry,
+                        "scopes": ["user:inference"],
+                        "subscriptionType": "max",
+                        "rateLimitTier": "default_claude_max_5x",
+                    }
+                }
+            )
+        )
         return type(
-            "R", (), {
+            "R",
+            (),
+            {
                 "status_code": 200,
                 "json": lambda self: {
                     "access_token": "sk-ant-oat01-refreshed",

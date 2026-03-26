@@ -62,6 +62,7 @@ make serve         # FastAPI dev server on :8000
 make ingest        # Rebuild Chroma vector store from runbooks/
 make chat          # Interactive CLI REPL for the agent
 make report        # Generate weekly reliability report to stdout
+make hooks         # Install git pre-commit + pre-push hooks
 uv run pytest tests/test_foo.py::test_bar  # Run a single test
 ```
 

@@ -230,7 +230,8 @@ Complete HDD power status summary: current state, human-readable disk names, and
   model, size, serial, pool. Change counts and time-in-state percentages for the requested duration. Last power state
   change timestamp with from/to transition. Automatically cross-references Prometheus `disk_power_state` with TrueNAS
   disk inventory, enriches pool assignments from `/pool` topology (since `/disk` returns pool as null), and uses
-  progressive `changes()` widening to find transitions.
+  progressive `changes()` widening to find transitions. API calls to Prometheus and TrueNAS are made concurrently
+  using `asyncio.create_task` to minimize total query time.
 
 ## Proxmox Backup Server (enabled when `PBS_URL` is set)
 

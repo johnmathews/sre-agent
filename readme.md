@@ -126,6 +126,7 @@ volume:
       - "8000:8000"
     env_file: .env
     restart: unless-stopped
+    mem_limit: 768m  # 1 uvicorn worker + up to ~5 concurrent SDK CLI subprocesses
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
@@ -195,8 +196,14 @@ Create a `.env` file on the deployment host. See `.env.example` for the full lis
 | `LOKI_URL`            | Loki log tools (4 tools)    |
 | `EXTRA_DOCS_DIRS`     | Additional RAG doc directories (comma-separated absolute paths) |
 | `CONVERSATION_HISTORY_HOST_DIR` | Host path for conversation JSON files (bind-mounted to `/app/conversations` in Docker) |
+| `REQUEST_TIMEOUT_SECONDS` | Timeout for `/ask` endpoint in seconds (default: 120). Requests exceeding this return HTTP 504 |
 
 All URLs must point to addresses reachable from inside the Docker container — see [Networking](#networking).
+
+> **Concurrency note:** The API runs a single uvicorn worker. This is intentional — the SDK `query()` is async
+> (subprocess-based) so one event loop handles multiple concurrent requests efficiently. Multiple workers would break
+> the `asyncio.Lock` that serializes OAuth token refresh (refresh tokens are single-use). If concurrent queries cause
+> OOM, increase `mem_limit` rather than adding workers.
 
 ### Networking
 
@@ -285,13 +292,13 @@ A single **GitHub Actions** workflow (`.github/workflows/ci.yml`) handles everyt
 2. **Build** — On pushes to `main` only: builds the Docker image and pushes to
    `ghcr.io/johnmathews/sre-assistant:latest` (and `:sha-<commit>`). Only runs after check passes.
 
-**Pre-push hook** — Install a local git hook that runs `make check` before allowing pushes:
+**Git hooks** — Install local pre-commit (lint + format) and pre-push (full check) hooks:
 
 ```bash
 make hooks
 ```
 
-This blocks pushes if lint, typecheck, or tests fail — catching issues before they reach CI.
+The pre-commit hook catches formatting issues immediately. The pre-push hook runs the full suite (lint + typecheck + tests) before allowing pushes.
 
 ---
 

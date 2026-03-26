@@ -13,6 +13,7 @@ from src.observability.metrics import (
     LLM_CALLS_TOTAL,
     LLM_ESTIMATED_COST,
     LLM_TOKEN_USAGE,
+    TOOL_CALL_DURATION,
     TOOL_CALLS_TOTAL,
 )
 
@@ -25,19 +26,19 @@ type SdkMessage = Any
 def record_sdk_metrics(
     messages: list[SdkMessage],
     result: ResultMessage | None,
+    tool_durations: list[tuple[str, float]] | None = None,
 ) -> None:
     """Record Prometheus metrics from SDK messages.
 
     Called once per ``invoke_sdk_agent()`` call. Extracts tool call counts,
-    token usage, and cost from the SDK's message stream.
+    token usage, cost, and per-tool duration from the SDK's message stream.
 
-    Note: LLM_CALLS_TOTAL is incremented once per request (not per ReAct
-    round-trip) because the SDK abstracts away individual LLM calls.
-    TOOL_CALL_DURATION histograms are not populated — the SDK does not
-    expose per-tool timing.
+    ``tool_durations`` is a list of ``(tool_name, seconds)`` pairs measured
+    by timestamping the gap between SDK message yields. This is approximate
+    (includes network overhead) but sufficient for the Grafana dashboard.
     """
     try:
-        _record_sdk_metrics_inner(messages, result)
+        _record_sdk_metrics_inner(messages, result, tool_durations)
     except Exception:
         logger.debug("Failed to record SDK metrics", exc_info=True)
 
@@ -45,6 +46,7 @@ def record_sdk_metrics(
 def _record_sdk_metrics_inner(
     messages: list[SdkMessage],
     result: ResultMessage | None,
+    tool_durations: list[tuple[str, float]] | None = None,
 ) -> None:
     # Count tool calls from AssistantMessage content blocks
     for msg in messages:
@@ -83,6 +85,11 @@ def _record_sdk_metrics_inner(
             LLM_TOKEN_USAGE.labels(type="cache_read").inc(cache_read)
         if cache_creation:
             LLM_TOKEN_USAGE.labels(type="cache_creation").inc(cache_creation)
+
+    # Per-tool duration (approximate, from message-yield timestamps)
+    if tool_durations:
+        for tool_name, duration in tool_durations:
+            TOOL_CALL_DURATION.labels(tool_name=tool_name).observe(duration)
 
 
 def extract_tool_names(messages: list[SdkMessage]) -> list[str]:

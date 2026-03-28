@@ -146,7 +146,7 @@ def build_sdk_options(
         allowed_tools=[f"{_MCP_PREFIX}*"],
         disallowed_tools=_BLOCKED_BUILTINS,
         permission_mode="bypassPermissions",
-        max_turns=10,
+        max_turns=25,
         # Strip ANTHROPIC_API_KEY from the CLI subprocess environment.
         # The app's Settings validator requires this env var, but the CLI
         # must NOT see it: the CLI treats ANTHROPIC_API_KEY as an X-Api-Key

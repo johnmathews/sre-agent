@@ -61,6 +61,11 @@ _BLOCKED_BUILTINS = [
 # Tool name prefix added by the SDK for MCP server tools
 _MCP_PREFIX = "mcp__sre__"
 
+# Guard against CLI-side inactivity timer not being reset by MCP responses
+# (anthropics/claude-agent-sdk-typescript#114).  Set to 1 hour so the CLI
+# never closes stdin during long multi-tool agent loops.
+_STREAM_CLOSE_TIMEOUT_MS = "3600000"
+
 # Regex to match short tool names in the system prompt (word boundary)
 _TOOL_NAME_PATTERN = re.compile(
     r"\b("
@@ -148,7 +153,10 @@ def build_sdk_options(
         # header (auth precedence item 3), which fails when the value is an
         # OAuth token (sk-ant-oat*).  The CLI should fall through to OAuth
         # credentials in .credentials.json (auth precedence item 5).
-        env={"ANTHROPIC_API_KEY": ""},
+        env={
+            "ANTHROPIC_API_KEY": "",
+            "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": _STREAM_CLOSE_TIMEOUT_MS,
+        },
     )
     return options
 

@@ -5,6 +5,7 @@ The agent is built once at startup and shared across requests.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -118,6 +119,68 @@ app = FastAPI(title="HomeLab SRE Assistant", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
+# SSE heartbeat wrapper
+# ---------------------------------------------------------------------------
+
+type SSEEvent = dict[str, str]
+
+# Interval between heartbeat SSE events (seconds).  Must be shorter than
+# Cloudflare's 100 s idle timeout and the Streamlit client's 120 s timeout.
+_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+async def _with_heartbeats(
+    events: AsyncIterator[SSEEvent],
+    interval: float = _HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncIterator[SSEEvent]:
+    """Wrap an async event stream with periodic heartbeat events.
+
+    During long tool executions the agent may not yield any events for 30-60+
+    seconds.  Without heartbeats the Cloudflare tunnel (100 s idle) or the
+    Streamlit httpx client (120 s timeout) will close the connection.
+
+    Heartbeat events have ``{"type": "heartbeat", "content": ""}``.  Clients
+    that don't recognize this type should silently ignore them.
+    """
+    queue: asyncio.Queue[SSEEvent | None] = asyncio.Queue()
+    source_error: BaseException | None = None
+
+    async def _producer() -> None:
+        nonlocal source_error
+        try:
+            async for event in events:
+                await queue.put(event)
+        except BaseException as exc:
+            source_error = exc
+        finally:
+            await queue.put(None)  # sentinel
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(interval)
+            await queue.put({"type": "heartbeat", "content": ""})
+
+    producer = asyncio.create_task(_producer())
+    heartbeat = asyncio.create_task(_heartbeat())
+
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+        if not producer.done():
+            await producer
+
+    if source_error is not None:
+        raise source_error
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -184,11 +247,12 @@ async def ask_stream(request: AskRequest) -> StreamingResponse:
 
     async def event_generator() -> AsyncIterator[str]:
         try:
-            async for event in stream_agent(
+            raw_events = stream_agent(
                 app.state.agent,
                 request.question,
                 session_id=session_id,
-            ):
+            )
+            async for event in _with_heartbeats(raw_events):
                 yield f"data: {json.dumps(event)}\n\n"
 
                 if event.get("type") == "answer":

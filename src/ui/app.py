@@ -127,7 +127,10 @@ if prompt := st.chat_input("Ask about your infrastructure..."):
 
                     event_type = event.get("type", "")
 
-                    if event_type == "status":
+                    if event_type == "heartbeat":
+                        continue  # keepalive — ignore silently
+
+                    elif event_type == "status":
                         _render_status(active_tools, event.get("content", ""))
 
                     elif event_type == "tool_start":

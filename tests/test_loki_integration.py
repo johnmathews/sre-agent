@@ -407,6 +407,50 @@ class TestLokiCorrelateChanges:
         assert "Cannot parse time" in result
 
     @respx.mock
+    async def test_no_filters_uses_valid_selector(self) -> None:
+        """Without hostname/service filters, queries must NOT use empty '{}' selector."""
+        error_route = respx.get(
+            "http://loki.test:3100/loki/api/v1/query_range",
+            params__contains={"limit": "200"},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"status": "success", "data": {"resultType": "streams", "result": []}},
+            )
+        )
+
+        lifecycle_route = respx.get(
+            "http://loki.test:3100/loki/api/v1/query_range",
+            params__contains={"limit": "100"},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"status": "success", "data": {"resultType": "streams", "result": []}},
+            )
+        )
+
+        # Mock /ready for connectivity check
+        respx.get("http://loki.test:3100/ready").mock(return_value=httpx.Response(200, text="ready"))
+
+        await loki_correlate_changes.ainvoke(
+            {
+                "reference_time": "2024-06-15T14:00:00Z",
+                "window_minutes": 10,
+            }
+        )
+
+        # Lifecycle query must NOT contain an empty {} selector
+        assert lifecycle_route.called
+        lifecycle_query = lifecycle_route.calls.last.request.url.params["query"]
+        assert not lifecycle_query.startswith("{}")
+        assert 'hostname=~".+"' in lifecycle_query
+
+        # Error query should also use a valid selector
+        assert error_route.called
+        error_query = error_route.calls.last.request.url.params["query"]
+        assert not error_query.startswith("{}")
+
+    @respx.mock
     async def test_deduplicates_events(self) -> None:
         """Events found by both error and lifecycle queries should not be duplicated."""
         same_event = {

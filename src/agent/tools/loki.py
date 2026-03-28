@@ -816,14 +816,15 @@ async def loki_correlate_changes(
     start_ns = _datetime_to_nanoseconds(window_start)
     end_ns = _datetime_to_nanoseconds(ref_dt)
 
-    # Build label selector
+    # Build label selector — Loki requires at least one label matcher in
+    # the stream selector.  When no filters are provided, match all hosts.
     label_filters: list[str] = []
     if hostname:
         label_filters.append(f'hostname="{hostname}"')
     if service_name:
         label_filters.append(f'service_name="{service_name}"')
 
-    base_selector = "{" + ", ".join(label_filters) + "}" if label_filters else "{}"
+    base_selector = "{" + ", ".join(label_filters) + "}" if label_filters else '{hostname=~".+"}'
 
     all_events: list[_TimelineEvent] = []
 

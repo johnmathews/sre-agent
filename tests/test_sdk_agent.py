@@ -6,6 +6,7 @@ import pytest
 
 from src.agent.sdk_agent import (
     _BLOCKED_BUILTINS,
+    _STREAM_CLOSE_TIMEOUT_MS,
     _build_system_prompt,
     _prefix_tool_names,
     build_sdk_options,
@@ -108,3 +109,12 @@ class TestBuildSdkOptions:
             mock_mcp.return_value = MagicMock()
             options = build_sdk_options()
             assert options.env.get("ANTHROPIC_API_KEY") == ""
+
+    def test_env_sets_stream_close_timeout(self) -> None:
+        """CLAUDE_CODE_STREAM_CLOSE_TIMEOUT guards against CLI inactivity timer bug."""
+        with patch("src.agent.sdk_agent.build_mcp_server") as mock_mcp:
+            mock_mcp.return_value = MagicMock()
+            options = build_sdk_options()
+            assert options.env.get("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT") == _STREAM_CLOSE_TIMEOUT_MS
+            # Must be a large value (at least 10 minutes) to survive long agent loops
+            assert int(_STREAM_CLOSE_TIMEOUT_MS) >= 600_000

@@ -114,6 +114,27 @@ The production Dockerfile runs uvicorn with 2 workers to handle concurrent reque
 `asyncio.Lock` to prevent concurrent requests from racing on single-use refresh tokens. The `hdd_power_status` tool
 parallelizes its independent API calls (Prometheus + TrueNAS) using `asyncio.create_task` to reduce wall-clock time.
 
+### SDK Stream Resilience
+
+The Anthropic/SDK agent path runs the Claude Code CLI as a subprocess, communicating via stdin/stdout using the MCP
+protocol. Several failure modes can cause MCP tool calls to fail with "Stream closed" errors:
+
+1. **60-second stdin timeout** (fixed in `claude-agent-sdk>=0.1.51`) — the SDK closed stdin after 60s even when MCP
+   servers required the bidirectional pipe to stay open. Multi-tool agent loops easily exceed 60s.
+2. **CLI inactivity timer** (open bug, `anthropics/claude-agent-sdk-typescript#114`) — the CLI's `lastActivityTime` is
+   not reset when MCP server responses arrive. After ~15s of perceived inactivity, subsequent MCP calls are rejected.
+3. **Client/proxy idle timeouts** — Cloudflare tunnels close after 100s idle; the Streamlit `httpx` client times out
+   after 120s.
+
+Mitigations applied:
+
+- **SDK version floor** — `claude-agent-sdk>=0.1.51` in `pyproject.toml` to include the stdin timeout fix.
+- **`CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=3600000`** — set in the CLI subprocess environment (`build_sdk_options()`) to
+  override the CLI's inactivity timer to 1 hour, working around bug #2.
+- **SSE heartbeat events** — the `/ask/stream` endpoint wraps the agent event stream with `_with_heartbeats()`, which
+  injects `{"type": "heartbeat", "content": ""}` events every 15 seconds during long tool executions. This keeps
+  the Cloudflare tunnel and httpx client alive. The Streamlit UI silently ignores heartbeat events.
+
 ### Query Correctness Safeguards
 
 The Prometheus tools include defense-in-depth against common query mistakes:

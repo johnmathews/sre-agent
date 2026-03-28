@@ -56,16 +56,31 @@ every 15 seconds during long agent processing. This prevents:
 
 The Streamlit UI ignores heartbeat events via a `continue` in the event loop.
 
+### 5. CI speedup: parallel build + caching
+
+Optimized `.github/workflows/ci.yml`:
+- Removed `needs: check` from the build job so check and build run in parallel instead of sequentially.
+- Added `actions/cache@v5` for `.mypy_cache` (the 43s typecheck step was the dominant bottleneck).
+- Enabled uv package caching via `astral-sh/setup-uv@v4`'s `enable-cache: true`.
+- Expected improvement: ~98s → ~32s wall clock.
+
+### 6. Increase `max_turns` from 10 to 25
+
+After deploying the Stream closed fixes, verified that tools now work reliably. But complex investigative queries
+(like the HDD spinup correlation) need 15+ tool calls across multiple systems. 10 turns was too tight — the agent
+kept hitting `error_max_turns` before finishing. Bumped to 25.
+
 ## Files Changed
 
 - `pyproject.toml` — SDK version floor bump
 - `uv.lock` — Resolves to `claude-agent-sdk==0.1.51`
-- `src/agent/sdk_agent.py` — `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` env var
+- `src/agent/sdk_agent.py` — `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` env var, `max_turns=25`
 - `src/agent/tools/loki.py` — Fixed empty selector in `loki_correlate_changes`
 - `src/api/main.py` — `_with_heartbeats()` wrapper on `/ask/stream`
 - `src/ui/app.py` — Ignore heartbeat events
 - `docs/architecture.md` — "SDK Stream Resilience" section
-- `tests/test_sdk_agent.py` — Test env var presence and value
+- `.github/workflows/ci.yml` — Parallel build, mypy + uv caching
+- `tests/test_sdk_agent.py` — Test env var presence, max_turns value
 - `tests/test_loki_integration.py` — Test valid selector when no filters
 - `tests/test_heartbeat.py` — 7 tests for heartbeat wrapper
 

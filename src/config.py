@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # Request timeout (seconds) for the /ask endpoint.  0 = no timeout.
     request_timeout_seconds: int = 120
 
+    # Documentation MCP server (optional — empty string means not configured)
+    # Provides semantic search over indexed git repos (disk-status-exporter, etc.)
+    # SDK/Anthropic path only — adds as an external MCP server alongside SRE tools.
+    documentation_mcp_url: str = ""
+
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""
     pbs_api_token: str = ""

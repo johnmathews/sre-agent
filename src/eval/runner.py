@@ -155,6 +155,7 @@ def _build_fake_settings(
         "truenas_verify_ssl": False,
         "truenas_ca_cert": "",
         "memory_db_path": "",
+        "documentation_mcp_url": "",
     }
 
     # Enable services that the case needs

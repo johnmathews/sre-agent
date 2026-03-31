@@ -19,6 +19,7 @@ is skipped entirely (no failed connections, no error logs).
 | PBS              | `pbs_datastore_status`, `pbs_list_backups`, `pbs_list_tasks`                                               | `PBS_URL`                   | No                        |
 | Memory           | `memory_search_incidents`, `memory_record_incident`, `memory_get_previous_report`, `memory_check_baseline` | `MEMORY_DB_PATH`            | No                        |
 | RAG              | `runbook_search`                                                                                           | Chroma vector store on disk | Yes (after `make ingest`) |
+| Documentation    | `search_docs`, `query_docs`, `get_document`, `list_sources`                                                | `DOCUMENTATION_MCP_URL`     | No (SDK path only)        |
 
 Health checks (`GET /health`) also follow this pattern — only configured services are checked.
 

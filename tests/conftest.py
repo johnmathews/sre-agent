@@ -101,6 +101,8 @@ def mock_settings() -> Generator[Any]:
             "memory_db_path": "",
             # Request timeout
             "request_timeout_seconds": 120,
+            # Documentation MCP server
+            "documentation_mcp_url": "",
         },
     )()
     with (

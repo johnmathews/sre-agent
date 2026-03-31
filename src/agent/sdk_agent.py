@@ -15,6 +15,8 @@ from pathlib import Path
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
     AssistantMessage,
+    McpHttpServerConfig,
+    McpServerConfig,
     Message,
     ResultMessage,
     TextBlock,
@@ -139,11 +141,22 @@ def build_sdk_options(
     system_prompt = _build_system_prompt()
     mcp_server = build_mcp_server(settings)
 
+    mcp_servers: dict[str, McpServerConfig] = {"sre": mcp_server}
+    allowed_tools = [f"{_MCP_PREFIX}*"]
+
+    if settings.documentation_mcp_url:
+        docs_server: McpHttpServerConfig = {
+            "type": "http",
+            "url": settings.documentation_mcp_url,
+        }
+        mcp_servers["docs"] = docs_server
+        allowed_tools.append("mcp__docs__*")
+
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         model=model,
-        mcp_servers={"sre": mcp_server},
-        allowed_tools=[f"{_MCP_PREFIX}*"],
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
         disallowed_tools=_BLOCKED_BUILTINS,
         permission_mode="bypassPermissions",
         max_turns=25,

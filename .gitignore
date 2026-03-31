@@ -23,3 +23,6 @@ chroma_data/
 
 # OS
 .DS_Store
+
+# Coverage artifact
+.coverage

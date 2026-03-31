@@ -146,6 +146,27 @@ the complexity automatically:
 - Uses progressive `changes()` widening (1h→6h→24h→7d) to find recent transitions
 - Pinpoints exact transition timestamps via range queries
 
+### Attributing spinup causes
+
+A disk spinup is **confirmed** caused by a process only if there is direct evidence that the process performed disk I/O
+(e.g. a block device read/write in logs, an NFS mount access, or a logged smartctl invocation that did not use
+`-n standby`). Temporal proximity alone — e.g. "a smartctl scan took 10s and the disk spun up during that window" — is
+**not proof**. The scan duration increase could be a _consequence_ of the spinup (reading a waking disk is slow), not its
+cause.
+
+When reporting spinup causes, always state whether the attribution is:
+
+- **Confirmed** — direct evidence of disk I/O by the identified process
+- **Unconfirmed** — temporal correlation only (events happened close together but no causal link proven)
+
+Common false positives:
+
+- **disk-status-exporter** runs `smartctl -n standby` which explicitly avoids waking sleeping disks. A slow scan
+  duration during a spinup window means the disk was already waking, not that the exporter caused it. See
+  `runbooks/disk-status-exporter.md` for details.
+- **TrueNAS middleware** (TNAUDIT entries) runs REST API calls every ~30s — these are metadata operations that
+  typically do not cause disk I/O.
+
 ### Related metrics
 
 ```promql

@@ -136,6 +136,19 @@ Lessons learned from debugging these failures:
    tools from services not in `required_services`, those HTTP calls also return 503. The agent
    may interpret multiple 503s as a systemic connectivity issue.
 
+### Diagnostic methodology guidelines
+1. **Test evidence-gathering, not just tool calls.** The `diagnostic-service-failure` eval case
+   tests whether the agent checks Loki logs for actual error messages before diagnosing. The rubric
+   verifies the agent cites specific error messages (`BlockingIOError`, `RuntimeError`) and correctly
+   categorizes them as resource exhaustion — not pattern-matching "git fetch failure" to "expired
+   token." This is the eval equivalent of the system prompt's "Diagnostic Methodology" section.
+2. **Include both public and private resources in mock data.** When testing scope analysis, include
+   failures from resources that don't require authentication alongside ones that do. If the agent
+   claims "auth failure" when unauthenticated resources also fail, the rubric should catch this.
+3. **Mock Loki endpoints comprehensively.** Diagnostic cases need `/loki/api/v1/query_range`,
+   `/loki/api/v1/labels`, `/loki/api/v1/label/hostname/values`, and `/ready`. Missing mocks cause
+   503s that the agent may interpret as "Loki is down" rather than using available data.
+
 ### Memory tool guidelines
 1. **Seed baselines with multiple metric name variants** since `get_baseline()` does exact match.
    The LLM may use any reasonable metric name.

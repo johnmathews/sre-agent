@@ -146,6 +146,19 @@ The Prometheus tools include defense-in-depth against common query mistakes:
 3. **Improved empty-result messages** — when a query returns no data, the error message suggests checking retention
    limits, label filters, and whether an instant query with `*_over_time` would be more appropriate.
 
+### Diagnostic Methodology
+
+The system prompt includes a structured "Diagnostic Methodology — Evidence Before Diagnosis" workflow that the agent must
+follow when investigating reported failures. This prevents pattern-matching misdiagnoses (e.g., assuming "GitHub fetch
+failures" means "expired token" without checking the actual error messages). The workflow has four steps:
+
+1. **Gather actual error messages** — query Loki logs first to find the real errors
+2. **Identify error category** — map error types (e.g., `BlockingIOError` → resource exhaustion, `401` → auth) based on
+   the actual message, not the symptom description
+3. **Check failure scope** — use the pattern of what's failing to narrow causes (e.g., if public AND private endpoints
+   fail identically, auth is ruled out)
+4. **Form and state diagnosis** — only after evidence, with appropriate hedging when evidence is incomplete
+
 ## Self-Instrumentation (Observability)
 
 The assistant tracks its own reliability via Prometheus metrics, exposed at `GET /metrics`.

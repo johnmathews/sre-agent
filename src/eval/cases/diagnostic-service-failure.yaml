@@ -1,0 +1,88 @@
+id: diagnostic-service-failure
+description: "Agent must check Loki logs for actual error messages when investigating a service failure, not pattern-match a diagnosis from the symptom description"
+question: "The documentation server on infra is failing to fetch git repos — all 10 repos are returning errors and the data is stale. Can you investigate?"
+
+required_services: [loki]
+
+expected_tools:
+  must_call: [loki_query_logs]
+  may_call: [loki_list_label_values, loki_metric_query, loki_correlate_changes, prometheus_instant_query, prometheus_range_query, runbook_search]
+  must_not_call: []
+
+mocks:
+  - url: "http://loki.test:3100/loki/api/v1/query_range"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data:
+        resultType: "streams"
+        result:
+          - stream:
+              hostname: "infra"
+              service_name: "docserver"
+              container: "documentation-server"
+              detected_level: "error"
+            values:
+              - ["1705312800000000000", "level=error msg=\"Failed to fetch repo home-server: BlockingIOError: [Errno 11] Resource temporarily unavailable\""]
+              - ["1705312800000000000", "level=error msg=\"Failed to fetch repo nanoclaw: BlockingIOError: [Errno 11] Resource temporarily unavailable\""]
+              - ["1705312800000000000", "level=error msg=\"Failed to fetch repo sre-assistant: RuntimeError: can't start new thread\""]
+              - ["1705312700000000000", "level=error msg=\"Failed to fetch repo disk-status-exporter: BlockingIOError: [Errno 11] Resource temporarily unavailable\""]
+  - url: "http://loki.test:3100/loki/api/v1/labels"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data: ["hostname", "service_name", "container", "detected_level"]
+  - url: "http://loki.test:3100/loki/api/v1/label/hostname/values"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data: ["media", "infra", "jellyfin", "truenas"]
+  - url: "http://loki.test:3100/loki/api/v1/label/service_name/values"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data: ["traefik", "docserver", "immich-server", "adguardhome"]
+  - url: "http://loki.test:3100/ready"
+    method: GET
+    status: 200
+    body: "ready"
+  - url: "http://prometheus.test:9090/api/v1/query"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data:
+        resultType: "vector"
+        result: []
+  - url: "http://prometheus.test:9090/api/v1/metadata"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data: {}
+  - url: "http://prometheus.test:9090/api/v1/label/__name__/values"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data: []
+  - url: "http://prometheus.test:9090/api/v1/query_range"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data:
+        resultType: "matrix"
+        result: []
+
+rubric: |
+  The answer should:
+  1. Identify the actual error messages from the logs: BlockingIOError and RuntimeError (not guess "expired token" or "auth failure")
+  2. Correctly categorize this as resource exhaustion (memory/threads), not an authentication or network issue
+  3. Note that both public and private repos fail identically, which rules out authentication as the cause
+  4. Cite the specific error messages as evidence for the diagnosis
+  5. NOT present a diagnosis that contradicts the log evidence (e.g., claiming it's a token issue when the errors are BlockingIOError)

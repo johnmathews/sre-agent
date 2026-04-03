@@ -50,8 +50,9 @@ class TestSystemPrompt:
     def test_has_tool_selection_guide(self) -> None:
         assert "Tool Selection Guide" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_advises_metrics_first(self) -> None:
-        assert "query metrics first" in SYSTEM_PROMPT_TEMPLATE
+    def test_advises_logs_then_metrics(self) -> None:
+        assert "check Loki logs for actual error messages first" in SYSTEM_PROMPT_TEMPLATE
+        assert "query metrics" in SYSTEM_PROMPT_TEMPLATE
 
     def test_warns_against_fabrication(self) -> None:
         assert "Never fabricate" in SYSTEM_PROMPT_TEMPLATE
@@ -59,6 +60,28 @@ class TestSystemPrompt:
     def test_has_power_consumption_guidance(self) -> None:
         assert "homeassistant_sensor_power_w" in SYSTEM_PROMPT_TEMPLATE
         assert "node_hwmon_power_watt" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_diagnostic_methodology(self) -> None:
+        assert "Diagnostic Methodology" in SYSTEM_PROMPT_TEMPLATE
+        assert "Evidence Before Diagnosis" in SYSTEM_PROMPT_TEMPLATE
+        assert "Gather the actual error messages" in SYSTEM_PROMPT_TEMPLATE
+        assert "Identify the error category" in SYSTEM_PROMPT_TEMPLATE
+        assert "Check the failure scope" in SYSTEM_PROMPT_TEMPLATE
+        assert "Form and state your diagnosis" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_diagnostic_methodology_references_loki(self) -> None:
+        assert "loki_query_logs" in SYSTEM_PROMPT_TEMPLATE
+        assert 'detected_level=~"error|warn"' in SYSTEM_PROMPT_TEMPLATE
+
+    def test_diagnostic_methodology_lists_error_categories(self) -> None:
+        assert "BlockingIOError" in SYSTEM_PROMPT_TEMPLATE
+        assert "resource exhaustion" in SYSTEM_PROMPT_TEMPLATE
+        assert "ConnectionRefusedError" in SYSTEM_PROMPT_TEMPLATE
+        assert "401 Unauthorized" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_diagnostic_methodology_warns_against_pattern_matching(self) -> None:
+        assert "Never pattern-match from symptom descriptions" in SYSTEM_PROMPT_TEMPLATE
+        assert "Cite the evidence" in SYSTEM_PROMPT_TEMPLATE
 
 
 class TestGetTools:

@@ -25,8 +25,8 @@ from claude_agent_sdk.types import (
 
 from src.agent.history import (
     format_history_as_prompt,
-    load_sdk_history,
-    save_sdk_conversation,
+    load_turns,
+    save_turn,
 )
 from src.agent.mcp_tools import build_mcp_server
 from src.config import Settings, get_settings
@@ -236,7 +236,7 @@ async def invoke_sdk_agent(
 
     # Load conversation history and build prompt with context
     if settings.conversation_history_dir:
-        history = load_sdk_history(settings.conversation_history_dir, session_id)
+        history = load_turns(settings.conversation_history_dir, session_id)
         full_prompt = format_history_as_prompt(history, message)
     else:
         full_prompt = message
@@ -308,13 +308,21 @@ async def invoke_sdk_agent(
     # Save conversation history
     if settings.conversation_history_dir:
         model_name = options.model or settings.anthropic_model
-        save_sdk_conversation(
+        save_turn(
             settings.conversation_history_dir,
             session_id,
+            "user",
             message,
+            model_name,
+            "anthropic",
+        )
+        save_turn(
+            settings.conversation_history_dir,
+            session_id,
+            "assistant",
             response_text,
             model_name,
-            all_messages,
+            "anthropic",
         )
 
     return response_text
@@ -392,7 +400,7 @@ async def stream_sdk_agent(
 
     # Load history
     if settings.conversation_history_dir:
-        history = load_sdk_history(settings.conversation_history_dir, session_id)
+        history = load_turns(settings.conversation_history_dir, session_id)
         full_prompt = format_history_as_prompt(history, message)
     else:
         full_prompt = message
@@ -458,13 +466,21 @@ async def stream_sdk_agent(
     # Save conversation
     if settings.conversation_history_dir:
         model_name = options.model or settings.anthropic_model
-        save_sdk_conversation(
+        save_turn(
             settings.conversation_history_dir,
             session_id,
+            "user",
             message,
+            model_name,
+            "anthropic",
+        )
+        save_turn(
+            settings.conversation_history_dir,
+            session_id,
+            "assistant",
             response_text,
             model_name,
-            all_messages,
+            "anthropic",
         )
 
     yield {"type": "answer", "content": response_text, "session_id": session_id}

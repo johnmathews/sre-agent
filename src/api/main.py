@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -21,6 +22,14 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from src.agent.agent import build_agent, invoke_agent, stream_agent
+from src.agent.history import (
+    ConversationMetadata,
+    delete_conversation,
+    get_conversation,
+    list_conversations,
+    migrate_history_files,
+    rename_conversation,
+)
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
 from src.config import get_settings
 from src.observability.metrics import (
@@ -88,6 +97,37 @@ class HealthResponse(BaseModel):
     components: list[ComponentHealth]
 
 
+class ConversationSummary(BaseModel):
+    """Metadata summary of a stored conversation."""
+
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    turn_count: int
+    model: str
+    provider: str
+
+
+class ConversationDetail(BaseModel):
+    """Full conversation payload including all turns."""
+
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    turn_count: int
+    model: str
+    provider: str
+    turns: list[dict[str, str]]
+
+
+class RenameRequest(BaseModel):
+    """Request body for PATCH /conversations/{id}."""
+
+    title: str
+
+
 # ---------------------------------------------------------------------------
 # Application lifespan
 # ---------------------------------------------------------------------------
@@ -108,6 +148,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("Failed to build agent at startup")
         raise
+
+    # Migrate legacy history files to the unified format (idempotent)
+    if settings.conversation_history_dir:
+        _ = migrate_history_files(settings.conversation_history_dir)
 
     async with AsyncExitStack() as stack:
         # Mount MCP server if auth token is configured
@@ -461,6 +505,74 @@ async def health() -> HealthResponse:
 
     active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
     return HealthResponse(status=overall, model=active_model, components=components)
+
+
+# ---------------------------------------------------------------------------
+# Conversation management endpoints
+# ---------------------------------------------------------------------------
+
+
+_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_session_id(session_id: str) -> None:
+    """Reject session_ids that could enable path traversal or weird paths."""
+    if not _SESSION_ID_PATTERN.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+
+def _require_history_dir() -> str:
+    """Return the history directory, or raise 503 if persistence is disabled."""
+    settings = get_settings()
+    if not settings.conversation_history_dir:
+        raise HTTPException(status_code=503, detail="Conversation history is disabled")
+    return settings.conversation_history_dir
+
+
+@app.get("/conversations", response_model=list[ConversationSummary])
+async def list_conversations_endpoint() -> list[ConversationSummary]:
+    """List all stored conversations, most-recently-updated first."""
+    history_dir = _require_history_dir()
+    items: list[ConversationMetadata] = list_conversations(history_dir)
+    return [ConversationSummary(**item) for item in items]
+
+
+@app.get("/conversations/{session_id}", response_model=ConversationDetail)
+async def get_conversation_endpoint(session_id: str) -> ConversationDetail:
+    """Fetch a single conversation by session_id."""
+    _validate_session_id(session_id)
+    history_dir = _require_history_dir()
+    data = get_conversation(history_dir, session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationDetail(**data)
+
+
+@app.delete("/conversations/{session_id}", status_code=204)
+async def delete_conversation_endpoint(session_id: str) -> Response:
+    """Delete a conversation by session_id."""
+    _validate_session_id(session_id)
+    history_dir = _require_history_dir()
+    removed = delete_conversation(history_dir, session_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return Response(status_code=204)
+
+
+@app.patch("/conversations/{session_id}", response_model=ConversationDetail)
+async def rename_conversation_endpoint(session_id: str, request: RenameRequest) -> ConversationDetail:
+    """Update the title of a conversation."""
+    _validate_session_id(session_id)
+    if not request.title.strip():
+        raise HTTPException(status_code=422, detail="Title must not be empty")
+    history_dir = _require_history_dir()
+    updated = rename_conversation(history_dir, session_id, request.title)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    data = get_conversation(history_dir, session_id)
+    if data is None:  # pragma: no cover - raced deletion
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationDetail(**data)
 
 
 @app.post("/report", response_model=ReportResponse)

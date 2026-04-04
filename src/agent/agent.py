@@ -19,7 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.agent.history import save_conversation
+from src.agent.history import load_turns_as_langchain_messages, save_turn
 from src.agent.llm import create_llm
 from src.agent.tools.grafana_alerts import grafana_get_alert_rules, grafana_get_alerts
 from src.agent.tools.grafana_dashboards import grafana_get_dashboard, grafana_search_dashboards
@@ -380,9 +380,23 @@ async def _invoke_langgraph_agent(
         "callbacks": [metrics_cb],
     }
 
+    # Cold-start resume: if checkpointer is empty for this thread_id,
+    # inject prior turns from the history file (if any).
+    prior_messages: list[Any] = []
+    if settings.conversation_history_dir:
+        try:
+            snapshot = await agent.aget_state(config)  # pyright: ignore[reportUnknownMemberType]
+            checkpoint_empty = not snapshot.values.get("messages")  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        except Exception:
+            checkpoint_empty = True
+        if checkpoint_empty:
+            prior_messages = list(load_turns_as_langchain_messages(settings.conversation_history_dir, session_id))
+
+    input_messages = [*prior_messages, HumanMessage(content=message)]
+
     try:
         result: dict[str, Any] = await agent.ainvoke(
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": input_messages},
             config=config,
         )
     except Exception as exc:
@@ -408,15 +422,6 @@ async def _invoke_langgraph_agent(
 
     messages: list[Any] = result.get("messages", [])
 
-    if settings.conversation_history_dir:
-        active_model = settings.openai_model
-        save_conversation(
-            settings.conversation_history_dir,
-            effective_session_id,
-            messages,
-            active_model,
-        )
-
     response_text = "No response generated."
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
@@ -428,6 +433,25 @@ async def _invoke_langgraph_agent(
     suggestion = _post_response_actions(messages, message, response_text)
     if suggestion:
         response_text += suggestion
+
+    if settings.conversation_history_dir:
+        active_model = settings.openai_model
+        save_turn(
+            settings.conversation_history_dir,
+            effective_session_id,
+            "user",
+            message,
+            active_model,
+            "openai",
+        )
+        save_turn(
+            settings.conversation_history_dir,
+            effective_session_id,
+            "assistant",
+            response_text,
+            active_model,
+            "openai",
+        )
 
     return response_text
 
@@ -545,12 +569,25 @@ async def _stream_langgraph_agent(
 
     yield {"type": "status", "content": "Thinking..."}
 
+    # Cold-start resume: inject prior turns if checkpoint is empty
+    prior_messages: list[Any] = []
+    if settings.conversation_history_dir:
+        try:
+            snapshot = await agent.aget_state(config)  # pyright: ignore[reportUnknownMemberType]
+            checkpoint_empty = not snapshot.values.get("messages")  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        except Exception:
+            checkpoint_empty = True
+        if checkpoint_empty:
+            prior_messages = list(load_turns_as_langchain_messages(settings.conversation_history_dir, session_id))
+
+    input_messages = [*prior_messages, HumanMessage(content=message)]
+
     all_messages: list[Any] = []
     response_text = "No response generated."
 
     try:
         async for event in agent.astream_events(  # pyright: ignore[reportUnknownMemberType]
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": input_messages},
             config=config,
             version="v2",
             include_types=["tool"],
@@ -620,21 +657,30 @@ async def _stream_langgraph_agent(
                     response_text = text
                     break
 
+    suggestion = _post_response_actions(all_messages, message, response_text)
+    response_text_final = response_text + suggestion if suggestion else response_text
+
     if settings.conversation_history_dir and all_messages:
         active_model = settings.openai_model
-        save_conversation(
+        save_turn(
             settings.conversation_history_dir,
             effective_session_id,
-            all_messages,
+            "user",
+            message,
             active_model,
+            "openai",
         )
-
-    suggestion = _post_response_actions(all_messages, message, response_text)
-    if suggestion:
-        response_text += suggestion
+        save_turn(
+            settings.conversation_history_dir,
+            effective_session_id,
+            "assistant",
+            response_text_final,
+            active_model,
+            "openai",
+        )
 
     yield {
         "type": "answer",
-        "content": response_text,
+        "content": response_text_final,
         "session_id": effective_session_id,
     }

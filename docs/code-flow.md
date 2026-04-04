@@ -86,22 +86,30 @@ LLM composes a final answer from tool results and its knowledge.
 
 ### 6. Conversation Persistence
 
-After `ainvoke()` returns, the full message list (including tool calls and tool responses) is serialized to a JSON file
-in `/app/conversations`:
+After `ainvoke()` returns, the user question and final assistant response are each saved as a turn to a JSON
+file in `/app/conversations`, using the unified turn-based format:
 
 ```
 result = agent.ainvoke(...)
 messages = result["messages"]
-  -> save_conversation(history_dir, session_id, messages, model)
-       -> filter to BaseMessage instances
-       -> messages_to_dict() serialization
-       -> preserve created_at from existing file (if any)
+response_text = extract final AIMessage text
+  -> save_turn(history_dir, session_id, "user", message, model, "openai")
+  -> save_turn(history_dir, session_id, "assistant", response_text, model, "openai")
+       -> load existing file (if any), append turn, bump updated_at/turn_count
+       -> set title from first user message (truncated to 60 chars) on first turn only
        -> atomic write: tempfile.mkstemp() + os.replace()
        -> errors logged and swallowed (never crashes the request)
 ```
 
-If the agent entered the error recovery path (corrupted tool-call history), the fresh session ID is used for the saved
-file, not the original session ID.
+Tool calls and tool responses are NOT persisted in `turns[]` — they live only in LangGraph's in-process
+checkpointer. If the agent entered the error recovery path (corrupted tool-call history), the fresh session
+ID is used for the saved file, not the original session ID.
+
+Before `ainvoke()`, if the LangGraph checkpointer is empty for this `thread_id`, prior turns are loaded from
+the file via `load_turns_as_langchain_messages()` and prepended to the input, enabling resume after process
+restart.
+
+See `docs/conversation-history.md` for the full schema, API endpoints, and UI sidebar details.
 
 ### 7. Post-Response Actions
 

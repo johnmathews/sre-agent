@@ -347,7 +347,7 @@ class TestReportGeneratorAnthropicProvider:
 
 @pytest.mark.integration
 class TestInvokeAgentModelName:
-    """Verify invoke_agent passes the correct model name to save_conversation."""
+    """Verify invoke_agent passes the correct model name to save_turn."""
 
     @pytest.mark.asyncio
     async def test_openai_model_saved_in_conversation_history(self, mock_settings: MagicMock) -> None:
@@ -360,14 +360,19 @@ class TestInvokeAgentModelName:
         fake_result = {"messages": [AIMessage(content="Test response")]}
         fake_agent = MagicMock()
         fake_agent.ainvoke = AsyncMock(return_value=fake_result)
+        fake_agent.aget_state = AsyncMock(return_value=type("S", (), {"values": {"messages": []}})())
 
-        with patch("src.agent.agent.save_conversation") as mock_save:
+        with patch("src.agent.agent.save_turn") as mock_save:
             from src.agent.agent import _invoke_langgraph_agent
 
-            await _invoke_langgraph_agent(fake_agent, "hello", session_id="test-session")
-            mock_save.assert_called_once()
-            _, _, _, model_arg = mock_save.call_args.args
-            assert model_arg == "gpt-4o-mini"
+            _ = await _invoke_langgraph_agent(fake_agent, "hello", session_id="test-session")
+            # save_turn is called twice: once for user, once for assistant
+            assert mock_save.call_count == 2
+            # Both calls use the OpenAI model and provider
+            for call in mock_save.call_args_list:
+                # (history_dir, session_id, role, content, model, provider)
+                assert call.args[4] == "gpt-4o-mini"
+                assert call.args[5] == "openai"
 
 
 @pytest.mark.integration

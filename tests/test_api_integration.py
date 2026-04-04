@@ -364,3 +364,133 @@ class TestAskStreamEndpoint:
     def test_empty_question_returns_422(self, client: TestClient) -> None:
         resp = client.post("/ask/stream", json={})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /conversations, GET/DELETE/PATCH /conversations/{id}
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestConversationEndpoints:
+    """Tests for conversation management API endpoints."""
+
+    def _populate(self, history_dir: str, session_id: str, content: str = "hello question") -> None:
+        """Seed a conversation file using save_turn."""
+        from src.agent.history import save_turn
+
+        save_turn(history_dir, session_id, "user", content, "gpt-4o-mini", "openai")
+        save_turn(history_dir, session_id, "assistant", "hi there", "gpt-4o-mini", "openai")
+
+    def test_list_returns_503_when_history_disabled(self, client: TestClient, mock_settings: Any) -> None:
+        mock_settings.conversation_history_dir = ""
+        resp = client.get("/conversations")
+        assert resp.status_code == 503
+
+    def test_list_empty(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.get("/conversations")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_list_returns_metadata(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "abc12345", "what's up with prometheus?")
+
+        resp = client.get("/conversations")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["session_id"] == "abc12345"
+        assert items[0]["title"] == "what's up with prometheus?"
+        assert items[0]["provider"] == "openai"
+        assert items[0]["turn_count"] == 1
+        assert items[0]["model"] == "gpt-4o-mini"
+
+    def test_list_sorted_most_recent_first(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        import time
+
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "sess1")
+        time.sleep(0.02)
+        self._populate(str(tmp_path), "sess2")
+        time.sleep(0.02)
+        self._populate(str(tmp_path), "sess3")
+
+        resp = client.get("/conversations")
+        ids = [c["session_id"] for c in resp.json()]
+        assert ids == ["sess3", "sess2", "sess1"]
+
+    def test_get_returns_full_payload(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "detail1")
+
+        resp = client.get("/conversations/detail1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_id"] == "detail1"
+        assert len(body["turns"]) == 2
+        assert body["turns"][0]["role"] == "user"
+        assert body["turns"][1]["role"] == "assistant"
+
+    def test_get_404_when_missing(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.get("/conversations/nonexistent")
+        assert resp.status_code == 404
+
+    def test_get_400_on_dots(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.get("/conversations/a.b.c")
+        assert resp.status_code == 400
+
+    def test_get_400_on_invalid_chars(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.get("/conversations/has spaces")
+        assert resp.status_code == 400
+
+    def test_delete_removes_file(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "todelete")
+
+        resp = client.delete("/conversations/todelete")
+        assert resp.status_code == 204
+
+        resp2 = client.get("/conversations/todelete")
+        assert resp2.status_code == 404
+
+    def test_delete_404_when_missing(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.delete("/conversations/nonexistent")
+        assert resp.status_code == 404
+
+    def test_delete_400_on_dots(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.delete("/conversations/a.b")
+        assert resp.status_code == 400
+
+    def test_rename_updates_title(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "renameme", "original title stuff")
+
+        resp = client.patch("/conversations/renameme", json={"title": "My Custom Name"})
+        assert resp.status_code == 200
+        assert resp.json()["title"] == "My Custom Name"
+
+        resp2 = client.get("/conversations/renameme")
+        assert resp2.json()["title"] == "My Custom Name"
+
+    def test_rename_422_when_empty_title(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        self._populate(str(tmp_path), "r1")
+        resp = client.patch("/conversations/r1", json={"title": "   "})
+        assert resp.status_code == 422
+
+    def test_rename_404_when_missing(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.patch("/conversations/nonexistent", json={"title": "x"})
+        assert resp.status_code == 404
+
+    def test_rename_400_on_dots(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        resp = client.patch("/conversations/a.b", json={"title": "x"})
+        assert resp.status_code == 400

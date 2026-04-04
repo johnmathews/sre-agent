@@ -431,15 +431,23 @@ empty strings, which disables their tools.
 
 ### Conversation History Persistence
 
-The full conversation for each session — including all tool calls, tool responses, and intermediate messages — is saved
-as a JSON file to `/app/conversations` after each agent invocation. This is designed for debugging and improving the
-agent, not for runtime use.
+Each conversation turn (user message + assistant response) is saved to a JSON file under `/app/conversations`,
+using a unified turn-based format shared by both LangGraph and SDK agent paths. The UI sidebar browses these files,
+and past conversations can be resumed in a fresh session.
 
-- **File format:** `{datetime}_{session_id}.json` with metadata (timestamps, turn count, model) and the full LangChain
-  message list serialized via `messages_to_dict()`
-- **Atomic writes:** uses `tempfile.mkstemp()` + `os.replace()` to avoid partial files on crash
-- **Error-safe:** all errors are logged and swallowed — conversation persistence never crashes a request
-- **Preserves `created_at`:** on updates to an existing session file, the original creation timestamp is retained
+- **File format:** `{datetime}_{session_id}.json` with unified schema (`session_id`, `title`, `created_at`,
+  `updated_at`, `turn_count`, `model`, `provider`, `turns[]`). Tool calls are not preserved in `turns`.
+- **Append-per-turn:** each call to `save_turn()` loads the file, appends one turn, re-writes atomically.
+- **Atomic writes:** `tempfile.mkstemp()` + `os.replace()` to avoid partial files on crash.
+- **Error-safe:** all errors are logged and swallowed.
+- **Migration:** `migrate_history_files()` runs once at FastAPI startup to convert legacy formats (old
+  LangGraph `messages` array, old SDK `provider: "sdk"`) to the unified format.
+- **Resume:** both paths load prior turns on cold start. The LangGraph path injects them as
+  `HumanMessage`/`AIMessage` when its checkpointer is empty; the SDK path stuffs them into the prompt via
+  `format_history_as_prompt`.
+
+API endpoints (`GET /conversations`, `GET /conversations/{id}`, `DELETE`, `PATCH`) expose this store to the UI.
+See `docs/conversation-history.md` for the complete schema, resume semantics, and endpoint reference.
 
 In Docker, `CONVERSATION_HISTORY_HOST_DIR` from the host `.env` is bind-mounted to `/app/conversations` inside the
 container. The app always writes to `/app/conversations` — the host path is purely a deployment concern.

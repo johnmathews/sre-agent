@@ -26,3 +26,7 @@ chroma_data/
 
 # Coverage artifact
 .coverage
+htmlcov/
+
+# Engineering-team working directory (evaluation reports, plans)
+.engineering-team/

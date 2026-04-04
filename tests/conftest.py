@@ -103,6 +103,8 @@ def mock_settings() -> Generator[Any]:
             "request_timeout_seconds": 120,
             # Documentation MCP server
             "documentation_mcp_url": "",
+            # MCP server auth token
+            "mcp_auth_token": "",
         },
     )()
     with (
@@ -125,5 +127,6 @@ def mock_settings() -> Generator[Any]:
         patch("src.memory.baselines.get_settings", return_value=fake_settings),
         patch("src.agent.mcp_tools.get_settings", return_value=fake_settings),
         patch("src.agent.sdk_agent.get_settings", return_value=fake_settings),
+        patch("src.api.mcp_server.get_settings", return_value=fake_settings),
     ):
         yield fake_settings

@@ -19,6 +19,7 @@ dependencies = [
     "prometheus-client>=0.21",
     "apscheduler>=3.10,<4",
     "claude-agent-sdk>=0.1.51",
+    "fastmcp>=3.2",
 ]
 
 [dependency-groups]
@@ -29,6 +30,7 @@ dev = [
     "pytest-asyncio>=0.25",
     "respx>=0.22.0",
     "types-pyyaml>=6.0.12.20250915",
+    "coverage>=7.0",
 ]
 
 [tool.mypy]

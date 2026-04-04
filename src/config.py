@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # SDK/Anthropic path only — adds as an external MCP server alongside SRE tools.
     documentation_mcp_url: str = ""
 
+    # MCP server auth token (optional — empty string means MCP endpoint disabled)
+    # When set, exposes SRE tools as a Streamable HTTP MCP server at /mcp
+    mcp_auth_token: str = ""
+
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""
     pbs_api_token: str = ""

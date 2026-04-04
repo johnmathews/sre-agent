@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -109,10 +109,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Failed to build agent at startup")
         raise
 
-    start_scheduler()
-    yield
-    stop_scheduler()
-    logger.info("Shutting down SRE assistant")
+    async with AsyncExitStack() as stack:
+        # Mount MCP server if auth token is configured
+        if settings.mcp_auth_token:
+            from src.api.mcp_server import build_fastmcp_server
+
+            mcp_server = build_fastmcp_server(settings)
+            mcp_app = mcp_server.http_app(stateless_http=True)
+            await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
+            app.mount("/mcp", mcp_app)
+            app.state.mcp_enabled = True
+            tool_count = len(await mcp_server.list_tools())
+            logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
+        else:
+            app.state.mcp_enabled = False
+            logger.info("MCP server disabled — MCP_AUTH_TOKEN not set")
+
+        start_scheduler()
+        yield
+        stop_scheduler()
+        logger.info("Shutting down SRE assistant")
 
 
 app = FastAPI(title="HomeLab SRE Assistant", lifespan=lifespan)
@@ -425,6 +441,10 @@ async def health() -> HealthResponse:
                 detail=f"{CHROMA_PERSIST_DIR}/ not found — run 'make ingest'",
             )
         )
+
+    # --- MCP server (optional) ---
+    if getattr(app.state, "mcp_enabled", False):
+        components.append(ComponentHealth(name="mcp_server", status="healthy"))
 
     # --- Update Prometheus gauges ---
     for comp in components:

@@ -23,6 +23,22 @@ is skipped entirely (no failed connections, no error logs).
 
 Health checks (`GET /health`) also follow this pattern — only configured services are checked.
 
+## MCP Server Endpoint
+
+When `MCP_AUTH_TOKEN` is set, all tools (except Documentation) are also exposed as a Streamable HTTP MCP server at
+`/mcp`. This allows MCP clients to call individual tools directly without the agent loop.
+
+**Access patterns:**
+- **`POST /ask`** — question → agent selects tools → synthesized answer (full SRE experience)
+- **`/mcp`** — client calls tools directly (lower latency, composable, no agent overhead)
+
+**Claude Code setup:**
+```bash
+claude mcp add --transport http sre-assistant \
+  --header "Authorization: Bearer <MCP_AUTH_TOKEN>" \
+  http://<host>:8000/mcp
+```
+
 ## Prometheus (always enabled)
 
 ### prometheus_search_metrics

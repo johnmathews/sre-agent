@@ -159,6 +159,44 @@ failures" means "expired token" without checking the actual error messages). The
    fail identically, auth is ruled out)
 4. **Form and state diagnosis** — only after evidence, with appropriate hedging when evidence is incomplete
 
+## MCP Server Endpoint
+
+The assistant optionally exposes its SRE tools as a Streamable HTTP MCP server at `/mcp`, allowing MCP clients (Claude
+Code, Claude Desktop, Cursor) to call individual tools directly without going through the agent loop.
+
+### When to use MCP vs `/ask`
+
+- **`/ask`** — full SRE agent experience: curated system prompt, multi-step ReAct reasoning, automatic runbook
+  cross-referencing, diagnostic methodology. Best for complex investigations.
+- **`/mcp`** — direct tool access: single tool calls with lower latency, composable with other MCP servers in the same
+  client session. Best for ad-hoc queries during development (e.g., "check CPU on infra VM" from Claude Code).
+
+### Configuration
+
+Set `MCP_AUTH_TOKEN` to enable the endpoint. If empty (default), the MCP server is not mounted.
+
+```bash
+# Add to Claude Code
+claude mcp add --transport http sre-assistant \
+  --header "Authorization: Bearer <your-token>" \
+  http://192.168.2.106:8001/mcp
+```
+
+### Architecture
+
+- **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
+- **Auth:** Bearer token via `MCP_AUTH_TOKEN`
+- **Mount:** FastMCP app mounted on the existing FastAPI app at `/mcp`
+- **Tools:** Same ~25 LangChain tool functions used by the agent, wrapped as FastMCP tools
+- **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their
+  URLs are configured
+
+### Security
+
+The MCP endpoint exposes raw tool calls — any connected client can execute arbitrary PromQL
+(`prometheus_instant_query`) or LogQL (`loki_query_logs`). Restrict access to the local network or Tailscale. Do not
+expose through the public Cloudflare tunnel without additional auth (OAuth).
+
 ## Self-Instrumentation (Observability)
 
 The assistant tracks its own reliability via Prometheus metrics, exposed at `GET /metrics`.

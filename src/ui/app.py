@@ -137,7 +137,36 @@ def _confirm_delete_dialog(session_id: str, title: str) -> None:
 # Sidebar
 # ---------------------------------------------------------------------------
 
+_SIDEBAR_CSS = """
+<style>
+/* Compact buttons inside the sidebar */
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+    padding: 0.3rem 0.6rem;
+    min-height: 0;
+    font-size: 0.85rem;
+    line-height: 1.25;
+}
+/* Hide the overflow (⋯) menu button until its row is hovered.
+   The selector matches the 2nd column only when it is also the last child,
+   so 3-column action rows (Save/Delete/Cancel) stay visible. */
+section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"]
+    > div[data-testid="stColumn"]:nth-child(2):nth-last-child(1)
+    div[data-testid="stButton"] > button {
+    opacity: 0;
+    transition: opacity 0.15s ease-in-out;
+    padding: 0.3rem 0.2rem;
+}
+section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"]:hover
+    > div[data-testid="stColumn"]:nth-child(2):nth-last-child(1)
+    div[data-testid="stButton"] > button {
+    opacity: 1;
+}
+</style>
+"""
+
+
 with st.sidebar:
+    st.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
     st.title("SRE Assistant")
 
     if st.button("+ New conversation", use_container_width=True):
@@ -145,6 +174,42 @@ with st.sidebar:
         st.rerun()
 
     st.caption(f"Session: `{st.session_state.session_id}`")
+    st.divider()
+
+    # --- Infrastructure health (compact) ---
+    health_data = _fetch_health()
+    if health_data is None:
+        st.error("Cannot reach API server. Is `make serve` running?")
+    else:
+        overall = health_data.get("status", "unknown")
+        components_raw = health_data.get("components", [])
+        components = [c for c in components_raw if isinstance(c, dict)] if isinstance(components_raw, list) else []
+        healthy_count = sum(1 for c in components if c.get("status") == "healthy")
+        total_count = len(components)
+
+        if overall == "healthy":
+            badge = ":green[●]"
+        elif overall == "degraded":
+            badge = ":orange[●]"
+        else:
+            badge = ":red[●]"
+
+        st.markdown(f"**Health** {badge} {overall} ({healthy_count}/{total_count})")
+
+        with st.expander("Details", expanded=(overall != "healthy")):
+            model_name = health_data.get("model")
+            if isinstance(model_name, str) and model_name:
+                st.caption(f"LLM: `{model_name}`")
+            for comp in components:
+                name = comp.get("name", "unknown")
+                status = comp.get("status", "unknown")
+                detail = comp.get("detail")
+                icon = ":white_check_mark:" if status == "healthy" else ":x:"
+                label = f"{icon} {name}: {status}"
+                if detail:
+                    label += f" — {detail}"
+                st.markdown(label)
+
     st.divider()
 
     # --- Past conversations list ---
@@ -162,7 +227,7 @@ with st.sidebar:
             prefix = "▶ " if is_active else ""
 
             display_label = f"{prefix}{title}"
-            col_main, col_menu = st.columns([5, 1])
+            col_main, col_menu = st.columns([10, 1], gap="small")
             with col_main:
                 if st.button(
                     display_label,
@@ -198,40 +263,6 @@ with st.sidebar:
                     if st.button("Cancel", key=f"cancel_{sid}", use_container_width=True):
                         st.session_state.renaming = None
                         st.rerun()
-
-    st.divider()
-
-    # --- Infrastructure health ---
-    st.subheader("Infrastructure Health")
-    health_data = _fetch_health()
-    if health_data is None:
-        st.error("Cannot reach API server. Is `make serve` running?")
-    else:
-        overall = health_data.get("status", "unknown")
-        model_name = health_data.get("model")
-        if isinstance(model_name, str) and model_name:
-            st.caption(f"LLM: `{model_name}`")
-
-        if overall == "healthy":
-            st.success(f"Overall: {overall}")
-        elif overall == "degraded":
-            st.warning(f"Overall: {overall}")
-        else:
-            st.error(f"Overall: {overall}")
-
-        components = health_data.get("components", [])
-        if isinstance(components, list):
-            for comp in components:
-                if not isinstance(comp, dict):
-                    continue
-                name = comp.get("name", "unknown")
-                status = comp.get("status", "unknown")
-                detail = comp.get("detail")
-                icon = ":white_check_mark:" if status == "healthy" else ":x:"
-                label = f"{icon} {name}: {status}"
-                if detail:
-                    label += f" — {detail}"
-                st.markdown(label)
 
 
 # ---------------------------------------------------------------------------

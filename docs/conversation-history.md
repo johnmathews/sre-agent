@@ -149,11 +149,18 @@ render (cached with `@st.cache_data(ttl=5)`). Per conversation:
 - Clicking the title button loads the conversation via
   `GET /conversations/{id}` and sets `st.session_state.session_id`.
 - Clicking `⋯` toggles an inline rename input + Save/Delete/Cancel.
+  The `⋯` button is hidden by default and fades in only when its row is
+  hovered (CSS rule scoped to 2-column rows in the sidebar).
 - Delete opens a `@st.dialog` confirmation before calling
   `DELETE /conversations/{id}`.
 - The active conversation is marked with a `▶` prefix.
 - After sending a message, the conversation list cache is cleared so the
   newly-updated conversation appears at the top on next render.
+
+Sidebar layout order: title → **New conversation** button → session id →
+**Infrastructure Health** (compact one-line status + collapsed *Details*
+expander) → **Past conversations** list. Health is placed above
+conversations so it stays visible without scrolling past the history.
 
 Health check is cached with `ttl=30` to avoid hammering `/health` on
 every rerun.

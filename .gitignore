@@ -30,3 +30,6 @@ htmlcov/
 
 # Engineering-team working directory (evaluation reports, plans)
 .engineering-team/
+
+# Claude Code workspace-local config
+.claude/

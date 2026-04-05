@@ -1,31 +1,29 @@
-# SRE Agent Docker Compose
+# Demo Docker Compose — sre-agent + sre-webapp
 #
-# Standalone usage:
-#   docker compose --profile setup run sre-ingest   # build vector store (first time)
-#   docker compose up -d                             # start API + webapp
+# This file pulls pre-built images from GHCR, so you can run the full stack
+# without cloning the source. For local development against this repo's
+# source, use docker-compose.yml instead (which uses `build: .`).
 #
-# Embedding into an existing stack:
-#   Copy the sre-api and sre-webapp services below into your compose file.
-#   Replace `build: .` with `image: ghcr.io/johnmathews/sre-agent:latest`,
-#   adjust ports, and add your network. The sre-ingest step only needs to run
-#   once to populate the chroma_data volume.
-#
-# For a ready-to-run demo using published images instead of `build: .`,
-# see docker-compose.demo.yml.
+# Usage:
+#   1. Create a .env file in this directory — see .env.example for vars.
+#   2. Build the vector store (one-time, and after runbook updates):
+#        docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
+#   3. Start the stack:
+#        docker compose -f docker-compose.demo.yml up -d
+#   4. Open http://localhost:8080 (webapp) — API is on http://localhost:8000
 #
 # Prerequisites for LLM_PROVIDER=anthropic:
 #   1. Install Claude Code on the Docker host: npm install -g @anthropic-ai/claude-code
 #   2. Authenticate: claude login  (or: claude setup-token for headless/SSH)
-#   3. Tokens are stored in ~/.claude/ and mounted read-write into the container
-#      (read-write so the CLI can auto-refresh short-lived OAuth access tokens)
+#   3. Tokens at ~/.claude/ are mounted into the container (read-write, for token refresh).
 #
-# Required env vars — see .env.example for the full list with descriptions.
+# Required env vars (see .env.example for the full list):
 #   LLM_PROVIDER, PROMETHEUS_URL, GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN
 #   Plus OPENAI_API_KEY (openai) or ANTHROPIC_API_KEY (anthropic, any non-empty value)
 
 services:
   sre-ingest:
-    build: .
+    image: ghcr.io/johnmathews/sre-agent:latest
     command: ["python", "-m", "scripts.ingest_runbooks"]
     env_file: .env
     environment:
@@ -35,7 +33,7 @@ services:
     profiles: ["setup"]
 
   sre-api:
-    build: . # or: image: ghcr.io/johnmathews/sre-agent:latest
+    image: ghcr.io/johnmathews/sre-agent:latest
     ports:
       - "${SRE_API_PORT:-8000}:8000"
     env_file: .env
@@ -44,16 +42,13 @@ services:
       - CLAUDE_CONFIG_DIR=/app/.claude
       - HOME=/app
     restart: unless-stopped
-    mem_limit: 768m  # 1 uvicorn worker + up to ~5 concurrent SDK CLI subprocesses
+    mem_limit: 768m
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
-      # Claude Agent SDK: OAuth credentials for LLM_PROVIDER=anthropic.
-      # Read-write so the CLI can auto-refresh short-lived OAuth access tokens.
+      # Claude Agent SDK OAuth credentials (read-write for token auto-refresh).
       # Harmless empty-dir mount when using LLM_PROVIDER=openai.
       - ${CLAUDE_CONFIG_DIR:-~/.claude}:/app/.claude
-      # Uncomment to persist the memory store SQLite DB:
-      # - ./sre-memory.db:/app/memory.db
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 30s
@@ -62,7 +57,6 @@ services:
       start_period: 15s
 
   sre-webapp:
-    # Vue 3 SPA frontend — see johnmathews/sre-webapp
     image: ghcr.io/johnmathews/sre-webapp:latest
     ports:
       - "${SRE_WEBAPP_PORT:-8080}:80"

@@ -96,8 +96,8 @@ The backend builds a single Docker image that runs as two services, plus a separ
 
 | Service       | Image                                    | Port | Description                              |
 | ------------- | ---------------------------------------- | ---- | ---------------------------------------- |
-| `sre-ingest`  | `ghcr.io/johnmathews/sre-assistant`      | —    | One-shot: builds the Chroma vector store |
-| `sre-api`     | `ghcr.io/johnmathews/sre-assistant`      | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
+| `sre-ingest`  | `ghcr.io/johnmathews/sre-agent`          | —    | One-shot: builds the Chroma vector store |
+| `sre-api`     | `ghcr.io/johnmathews/sre-agent`          | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
 | `sre-webapp`  | `ghcr.io/johnmathews/sre-webapp`         | 8080 | Vue 3 SPA frontend (separate repo: [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
 
 The intended deployment is on a Linux host (VM, LXC, bare metal) on the same LAN as your Prometheus, Grafana, and
@@ -111,7 +111,7 @@ volume:
 ```yaml
   # --- SRE Assistant services ---
   sre-ingest:
-    image: ghcr.io/johnmathews/sre-assistant:latest
+    image: ghcr.io/johnmathews/sre-agent:latest
     command: ["python", "-m", "scripts.ingest_runbooks"]
     env_file: .env
     volumes:
@@ -119,7 +119,7 @@ volume:
     profiles: ["setup"]
 
   sre-api:
-    image: ghcr.io/johnmathews/sre-assistant:latest
+    image: ghcr.io/johnmathews/sre-agent:latest
     ports:
       - "8000:8000"
     env_file: .env
@@ -229,7 +229,7 @@ To include external docs (e.g., an Ansible repo on the deployment host), add a r
 
 ```yaml
   sre-ingest:
-    image: ghcr.io/johnmathews/sre-assistant:latest
+    image: ghcr.io/johnmathews/sre-agent:latest
     command: ["python", "-m", "scripts.ingest_runbooks"]
     env_file: .env
     volumes:
@@ -270,14 +270,25 @@ docker compose run --rm sre-ingest
 For local development or if you want to modify the image:
 
 ```bash
-git clone https://github.com/johnmathews/sre-assistant.git
-cd sre-assistant
+git clone https://github.com/johnmathews/sre-agent.git
+cd sre-agent
 cp .env.example .env
 # Edit .env with your values
 docker compose up -d
 ```
 
 The repo's `docker-compose.yml` uses `build: .` instead of `image:` so it builds locally.
+
+For a ready-to-run demo that pulls pre-built images (sre-agent + sre-webapp) straight from GHCR — no build
+needed — use [`docker-compose.demo.yml`](docker-compose.demo.yml):
+
+```bash
+# One-time (and after runbook updates): populate the vector store
+docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
+
+# Start the stack — webapp on :8080, API on :8000
+docker compose -f docker-compose.demo.yml up -d
+```
 
 ---
 
@@ -287,7 +298,7 @@ A single **GitHub Actions** workflow (`.github/workflows/ci.yml`) handles everyt
 
 1. **Check** — Runs `make check` (lint + typecheck + tests) on every push to `main` and on pull requests.
 2. **Build** — On pushes to `main` only: builds the Docker image and pushes to
-   `ghcr.io/johnmathews/sre-assistant:latest` (and `:sha-<commit>`). Only runs after check passes.
+   `ghcr.io/johnmathews/sre-agent:latest` (and `:sha-<commit>`). Only runs after check passes.
 
 **Git hooks** — Install local pre-commit (lint + format) and pre-push (full check) hooks:
 
@@ -717,7 +728,7 @@ at deploy time — never committed to this repo.
 ## Repository Structure
 
 ```
-homelab-sre-assistant/
+sre-agent/
 ├── Dockerfile                    # Multi-stage build (builder + runtime)
 ├── docker-compose.yml            # Local dev: 3 services (ingest, api, ui)
 ├── .dockerignore

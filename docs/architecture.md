@@ -177,7 +177,7 @@ Set `MCP_AUTH_TOKEN` to enable the endpoint. If empty (default), the MCP server 
 
 ```bash
 # Add to Claude Code
-claude mcp add --transport http sre-assistant \
+claude mcp add --transport http sre-agent \
   --header "Authorization: Bearer <your-token>" \
   http://192.168.2.106:8001/mcp
 ```

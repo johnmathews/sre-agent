@@ -34,7 +34,7 @@ When `MCP_AUTH_TOKEN` is set, all tools (except Documentation) are also exposed 
 
 **Claude Code setup:**
 ```bash
-claude mcp add --transport http sre-assistant \
+claude mcp add --transport http sre-agent \
   --header "Authorization: Bearer <MCP_AUTH_TOKEN>" \
   http://<host>:8000/mcp
 ```

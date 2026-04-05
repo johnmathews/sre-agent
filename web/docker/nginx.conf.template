@@ -1,0 +1,62 @@
+# Rendered by nginx's envsubst entrypoint from /etc/nginx/templates/.
+# Only ${API_UPSTREAM} is substituted (see NGINX_ENVSUBST_FILTER in Dockerfile).
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Gzip text assets
+    gzip on;
+    gzip_vary on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    # Cache hashed build assets aggressively, never cache index.html
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA fallback: any unknown path serves index.html so client-side
+    # routing works without a real server route.
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    # Proxy /api/* to the FastAPI backend, stripping the /api prefix.
+    #
+    # We assign ${API_UPSTREAM} to a variable so nginx defers DNS resolution
+    # to request time instead of startup. Without this, nginx would refuse to
+    # boot if the upstream host (e.g. the docker service `sre-api`) is not
+    # yet resolvable when the container starts.
+    #
+    # 127.0.0.11 is Docker's embedded DNS resolver inside a user-defined
+    # network. Override via a custom nginx config mount if running elsewhere.
+    location /api/ {
+        resolver 127.0.0.11 ipv6=off valid=30s;
+        set $api_upstream "${API_UPSTREAM}";
+
+        # Strip the /api prefix before forwarding: /api/health -> /health
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $api_upstream;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE support: disable buffering and allow long-lived connections.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        chunked_transfer_encoding on;
+    }
+}

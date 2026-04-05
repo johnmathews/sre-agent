@@ -40,6 +40,22 @@ src/
 └── App.vue
 ```
 
+## Docker
+
+A multi-arch image is published to GHCR on every push to `main`:
+
+```sh
+docker pull ghcr.io/johnmathews/sre-webapp:latest
+docker run --rm -p 8080:80 \
+  -e API_UPSTREAM=http://sre-api:8000 \
+  ghcr.io/johnmathews/sre-webapp:latest
+```
+
+`API_UPSTREAM` defaults to `http://sre-api:8000` — the expected service name
+when the frontend and backend run in the same docker-compose network.
+
+See [`docs/deployment.md`](./docs/deployment.md) for the full compose stack.
+
 ## Related repos
 
 - **Backend + old Streamlit UI:** [johnmathews/homelab-sre](https://github.com/johnmathews/homelab-sre)

@@ -1,0 +1,41 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Dependencies & build output (rebuilt inside the image)
+node_modules
+dist
+dist-ssr
+
+# Playwright artifacts (but keep tests/ + playwright.config.ts + tsconfig.test.json:
+# the root tsconfig.json references tsconfig.test.json, and it in turn references
+# tests/**/*.ts, so vue-tsc -b needs all of them on disk during the build. None
+# of this ends up in the runtime image since it's only in the builder stage.)
+playwright-report
+test-results
+blob-report
+playwright/.cache
+
+# Editor / OS / Claude
+.vscode
+.idea
+.DS_Store
+.claude
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local env
+*.local
+.env*
+!.env.example
+
+# Project metadata not needed at build time
+docs
+journal
+README.md
+.github
+Dockerfile
+.dockerignore

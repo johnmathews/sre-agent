@@ -123,8 +123,8 @@ protocol. Several failure modes can cause MCP tool calls to fail with "Stream cl
    servers required the bidirectional pipe to stay open. Multi-tool agent loops easily exceed 60s.
 2. **CLI inactivity timer** (open bug, `anthropics/claude-agent-sdk-typescript#114`) — the CLI's `lastActivityTime` is
    not reset when MCP server responses arrive. After ~15s of perceived inactivity, subsequent MCP calls are rejected.
-3. **Client/proxy idle timeouts** — Cloudflare tunnels close after 100s idle; the Streamlit `httpx` client times out
-   after 120s.
+3. **Client/proxy idle timeouts** — Cloudflare tunnels close after 100s idle; browser `fetch` + nginx proxies
+   enforce similar limits on long-running streams.
 
 Mitigations applied:
 
@@ -133,7 +133,7 @@ Mitigations applied:
   override the CLI's inactivity timer to 1 hour, working around bug #2.
 - **SSE heartbeat events** — the `/ask/stream` endpoint wraps the agent event stream with `_with_heartbeats()`, which
   injects `{"type": "heartbeat", "content": ""}` events every 15 seconds during long tool executions. This keeps
-  the Cloudflare tunnel and httpx client alive. The Streamlit UI silently ignores heartbeat events.
+  the Cloudflare tunnel and proxy connections alive. Clients silently ignore heartbeat events.
 
 ### Query Correctness Safeguards
 
@@ -494,11 +494,12 @@ docker-compose.yml
   |     Env: CLAUDE_CONFIG_DIR=/app/.claude, HOME=/app
   |     restart: unless-stopped
   |
-  +-- sre-ui (Streamlit frontend)
-        CMD: streamlit run src/ui/app.py --server.port 8501 --server.address 0.0.0.0
-        Port: 8501
-        Env: API_URL=http://sre-api:8000
+  +-- sre-webapp (Vue 3 SPA frontend, separate image)
+        Image: ghcr.io/johnmathews/sre-webapp:latest
+        Port: 8080 -> 80
+        Env: API_UPSTREAM=http://sre-api:8000
         restart: unless-stopped, starts after api is healthy
+        See: github.com/johnmathews/sre-webapp
 ```
 
 The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. Run it explicitly

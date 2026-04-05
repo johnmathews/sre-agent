@@ -28,7 +28,7 @@ The LangChain agent decides which approach to use based on the question.
 - **LLM:** OpenAI API or Anthropic API (selected via `LLM_PROVIDER`)
 - **Vector store:** Chroma or FAISS
 - **Backend:** FastAPI (`/ask` endpoint)
-- **Frontend:** Streamlit (MVP) or CLI
+- **Frontend:** Vue 3 SPA (separate repo: johnmathews/sre-webapp) or CLI
 - **Observability:** Prometheus metrics, Grafana dashboards, Loki logs
 - **Infrastructure:** Proxmox, Ansible
 
@@ -107,7 +107,6 @@ modifying eval cases.
 - `src/agent/` — LangChain agent setup, tools (prometheus, grafana_alerts, proxmox, pbs, loki), retrieval (embeddings,
   runbooks), memory
 - `src/api/` — FastAPI application
-- `src/ui/` — Streamlit frontend
 - `src/eval/` — Evaluation test cases (YAML) and runner
 - `src/observability/` — Prometheus metric definitions, LangChain callback handler for cost/token tracking
 - `src/report/` — Weekly reliability report generator, email delivery, APScheduler cron scheduling

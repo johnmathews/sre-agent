@@ -185,7 +185,7 @@ app = FastAPI(title="HomeLab SRE Assistant", lifespan=lifespan)
 type SSEEvent = dict[str, str]
 
 # Interval between heartbeat SSE events (seconds).  Must be shorter than
-# Cloudflare's 100 s idle timeout and the Streamlit client's 120 s timeout.
+# Cloudflare's 100 s idle timeout and typical client/proxy read timeouts.
 _HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
@@ -196,8 +196,8 @@ async def _with_heartbeats(
     """Wrap an async event stream with periodic heartbeat events.
 
     During long tool executions the agent may not yield any events for 30-60+
-    seconds.  Without heartbeats the Cloudflare tunnel (100 s idle) or the
-    Streamlit httpx client (120 s timeout) will close the connection.
+    seconds.  Without heartbeats the Cloudflare tunnel (100 s idle) or HTTP
+    proxies in front of the client will close the connection.
 
     Heartbeat events have ``{"type": "heartbeat", "content": ""}``.  Clients
     that don't recognize this type should silently ignore them.

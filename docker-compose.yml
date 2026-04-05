@@ -2,10 +2,10 @@
 #
 # Standalone usage:
 #   docker compose --profile setup run sre-ingest   # build vector store (first time)
-#   docker compose up -d                             # start API + UI
+#   docker compose up -d                             # start API + webapp
 #
 # Embedding into an existing stack:
-#   Copy the sre-api and sre-ui services below into your compose file.
+#   Copy the sre-api and sre-webapp services below into your compose file.
 #   Replace `build: .` with `image: sre-assistant` (after building the image),
 #   adjust ports, and add your network. The sre-ingest step only needs to run
 #   once to populate the chroma_data volume.
@@ -58,18 +58,25 @@ services:
       retries: 3
       start_period: 15s
 
-  sre-ui:
-    build: . # or: image: sre-assistant
-    command: ["streamlit", "run", "src/ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+  sre-webapp:
+    # Vue 3 SPA frontend — see johnmathews/sre-webapp
+    image: ghcr.io/johnmathews/sre-webapp:latest
     ports:
-      - "8501:8501"
+      - "${SRE_WEBAPP_PORT:-8080}:80"
     restart: unless-stopped
     environment:
-      - API_URL=http://sre-api:8000
-    mem_limit: 96m
+      # nginx proxies /api/* to this upstream (stripping the /api prefix)
+      - API_UPSTREAM=http://sre-api:8000
+    mem_limit: 64m
     depends_on:
       sre-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   chroma_data:

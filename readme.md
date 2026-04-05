@@ -65,9 +65,8 @@ make serve
 # POST /report       — generate a weekly reliability report
 # GET /health        — check infrastructure component status
 
-# Start the Streamlit web UI (requires API server running)
-make ui
-# Opens browser at http://localhost:8501
+# The web UI is a separate repo: github.com/johnmathews/sre-webapp
+# In dev, run `npm run dev` there — it proxies /api to this server at :8000.
 
 # Generate a weekly reliability report to stdout
 make report
@@ -93,17 +92,16 @@ This only affects local development on macOS. The agent runs without restriction
 
 ## Deploying with Docker
 
-The project builds a single Docker image that runs as three services:
+The backend builds a single Docker image that runs as two services, plus a separate webapp image:
 
-| Service      | Port | Description                              |
-| ------------ | ---- | ---------------------------------------- |
-| `sre-ingest` | —    | One-shot: builds the Chroma vector store |
-| `sre-api`    | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
-| `sre-ui`     | 8501 | Streamlit web UI                         |
+| Service       | Image                                    | Port | Description                              |
+| ------------- | ---------------------------------------- | ---- | ---------------------------------------- |
+| `sre-ingest`  | `ghcr.io/johnmathews/sre-assistant`      | —    | One-shot: builds the Chroma vector store |
+| `sre-api`     | `ghcr.io/johnmathews/sre-assistant`      | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
+| `sre-webapp`  | `ghcr.io/johnmathews/sre-webapp`         | 8080 | Vue 3 SPA frontend (separate repo: [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
 
 The intended deployment is on a Linux host (VM, LXC, bare metal) on the same LAN as your Prometheus, Grafana, and
-other monitored infrastructure. The pre-built image is published to `ghcr.io/johnmathews/sre-assistant:latest` on
-every push to `main`.
+other monitored infrastructure. Both pre-built images are published on every push to `main` of their respective repos.
 
 ### Adding to an Existing Docker Compose Stack
 
@@ -137,14 +135,13 @@ volume:
       retries: 3
       start_period: 15s
 
-  sre-ui:
-    image: ghcr.io/johnmathews/sre-assistant:latest
-    command: ["streamlit", "run", "src/ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+  sre-webapp:
+    image: ghcr.io/johnmathews/sre-webapp:latest
     ports:
-      - "8501:8501"
+      - "8080:80"
     restart: unless-stopped
     environment:
-      - API_URL=http://sre-api:8000
+      - API_UPSTREAM=http://sre-api:8000
     depends_on:
       sre-api:
         condition: service_healthy
@@ -164,8 +161,8 @@ build the vector store and start the services:
 # First time: build the vector store
 docker compose run --rm sre-ingest
 
-# Start the API and UI
-docker compose up -d sre-api sre-ui
+# Start the API and webapp
+docker compose up -d sre-api sre-webapp
 ```
 
 ### Environment Variables
@@ -258,8 +255,8 @@ docker compose run --rm sre-ingest
 Pull the latest image and restart:
 
 ```bash
-docker compose pull sre-api sre-ui sre-ingest
-docker compose up -d sre-api sre-ui
+docker compose pull sre-api sre-webapp sre-ingest
+docker compose up -d sre-api sre-webapp
 ```
 
 If runbooks have changed in the new image, re-run ingest:
@@ -354,7 +351,7 @@ Live Sources (LangChain Tools)       Knowledge Base (RAG)
                ↓
          FastAPI Backend
                ↓
-       CLI / Streamlit UI
+       CLI / Vue SPA webapp
 ```
 
 The key architectural distinction is that **not everything is a RAG problem**. Live telemetry is queried via tool calls
@@ -480,7 +477,7 @@ inside the container. In Docker, `CONVERSATION_HISTORY_HOST_DIR` controls the ho
 | LLM             | OpenAI API or Anthropic API  |
 | Vector store    | Chroma                       |
 | Backend         | FastAPI                      |
-| Frontend        | Streamlit + CLI              |
+| Frontend        | Vue 3 SPA (separate repo) + CLI |
 | Metrics         | Prometheus                   |
 | Dashboards      | Grafana                      |
 | Logs            | Loki                         |
@@ -532,7 +529,7 @@ The project is built incrementally, with each phase producing a working, demonst
 - Set up LangChain agent with Prometheus and Alertmanager tool definitions
 - Implement RAG pipeline over runbooks (yaml files)
 - Build FastAPI backend with a single `/ask` endpoint
-- Basic CLI or Streamlit interface
+- Basic CLI (web UI added later as a separate Vue SPA)
 - **Deliverable:** Ask the agent about any active alert and get a contextualized explanation
 
 #### Build steps
@@ -549,7 +546,7 @@ The project is built incrementally, with each phase producing a working, demonst
 5. ~~**Agent assembly** — `src/agent/agent.py`: LangChain agent with all three tools. System prompt defining when to use
    live queries vs. RAG. Conversation memory. Test via REPL.~~
 6. ~~**FastAPI backend** — `src/api/main.py`: `POST /ask` (question + session ID → response), `GET /health`.~~
-7. ~~**Basic CLI** — Simple input loop calling the agent directly. Streamlit comes later.~~
+7. ~~**Basic CLI** — Simple input loop calling the agent directly. Web UI comes later.~~
 
 8. ~~**Proxmox VE tools** — `src/agent/tools/proxmox.py`: 4 tools for VM/container listing, guest config, node status,
    and task history. Conditional registration (only when `PROXMOX_URL` is set). Unit and integration tests.~~
@@ -764,10 +761,8 @@ homelab-sre-assistant/
 │   │   ├── generator.py          # Direct API collectors + LLM narrative + markdown formatter
 │   │   ├── email.py              # SMTP email delivery (STARTTLS)
 │   │   └── scheduler.py          # APScheduler cron-based report scheduling
-│   ├── api/
-│   │   └── main.py               # FastAPI application
-│   └── ui/
-│       └── app.py                # Streamlit frontend
+│   └── api/
+│       └── main.py               # FastAPI application
 ├── scripts/
 │   ├── ingest_runbooks.py        # Rebuild Chroma vector store
 │   ├── run_eval.py               # Eval framework entry point

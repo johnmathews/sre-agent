@@ -8,7 +8,8 @@ A user question arrives via one of three interfaces:
 
 - **FastAPI** — `POST /ask` with JSON body `{"question": "...", "session_id": "..."}` (`src/api/main.py`)
 - **FastAPI (streaming)** — `POST /ask/stream` with the same JSON body, returns Server-Sent Events (`src/api/main.py`)
-- **Streamlit UI** — chat input calls `/ask/stream` SSE endpoint for live tool progress (`src/ui/app.py`)
+- **Web UI** — chat input calls `/ask/stream` SSE endpoint for live tool progress (separate repo:
+  [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp))
 - **CLI** — interactive REPL calls the agent directly (`src/cli.py`)
 
 ### 2. Agent Invocation
@@ -52,8 +53,8 @@ yields structured dicts as events:
 | `answer`     | Final AI response (no tool_calls)   | Response text + session_id                    |
 | `error`      | Unrecoverable error                 | Error message                                 |
 
-The Streamlit UI consumes these events via `httpx.stream()`, rendering a live checklist of tool calls with progress
-indicators before displaying the final answer.
+The web UI consumes these events via a `fetch()` + `ReadableStream` parser, rendering a live checklist of tool calls
+with progress indicators before displaying the final answer.
 
 ### 3. Tool Selection
 

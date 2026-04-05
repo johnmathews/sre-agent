@@ -17,7 +17,6 @@
 | `pydantic-settings` | Environment variable loading with validation                                                |
 | `python-dotenv`     | `.env` file parsing (used by pydantic-settings)                                             |
 | `pyyaml`            | YAML parsing (runbook frontmatter, eval cases)                                              |
-| `streamlit`         | Web UI for the agent                                                                        |
 | `prometheus-client` | Self-instrumentation — expose Prometheus metrics at `/metrics`                              |
 | `apscheduler`       | Scheduled report generation — `AsyncIOScheduler` with cron triggers                         |
 

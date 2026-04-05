@@ -517,7 +517,7 @@ class TestStreamAgentRegressions:
 
     def test_empty_backticks_never_produced(self) -> None:
         """Regression: _summarize_tool_input returned `` for empty/None values,
-        which rendered as visible empty backticks in the Streamlit UI."""
+        which rendered as visible empty backticks in markdown chat UIs."""
         # Empty strings
         for field in ("query", "search_term", "pattern"):
             result = _summarize_tool_input("any_tool", {field: ""})

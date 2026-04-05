@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/* Base reset + app-wide defaults */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  color-scheme: light dark;
+}
+
+/* Markdown content styling — applied to any element with .markdown */
+.markdown {
+  line-height: 1.55;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: 0.5rem 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 1rem 0 0.5rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.markdown h1 { font-size: 1.5rem; }
+.markdown h2 { font-size: 1.25rem; }
+.markdown h3 { font-size: 1.1rem; }
+.markdown ul,
+.markdown ol {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+.markdown li {
+  margin: 0.2rem 0;
+}
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.15em 0.35em;
+  border-radius: 0.25rem;
+  background: rgb(0 0 0 / 0.06);
+}
+.markdown pre {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  background: rgb(0 0 0 / 0.06);
+}
+.markdown pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 0.85em;
+}
+.markdown blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid rgb(0 0 0 / 0.15);
+  color: rgb(0 0 0 / 0.7);
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+.markdown th,
+.markdown td {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid rgb(0 0 0 / 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  .markdown code,
+  .markdown pre {
+    background: rgb(255 255 255 / 0.08);
+  }
+  .markdown blockquote {
+    border-left-color: rgb(255 255 255 / 0.2);
+    color: rgb(255 255 255 / 0.7);
+  }
+  .markdown th,
+  .markdown td {
+    border-color: rgb(255 255 255 / 0.15);
+  }
+}

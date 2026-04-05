@@ -1,0 +1,94 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useHealthStore } from '../stores/health'
+
+const health = useHealthStore()
+const expanded = ref(false)
+
+const healthyCount = computed(
+  () => health.data?.components.filter((c) => c.status === 'healthy').length ?? 0,
+)
+const totalCount = computed(() => health.data?.components.length ?? 0)
+
+const statusColor = computed(() => {
+  switch (health.data?.status) {
+    case 'healthy':
+      return 'bg-green-500'
+    case 'degraded':
+      return 'bg-orange-500'
+    case 'unhealthy':
+      return 'bg-red-500'
+    default:
+      return 'bg-gray-400'
+  }
+})
+
+// Auto-expand when not healthy
+function autoExpand() {
+  if (health.data && health.data.status !== 'healthy') {
+    expanded.value = true
+  }
+}
+
+let pollId: number | null = null
+onMounted(async () => {
+  await health.refresh()
+  autoExpand()
+  // Poll every 30s, matching Streamlit's cache TTL
+  pollId = window.setInterval(() => health.refresh(), 30_000)
+})
+onUnmounted(() => {
+  if (pollId !== null) window.clearInterval(pollId)
+})
+</script>
+
+<template>
+  <div class="text-sm">
+    <div v-if="health.error" class="text-red-400">
+      Cannot reach API server.
+    </div>
+    <template v-else-if="health.data">
+      <button
+        class="flex w-full cursor-pointer items-center gap-2 text-left hover:opacity-80"
+        @click="expanded = !expanded"
+      >
+        <span
+          class="inline-block h-2.5 w-2.5 rounded-full"
+          :class="statusColor"
+        />
+        <span class="font-medium">Health</span>
+        <span class="text-gray-400">
+          {{ health.data.status }} ({{ healthyCount }}/{{ totalCount }})
+        </span>
+        <span class="ml-auto text-gray-500">{{ expanded ? '▾' : '▸' }}</span>
+      </button>
+
+      <div v-if="expanded" class="mt-2 space-y-1 pl-4 text-xs text-gray-400">
+        <div>
+          LLM:
+          <code class="rounded bg-gray-700/40 px-1 py-0.5 text-gray-300">{{
+            health.data.model
+          }}</code>
+        </div>
+        <div
+          v-for="comp in health.data.components"
+          :key="comp.name"
+          class="flex flex-wrap items-baseline gap-x-2"
+        >
+          <span>
+            {{ comp.status === 'healthy' ? '✓' : '✗' }} {{ comp.name }}:
+            <span
+              :class="
+                comp.status === 'healthy' ? 'text-green-400' : 'text-red-400'
+              "
+            >{{ comp.status }}</span>
+          </span>
+          <span v-if="comp.detail" class="text-gray-500">
+            — {{ comp.detail }}
+          </span>
+        </div>
+      </div>
+    </template>
+    <div v-else class="text-gray-500">Loading health…</div>
+  </div>
+</template>

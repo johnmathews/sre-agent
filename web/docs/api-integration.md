@@ -1,7 +1,7 @@
 # API integration
 
 The frontend talks to the FastAPI backend
-([johnmathews/homelab-sre](https://github.com/johnmathews/homelab-sre))
+([johnmathews/sre-agent](https://github.com/johnmathews/sre-agent))
 through the `/api/*` prefix. In development Vite proxies `/api` to
 `http://localhost:8000`; in production, nginx/Traefik does the same rewrite.
 Frontend code only ever calls relative URLs — it never knows the backend's

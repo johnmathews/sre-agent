@@ -6,7 +6,7 @@
 //   POST fetch, read the response body as a ReadableStream, and hand-parse the
 //   SSE wire format: each event is `data: <json>\n\n` (two newlines end it).
 //
-// Backend event types (see src/api/main.py in homelab-sre):
+// Backend event types (see src/api/main.py in sre-agent):
 //   - heartbeat   — keep-alive, ignore
 //   - status      — transient status message
 //   - tool_start  — tool name that is about to run

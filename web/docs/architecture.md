@@ -1,7 +1,7 @@
 # Architecture
 
 `sre-webapp` is a single-page Vue 3 application that talks to the FastAPI
-backend at [johnmathews/homelab-sre](https://github.com/johnmathews/homelab-sre).
+backend at [johnmathews/sre-agent](https://github.com/johnmathews/sre-agent).
 It replaces the earlier Streamlit UI with a first-class frontend stack.
 
 ## Why a SPA?
@@ -35,7 +35,7 @@ Streamlit UI could not give us.
                        /api/* proxied by Vite     │
                                                   ▼
                             ┌────────────────────────────┐
-                            │ FastAPI (homelab-sre)      │
+                            │ FastAPI (sre-agent)        │
                             │ :8000                      │
                             │ ├ POST /ask/stream (SSE)   │
                             │ ├ GET  /health             │

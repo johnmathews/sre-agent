@@ -1,0 +1,78 @@
+# Demo Docker Compose — sre-webapp + sre-agent
+#
+# Pulls pre-built images from GHCR for both the Vue frontend (this repo) and
+# the FastAPI backend ([johnmathews/sre-agent](https://github.com/johnmathews/sre-agent)).
+# No source checkout required.
+#
+# Usage:
+#   1. Create a .env file alongside this compose file with the backend's
+#      required vars (see https://github.com/johnmathews/sre-agent/blob/main/.env.example):
+#        LLM_PROVIDER, PROMETHEUS_URL, GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN
+#        + OPENAI_API_KEY or ANTHROPIC_API_KEY
+#   2. Build the backend's vector store (one-time, and after runbook updates):
+#        docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
+#   3. Start the stack:
+#        docker compose -f docker-compose.demo.yml up -d
+#   4. Open http://localhost:8080 (webapp) — API is on http://localhost:8000
+#
+# Prerequisites for LLM_PROVIDER=anthropic:
+#   1. Install Claude Code on the Docker host: npm install -g @anthropic-ai/claude-code
+#   2. Authenticate: claude login  (or: claude setup-token for headless/SSH)
+#   3. Tokens at ~/.claude/ are mounted into the container (read-write, for token refresh).
+
+services:
+  sre-ingest:
+    image: ghcr.io/johnmathews/sre-agent:latest
+    command: ["python", "-m", "scripts.ingest_runbooks"]
+    env_file: .env
+    environment:
+      - ANONYMIZED_TELEMETRY=False
+    volumes:
+      - chroma_data:/app/.chroma_db
+    profiles: ["setup"]
+
+  sre-api:
+    image: ghcr.io/johnmathews/sre-agent:latest
+    ports:
+      - "${SRE_API_PORT:-8000}:8000"
+    env_file: .env
+    environment:
+      - ANONYMIZED_TELEMETRY=False
+      - CLAUDE_CONFIG_DIR=/app/.claude
+      - HOME=/app
+    restart: unless-stopped
+    mem_limit: 768m
+    volumes:
+      - chroma_data:/app/.chroma_db
+      - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
+      # Claude Agent SDK OAuth credentials (read-write for token auto-refresh).
+      # Harmless empty-dir mount when using LLM_PROVIDER=openai.
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/app/.claude
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  sre-webapp:
+    image: ghcr.io/johnmathews/sre-webapp:latest
+    ports:
+      - "${SRE_WEBAPP_PORT:-8080}:80"
+    restart: unless-stopped
+    environment:
+      # nginx proxies /api/* to this upstream (strips the /api prefix)
+      - API_UPSTREAM=http://sre-api:8000
+    mem_limit: 64m
+    depends_on:
+      sre-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  chroma_data:

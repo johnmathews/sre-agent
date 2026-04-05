@@ -34,7 +34,11 @@ backend isn't up yet.
 
 ## docker-compose
 
-Embed into the existing [`homelab-sre`](https://github.com/johnmathews/homelab-sre)
+See [`docker-compose.demo.yml`](../docker-compose.demo.yml) at the repo root
+for a ready-to-run stack (webapp + sre-agent backend) using pre-built GHCR
+images — nothing to build locally.
+
+Or embed into the existing [`sre-agent`](https://github.com/johnmathews/sre-agent)
 stack:
 
 ```yaml

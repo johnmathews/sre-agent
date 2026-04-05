@@ -1,6 +1,6 @@
 # sre-webapp
 
-Vue 3 SPA frontend for the [homelab SRE assistant](https://github.com/johnmathews/homelab-sre).
+Vue 3 SPA frontend for the [HomeLab SRE Assistant](https://github.com/johnmathews/sre-agent).
 Streams chat responses from a FastAPI backend over Server-Sent Events.
 
 ## Stack
@@ -54,8 +54,10 @@ docker run --rm -p 8080:80 \
 `API_UPSTREAM` defaults to `http://sre-api:8000` — the expected service name
 when the frontend and backend run in the same docker-compose network.
 
-See [`docs/deployment.md`](./docs/deployment.md) for the full compose stack.
+See [`docs/deployment.md`](./docs/deployment.md) for the full compose stack,
+or [`docker-compose.demo.yml`](./docker-compose.demo.yml) for a ready-to-run
+stack (webapp + sre-agent backend) pulled straight from GHCR.
 
 ## Related repos
 
-- **Backend + old Streamlit UI:** [johnmathews/homelab-sre](https://github.com/johnmathews/homelab-sre)
+- **Backend (FastAPI + LangChain agent):** [johnmathews/sre-agent](https://github.com/johnmathews/sre-agent)

@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Node 22+ and npm 10+
-- The backend ([johnmathews/homelab-sre](https://github.com/johnmathews/homelab-sre))
+- The backend ([johnmathews/sre-agent](https://github.com/johnmathews/sre-agent))
   running at `http://localhost:8000` (use `make serve` in that repo) — only
   needed for live chat; the E2E test suite mocks the backend.
 

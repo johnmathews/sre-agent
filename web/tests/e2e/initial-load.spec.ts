@@ -15,7 +15,7 @@ test.describe('initial load', () => {
     ).toBeVisible()
 
     await expect(
-      page.getByText('Ask about your infrastructure.', { exact: false }),
+      page.getByRole('heading', { name: 'Ask about your infrastructure' }),
     ).toBeVisible()
 
     // Input area is present and empty

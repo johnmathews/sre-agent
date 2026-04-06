@@ -15,7 +15,7 @@ test.describe('health panel', () => {
     await expect(page.getByText('prometheus:')).not.toBeVisible()
 
     // Expand
-    await page.getByRole('button').filter({ hasText: 'Health' }).click()
+    await page.locator('aside').getByRole('button').filter({ hasText: 'Health' }).click()
     await expect(page.getByText('prometheus:').first()).toBeVisible()
     await expect(page.getByText('grafana:').first()).toBeVisible()
   })
@@ -29,7 +29,7 @@ test.describe('health panel', () => {
     await expect(page.getByText('grafana:')).not.toBeVisible()
 
     // Click to expand
-    await page.getByRole('button').filter({ hasText: 'Health' }).click()
+    await page.locator('aside').getByRole('button').filter({ hasText: 'Health' }).click()
     await expect(page.getByText('grafana:').first()).toBeVisible()
     await expect(page.getByText('HTTP 503')).toBeVisible()
   })

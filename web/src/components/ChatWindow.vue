@@ -12,6 +12,17 @@ const input = ref('')
 const scrollContainer = ref<HTMLDivElement | null>(null)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 
+const exampleQuestions = [
+  'What VMs and containers are running on Proxmox?',
+  'Are any Grafana alerts firing right now?',
+  'How has CPU usage changed over the last 6 hours?',
+  'Show me errors from traefik in the last hour',
+  'Is the ZFS tank pool healthy? How much space is left?',
+  'When was VM 100 last backed up?',
+  'Which services experienced crashes today?',
+  'What disks are currently spun up?',
+]
+
 onMounted(() => {
   textareaRef.value?.focus()
 })
@@ -43,6 +54,11 @@ async function handleSubmit() {
   void conversations.refresh()
 }
 
+function useExample(question: string) {
+  input.value = question
+  textareaRef.value?.focus()
+}
+
 function handleKeydown(e: KeyboardEvent) {
   // Enter = submit; Shift+Enter = newline
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -61,13 +77,58 @@ function handleKeydown(e: KeyboardEvent) {
     >
       <div
         v-if="!chat.hasMessages && !chat.isStreaming"
-        class="flex h-full items-center justify-center text-center text-gray-400 dark:text-gray-500"
+        class="mx-auto flex h-full max-w-2xl flex-col items-center justify-center"
       >
-        <div>
-          <p class="mb-2 text-xl">Ask about your infrastructure.</p>
-          <p class="text-base text-gray-500 dark:text-gray-400">
-            The assistant can query Prometheus, Grafana, Loki, and more.
+        <h2 class="mb-3 text-2xl font-semibold text-gray-800 dark:text-gray-100">
+          Ask about your infrastructure
+        </h2>
+        <p class="mb-6 text-center text-base text-gray-500 dark:text-gray-400">
+          Query metrics, inspect logs, check backups, and troubleshoot your homelab.
+        </p>
+
+        <!-- Tool grid — hidden on very small screens -->
+        <div class="mb-6 hidden w-full grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-500 dark:text-gray-400 sm:grid lg:grid-cols-3">
+          <div class="flex items-center gap-1.5">
+            <span class="text-blue-500">&#9679;</span> Prometheus metrics
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-orange-500">&#9679;</span> Grafana alerts &amp; dashboards
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-yellow-500">&#9679;</span> Loki logs
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-green-500">&#9679;</span> Proxmox VMs &amp; containers
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-cyan-500">&#9679;</span> TrueNAS storage &amp; shares
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-purple-500">&#9679;</span> Proxmox Backup Server
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-rose-500">&#9679;</span> HDD power status
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-teal-500">&#9679;</span> Runbook search
+          </div>
+        </div>
+
+        <!-- Example questions -->
+        <div class="w-full">
+          <p class="mb-2 text-center text-sm font-medium text-gray-400 dark:text-gray-500">
+            Try asking
           </p>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <button
+              v-for="q in exampleQuestions"
+              :key="q"
+              class="cursor-pointer rounded-lg border border-gray-200 px-3 py-2 text-left text-sm text-gray-600 transition-colors hover:border-blue-300 hover:bg-blue-50 dark:border-gray-700 dark:text-gray-400 dark:hover:border-blue-600 dark:hover:bg-blue-950"
+              @click="useExample(q)"
+            >
+              {{ q }}
+            </button>
+          </div>
         </div>
       </div>
       <div v-else class="mx-auto flex max-w-3xl flex-col gap-4">

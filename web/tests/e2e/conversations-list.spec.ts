@@ -50,7 +50,7 @@ test.describe('conversations list', () => {
 
     await expect(page.getByText('What is the current CPU usage?')).not.toBeVisible()
     await expect(
-      page.getByText('Ask about your infrastructure.', { exact: false }),
+      page.getByRole('heading', { name: 'Ask about your infrastructure' }),
     ).toBeVisible()
   })
 })

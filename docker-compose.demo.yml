@@ -32,7 +32,7 @@ services:
       - chroma_data:/app/.chroma_db
     profiles: ["setup"]
 
-  sre-api:
+  sre-agent:
     image: ghcr.io/johnmathews/sre-agent:latest
     ports:
       - "${SRE_API_PORT:-8000}:8000"
@@ -63,10 +63,10 @@ services:
     restart: unless-stopped
     environment:
       # nginx proxies /api/* to this upstream (stripping the /api prefix)
-      - API_UPSTREAM=http://sre-api:8000
+      - API_UPSTREAM=http://sre-agent:8000
     mem_limit: 64m
     depends_on:
-      sre-api:
+      sre-agent:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost/"]

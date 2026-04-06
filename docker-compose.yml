@@ -5,7 +5,7 @@
 #   docker compose up -d                             # start API + webapp
 #
 # Embedding into an existing stack:
-#   Copy the sre-api and sre-webapp services below into your compose file.
+#   Copy the sre-agent and sre-webapp services below into your compose file.
 #   Replace `build: .` with `image: ghcr.io/johnmathews/sre-agent:latest`,
 #   adjust ports, and add your network. The sre-ingest step only needs to run
 #   once to populate the chroma_data volume.
@@ -34,7 +34,7 @@ services:
       - chroma_data:/app/.chroma_db
     profiles: ["setup"]
 
-  sre-api:
+  sre-agent:
     build: . # or: image: ghcr.io/johnmathews/sre-agent:latest
     ports:
       - "${SRE_API_PORT:-8000}:8000"
@@ -44,7 +44,7 @@ services:
       - CLAUDE_CONFIG_DIR=/app/.claude
       - HOME=/app
     restart: unless-stopped
-    mem_limit: 768m  # 1 uvicorn worker + up to ~5 concurrent SDK CLI subprocesses
+    mem_limit: 768m # 1 uvicorn worker + up to ~5 concurrent SDK CLI subprocesses
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
@@ -69,10 +69,10 @@ services:
     restart: unless-stopped
     environment:
       # nginx proxies /api/* to this upstream (stripping the /api prefix)
-      - API_UPSTREAM=http://sre-api:8000
+      - API_UPSTREAM=http://sre-agent:8000
     mem_limit: 64m
     depends_on:
-      sre-api:
+      sre-agent:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost/"]

@@ -97,7 +97,7 @@ The backend builds a single Docker image that runs as two services, plus a separ
 | Service       | Image                                    | Port | Description                              |
 | ------------- | ---------------------------------------- | ---- | ---------------------------------------- |
 | `sre-ingest`  | `ghcr.io/johnmathews/sre-agent`          | —    | One-shot: builds the Chroma vector store |
-| `sre-api`     | `ghcr.io/johnmathews/sre-agent`          | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
+| `sre-agent`     | `ghcr.io/johnmathews/sre-agent`          | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
 | `sre-webapp`  | `ghcr.io/johnmathews/sre-webapp`         | 8080 | Vue 3 SPA frontend (separate repo: [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
 
 The intended deployment is on a Linux host (VM, LXC, bare metal) on the same LAN as your Prometheus, Grafana, and
@@ -118,7 +118,7 @@ volume:
       - chroma_data:/app/.chroma_db
     profiles: ["setup"]
 
-  sre-api:
+  sre-agent:
     image: ghcr.io/johnmathews/sre-agent:latest
     ports:
       - "8000:8000"
@@ -141,9 +141,9 @@ volume:
       - "8080:80"
     restart: unless-stopped
     environment:
-      - API_UPSTREAM=http://sre-api:8000
+      - API_UPSTREAM=http://sre-agent:8000
     depends_on:
-      sre-api:
+      sre-agent:
         condition: service_healthy
 
 # Add to your existing volumes section:
@@ -162,7 +162,7 @@ build the vector store and start the services:
 docker compose run --rm sre-ingest
 
 # Start the API and webapp
-docker compose up -d sre-api sre-webapp
+docker compose up -d sre-agent sre-webapp
 ```
 
 ### Environment Variables
@@ -255,8 +255,8 @@ docker compose run --rm sre-ingest
 Pull the latest image and restart:
 
 ```bash
-docker compose pull sre-api sre-webapp sre-ingest
-docker compose up -d sre-api sre-webapp
+docker compose pull sre-agent sre-webapp sre-ingest
+docker compose up -d sre-agent sre-webapp
 ```
 
 If runbooks have changed in the new image, re-run ingest:

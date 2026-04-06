@@ -486,7 +486,7 @@ docker-compose.yml
   |     Volumes: chroma_data:/app/.chroma_db
   |     Run manually before first use and after runbook changes
   |
-  +-- sre-api (FastAPI backend)
+  +-- sre-agent (FastAPI backend)
   |     CMD: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
   |     Port: 8000
   |     Volumes: chroma_data:/app/.chroma_db, ${CONVERSATION_HISTORY_HOST_DIR}:/app/conversations,
@@ -497,7 +497,7 @@ docker-compose.yml
   +-- sre-webapp (Vue 3 SPA frontend, separate image)
         Image: ghcr.io/johnmathews/sre-webapp:latest
         Port: 8080 -> 80
-        Env: API_UPSTREAM=http://sre-api:8000
+        Env: API_UPSTREAM=http://sre-agent:8000
         restart: unless-stopped, starts after api is healthy
         See: github.com/johnmathews/sre-webapp
 ```

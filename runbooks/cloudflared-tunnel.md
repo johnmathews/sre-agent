@@ -88,7 +88,7 @@ rate(node_network_transmit_bytes_total{instance=~".*101.*", device!="lo"}[5m])
 
 1. Verify CNAME records exist in Cloudflare DNS pointing to the tunnel
 2. Check Cloudflare dashboard for DNS propagation
-3. Test resolution: `dig <subdomain>.itsa.pizza`
+3. Test resolution: `dig <subdomain>.itsa-pizza.com`
 
 ## Related Services
 

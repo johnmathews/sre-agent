@@ -17,8 +17,8 @@ Internet -> Cloudflare Edge -> Cloudflare Tunnel -> cloudflared LXC (192.168.2.1
 - Traefik applies rate limiting to auth/API routes for Immich and Jellyfin
 - Traefik runs as a Docker container on a dedicated LXC (192.168.2.108)
 - Configuration is file-based (dynamic config in `/srv/apps/traefik/`)
-- Dashboard: https://traefik.itsa.pizza/dashboard/
-- API overview: https://traefik.itsa.pizza/api/overview
+- Dashboard: https://traefik.itsa-pizza.com/dashboard/
+- API overview: https://traefik.itsa-pizza.com/api/overview
 
 ### Services routed through Traefik
 
@@ -41,13 +41,13 @@ docker logs traefik --tail 50
 
 ```sh
 # From any host on the network
-curl -s https://traefik.itsa.pizza/api/http/routers | jq '.[].name'
-curl -s https://traefik.itsa.pizza/api/http/services | jq '.[].name'
+curl -s https://traefik.itsa-pizza.com/api/http/routers | jq '.[].name'
+curl -s https://traefik.itsa-pizza.com/api/http/services | jq '.[].name'
 ```
 
 ### View dashboard
 
-- https://traefik.itsa.pizza/dashboard/
+- https://traefik.itsa-pizza.com/dashboard/
 
 ## Prometheus Metrics
 
@@ -105,7 +105,7 @@ rate(node_cpu_seconds_total{instance=~".*108.*", mode!="idle"}[5m])
 
 ### Routing misconfiguration
 
-1. Check active routers via API: `curl -s https://traefik.itsa.pizza/api/http/routers | jq`
+1. Check active routers via API: `curl -s https://traefik.itsa-pizza.com/api/http/routers | jq`
 2. Look for routers with `status: disabled` or priority conflicts
 3. Verify host rules match the expected domain names
 4. Check middleware chain order (rate limiting should come after auth headers)

@@ -7,6 +7,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -213,7 +214,7 @@ def _get_incident_history_enrichment(
 
 # --- Tool descriptions ---
 
-TOOL_DESCRIPTION_ALERTS = (
+TOOL_DESCRIPTION_ALERTS = HOMELAB_CONTEXT + (
     "Fetch active alerts from Grafana's alerting system. "
     "Use this to answer questions like 'what alerts are firing?', 'are there any active alerts?', "
     "or 'summarize current alerts'.\n\n"
@@ -222,7 +223,7 @@ TOOL_DESCRIPTION_ALERTS = (
     "Optionally filter by state: 'active' (firing), 'suppressed' (silenced), 'unprocessed'."
 )
 
-TOOL_DESCRIPTION_RULES = (
+TOOL_DESCRIPTION_RULES = HOMELAB_CONTEXT + (
     "Fetch alert rule definitions from Grafana. "
     "Use this to answer questions like 'what alerts are configured?', "
     "'what conditions trigger the high CPU alert?', or 'list all alert rules'.\n\n"

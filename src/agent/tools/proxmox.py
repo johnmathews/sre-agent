@@ -9,6 +9,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -348,7 +349,7 @@ class ListTasksInput(BaseModel):
 # --- Tool descriptions ---
 
 
-TOOL_DESCRIPTION_LIST_GUESTS = (
+TOOL_DESCRIPTION_LIST_GUESTS = HOMELAB_CONTEXT + (
     "List all VMs and containers on the Proxmox node with their status, "
     "resource allocation, and current CPU usage. "
     "Use this to answer questions like 'what VMs are running?', "
@@ -359,7 +360,7 @@ TOOL_DESCRIPTION_LIST_GUESTS = (
     "use proxmox_get_guest_config instead."
 )
 
-TOOL_DESCRIPTION_GET_CONFIG = (
+TOOL_DESCRIPTION_GET_CONFIG = HOMELAB_CONTEXT + (
     "Get the full configuration of a specific VM or container. "
     "Use this to answer questions like 'what disks does VM 100 have?', "
     "'show the config for jellyfin', 'how much RAM is allocated to container 101?', "
@@ -371,7 +372,7 @@ TOOL_DESCRIPTION_GET_CONFIG = (
     "- `vmid` + `guest_type` — e.g. vmid=113, guest_type='lxc'. Use when you know the ID."
 )
 
-TOOL_DESCRIPTION_NODE_STATUS = (
+TOOL_DESCRIPTION_NODE_STATUS = HOMELAB_CONTEXT + (
     "Get the overall status of the Proxmox host node. "
     "Use this to answer questions like 'how is the Proxmox server doing?', "
     "'what is the host CPU usage?', 'how much RAM is available on the hypervisor?', "
@@ -381,7 +382,7 @@ TOOL_DESCRIPTION_NODE_STATUS = (
     "For per-VM/container metrics use Prometheus tools or proxmox_list_guests."
 )
 
-TOOL_DESCRIPTION_LIST_TASKS = (
+TOOL_DESCRIPTION_LIST_TASKS = HOMELAB_CONTEXT + (
     "List recent Proxmox tasks (migrations, backups, snapshot operations, etc). "
     "Use this to answer questions like 'any recent failed tasks?', "
     "'is a migration running?', 'did the backup task complete?', "

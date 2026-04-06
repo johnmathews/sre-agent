@@ -16,6 +16,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -592,7 +593,7 @@ def _build_timeline(events: list[_TimelineEvent]) -> str:
 
 # --- Tool descriptions ---
 
-TOOL_DESCRIPTION_QUERY_LOGS = (
+TOOL_DESCRIPTION_QUERY_LOGS = HOMELAB_CONTEXT + (
     "Query Loki for log lines using LogQL. Use this for general log searches like "
     "'show me recent logs from traefik' or 'what errors occurred on the media VM'.\n\n"
     "This homelab's Loki setup:\n"
@@ -611,7 +612,7 @@ TOOL_DESCRIPTION_QUERY_LOGS = (
     "Do not query `{}` with no labels — this returns all logs and is very slow."
 )
 
-TOOL_DESCRIPTION_LABEL_VALUES = (
+TOOL_DESCRIPTION_LABEL_VALUES = HOMELAB_CONTEXT + (
     "List available values for a Loki label. Use this to discover what hostnames, "
     "services, containers, or log levels exist before querying logs.\n\n"
     "Common label lookups:\n"
@@ -623,7 +624,7 @@ TOOL_DESCRIPTION_LABEL_VALUES = (
     'list service_name values where {hostname="media"} to see services on the media VM.'
 )
 
-TOOL_DESCRIPTION_METRIC_QUERY = (
+TOOL_DESCRIPTION_METRIC_QUERY = HOMELAB_CONTEXT + (
     "Run a LogQL metric query against Loki to count, rate, or aggregate logs. "
     "Returns numeric results, NOT log lines. Use this for questions like 'which host has "
     "the most logs?', 'what is the error rate?', 'how many warnings today?'.\n\n"
@@ -641,7 +642,7 @@ TOOL_DESCRIPTION_METRIC_QUERY = (
     "If step is provided (e.g. '5m', '1h'), runs a range query returning a time series."
 )
 
-TOOL_DESCRIPTION_CORRELATE = (
+TOOL_DESCRIPTION_CORRELATE = HOMELAB_CONTEXT + (
     "Search for significant log events around a reference time. Use this for change "
     "correlation — 'what changed before this alert fired?' or 'what happened around 2pm?'.\n\n"
     "This tool automatically searches for:\n"

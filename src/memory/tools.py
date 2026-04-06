@@ -12,6 +12,7 @@ import logging
 from langchain_core.tools import BaseTool, ToolException, tool
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.memory.store import (
     get_baseline,
     get_initialized_connection,
@@ -62,24 +63,24 @@ class CheckBaselineInput(BaseModel):
 # Tool descriptions
 # ---------------------------------------------------------------------------
 
-_SEARCH_INCIDENTS_DESC = (
+_SEARCH_INCIDENTS_DESC = HOMELAB_CONTEXT + (
     "Search past incidents recorded in the agent's memory store. "
     "Returns matching incidents with their root causes and resolutions. "
     "Use this to check if a similar alert has fired before or find known patterns."
 )
 
-_RECORD_INCIDENT_DESC = (
+_RECORD_INCIDENT_DESC = HOMELAB_CONTEXT + (
     "Record a new incident in the agent's memory store. "
     "Use this after identifying a root cause or resolution during an investigation, "
     "so the knowledge is preserved for future sessions."
 )
 
-_GET_PREVIOUS_REPORT_DESC = (
+_GET_PREVIOUS_REPORT_DESC = HOMELAB_CONTEXT + (
     "Retrieve the most recent archived weekly reliability report(s). "
     "Use this to compare current state with past reports or answer questions about trends."
 )
 
-_CHECK_BASELINE_DESC = (
+_CHECK_BASELINE_DESC = HOMELAB_CONTEXT + (
     "Check whether a metric value is within the normal range based on computed baselines. "
     "Returns baseline statistics (avg, p95, min, max) and an assessment of the current value."
 )

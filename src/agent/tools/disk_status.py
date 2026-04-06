@@ -14,6 +14,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools.prometheus import (
     DEFAULT_TIMEOUT_SECONDS as PROM_TIMEOUT,
 )
@@ -461,7 +462,7 @@ class HddPowerStatusInput(BaseModel):
     )
 
 
-TOOL_DESCRIPTION = (
+TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
     "Get a complete HDD power status summary for TrueNAS: which disks are spun up "
     "or in standby, mapped to human-readable disk names (model, size, serial), "
     "how many state changes occurred in the requested duration, "

@@ -9,6 +9,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
+from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -634,7 +635,7 @@ class AppsInput(BaseModel):
 # --- Tool descriptions ---
 
 
-TOOL_DESCRIPTION_POOL_STATUS = (
+TOOL_DESCRIPTION_POOL_STATUS = HOMELAB_CONTEXT + (
     "Get ZFS pool health and dataset space usage from TrueNAS. "
     "Use this to answer questions like 'is the tank pool healthy?', "
     "'how much space is left on the NAS?', 'any degraded pools?', "
@@ -645,7 +646,7 @@ TOOL_DESCRIPTION_POOL_STATUS = (
     "each top-level dataset in each pool."
 )
 
-TOOL_DESCRIPTION_LIST_SHARES = (
+TOOL_DESCRIPTION_LIST_SHARES = HOMELAB_CONTEXT + (
     "List NFS and SMB shares configured on TrueNAS, and optionally show active SMB sessions. "
     "Use this to answer questions like 'what NFS shares exist?', "
     "'is the paperless share enabled?', 'which SMB shares are configured?', "
@@ -656,7 +657,7 @@ TOOL_DESCRIPTION_LIST_SHARES = (
     "Set include_sessions=true for questions about active connections or connected clients."
 )
 
-TOOL_DESCRIPTION_SNAPSHOTS = (
+TOOL_DESCRIPTION_SNAPSHOTS = HOMELAB_CONTEXT + (
     "List ZFS snapshots, snapshot schedules, and replication tasks on TrueNAS. "
     "Use this to answer questions like 'when was the last snapshot of tank/media?', "
     "'is replication running?', 'what snapshot schedules exist?', "
@@ -666,7 +667,7 @@ TOOL_DESCRIPTION_SNAPSHOTS = (
     "and replication task status with source/target datasets."
 )
 
-TOOL_DESCRIPTION_SYSTEM_STATUS = (
+TOOL_DESCRIPTION_SYSTEM_STATUS = HOMELAB_CONTEXT + (
     "Get TrueNAS system information, alerts, running jobs, and disk inventory. "
     "Use this to answer questions like 'any TrueNAS alerts?', "
     "'what version is TrueNAS running?', 'what disks does TrueNAS have?', "
@@ -676,7 +677,7 @@ TOOL_DESCRIPTION_SYSTEM_STATUS = (
     "(model, type, serial, size, pool assignment, standby timer)."
 )
 
-TOOL_DESCRIPTION_APPS = (
+TOOL_DESCRIPTION_APPS = HOMELAB_CONTEXT + (
     "List apps installed on TrueNAS SCALE with their running state. "
     "Use this to answer questions like 'what apps are running on TrueNAS?', "
     "'is Alloy running?', 'is the disk-status-exporter deployed?', "

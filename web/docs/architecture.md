@@ -92,8 +92,10 @@ the reasoning behind using `fetch` + `ReadableStream` instead of
 
 ## Styling
 
-Tailwind CSS v4 (CSS-first, no config file). Dark theme by default, hand-coded
-colors for the MVP — no design tokens yet.
+Tailwind CSS v4 (CSS-first, class-based dark mode via `@custom-variant dark`).
+Light theme by default with a toggle button in the sidebar header. Theme
+preference is persisted to `localStorage`. Colors use light-first utilities
+with `dark:` variants throughout — no design tokens yet.
 
 The `.markdown` class in `src/style.css` handles LLM-rendered chat content
 (headings, lists, code blocks, tables). This is the one place where we

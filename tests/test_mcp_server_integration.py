@@ -172,6 +172,63 @@ class TestMcpToolExecution:
                 await client.call_tool("prometheus_search_metrics", {"search_term": "cpu"})
 
 
+class TestMcpConversationTools:
+    """Test conversation history MCP tools."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_settings(self, mock_settings: object) -> None:
+        pass
+
+    async def test_conversation_tools_registered(self, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        server = build_fastmcp_server(mock_settings)
+        names = await _tool_names(server)
+        assert "sre_agent_list_conversations" in names
+        assert "sre_agent_get_conversation" in names
+
+    async def test_conversation_tools_disabled_when_no_dir(self, mock_settings: Any) -> None:
+        mock_settings.conversation_history_dir = ""
+        server = build_fastmcp_server(mock_settings)
+        names = await _tool_names(server)
+        assert "sre_agent_list_conversations" not in names
+        assert "sre_agent_get_conversation" not in names
+
+    @pytest.mark.integration
+    async def test_list_conversations_empty(self, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        server = build_fastmcp_server(mock_settings)
+        async with Client(server) as client:
+            result = await client.call_tool("sre_agent_list_conversations", {})
+            assert "No conversations found" in str(result)
+
+    @pytest.mark.integration
+    async def test_list_and_get_conversation(self, mock_settings: Any, tmp_path: Any) -> None:
+        from src.agent.history import save_turn
+
+        mock_settings.conversation_history_dir = str(tmp_path)
+
+        save_turn(str(tmp_path), "abc12345", "user", "What alerts are firing?", "gpt-4o", "openai")
+        save_turn(str(tmp_path), "abc12345", "assistant", "No alerts firing.", "gpt-4o", "openai")
+
+        server = build_fastmcp_server(mock_settings)
+        async with Client(server) as client:
+            list_result = await client.call_tool("sre_agent_list_conversations", {})
+            assert "abc12345" in str(list_result)
+            assert "What alerts are firing?" in str(list_result)
+
+            get_result = await client.call_tool("sre_agent_get_conversation", {"session_id": "abc12345"})
+            assert "What alerts are firing?" in str(get_result)
+            assert "No alerts firing." in str(get_result)
+
+    @pytest.mark.integration
+    async def test_get_conversation_not_found(self, mock_settings: Any, tmp_path: Any) -> None:
+        mock_settings.conversation_history_dir = str(tmp_path)
+        server = build_fastmcp_server(mock_settings)
+        async with Client(server) as client:
+            result = await client.call_tool("sre_agent_get_conversation", {"session_id": "nonexist"})
+            assert "not found" in str(result)
+
+
 class TestMcpServerDisabled:
     """Test that MCP server is not built when auth token is missing."""
 

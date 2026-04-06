@@ -156,10 +156,16 @@ def _format_guests(guests: list[PveGuestEntry]) -> str:
         mem_str = _format_bytes(maxmem) if maxmem else "?"
 
         status_marker = "+" if status == "running" else "-"
-        lines.append(
-            f"  {status_marker} {vmid} {name} ({type_label}, {status}) "
-            f"— {cpus} vCPU, {mem_str} RAM" + (f", CPU {cpu_pct:.0f}%" if status == "running" else "")
-        )
+        if status == "running":
+            lines.append(
+                f"  {status_marker} {vmid} {name} ({type_label}, {status}) "
+                f"— {cpus} vCPU, {mem_str} RAM, CPU {cpu_pct:.0f}%"
+            )
+        else:
+            lines.append(
+                f"  {status_marker} {vmid} {name} ({type_label}, {status}) "
+                f"— config: {cpus} vCPU, {mem_str} RAM (not consuming host resources while stopped)"
+            )
 
     return "\n".join(lines)
 

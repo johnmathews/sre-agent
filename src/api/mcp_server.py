@@ -237,6 +237,57 @@ def _register_runbook_tools(mcp: FastMCP) -> None:
         return await asyncio.to_thread(_call_sync, runbook_search, query=query, num_results=num_results)
 
 
+def _register_conversation_tools(mcp: FastMCP, history_dir: str) -> None:
+    import json
+
+    from src.agent.history import (
+        get_conversation,
+        list_conversations,
+    )
+    from src.agent.tools import HOMELAB_CONTEXT
+
+    @mcp.tool(
+        name="sre_agent_list_conversations",
+        description=(
+            HOMELAB_CONTEXT
+            + "List recent conversations the deployed SRE agent has had via the web UI or API. "
+            "Returns session IDs, titles (derived from the first user message), timestamps, "
+            "turn counts, and which LLM model/provider was used. "
+            "Most-recently-updated conversations appear first. "
+            "Use this to find a specific past conversation, then call sre_agent_get_conversation "
+            "with its session_id to read the full dialogue."
+        ),
+    )
+    async def sre_agent_list_conversations_mcp(limit: int = 20) -> str:  # pyright: ignore[reportUnusedFunction]
+        items = list_conversations(history_dir)
+        items = items[:limit]
+        if not items:
+            return "No conversations found."
+        lines = [f"Found {len(items)} conversation(s):\n"]
+        for item in items:
+            lines.append(
+                f"  [{item['session_id']}] {item['title'] or '(untitled)'} "
+                f"— {item['turn_count']} turn(s), {item['provider']}/{item['model']}, "
+                f"updated {item['updated_at']}"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool(
+        name="sre_agent_get_conversation",
+        description=(
+            HOMELAB_CONTEXT
+            + "Retrieve the full dialogue of a specific deployed SRE agent conversation by session ID. "
+            "Returns all user and assistant turns with timestamps. "
+            "Use sre_agent_list_conversations first to find the session_id you need."
+        ),
+    )
+    async def sre_agent_get_conversation_mcp(session_id: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        data = get_conversation(history_dir, session_id)
+        if data is None:
+            return f"Conversation '{session_id}' not found."
+        return json.dumps(data, indent=2, default=str)
+
+
 def _register_memory_tools(mcp: FastMCP) -> None:
     try:
         from src.memory.store import is_memory_configured
@@ -353,5 +404,9 @@ def build_fastmcp_server(settings: Settings | None = None) -> FastMCP:
 
     _register_runbook_tools(mcp)
     _register_memory_tools(mcp)
+
+    if settings.conversation_history_dir:
+        _register_conversation_tools(mcp, settings.conversation_history_dir)
+        logger.info("MCP: Conversation history tools registered")
 
     return mcp

@@ -173,19 +173,20 @@ Code, Claude Desktop, Cursor) to call individual tools directly without going th
 
 ### Configuration
 
-Set `MCP_AUTH_TOKEN` to enable the endpoint. If empty (default), the MCP server is not mounted.
+The MCP endpoint is always enabled at `/mcp`. Auth is handled externally by Cloudflare Access.
 
 ```bash
-# Add to Claude Code
-claude mcp add --transport http sre-agent \
-  --header "Authorization: Bearer <your-token>" \
-  http://192.168.2.106:8001/mcp
+# Add to Claude Code (external access via Cloudflare tunnel)
+claude mcp add --transport http \
+  --header "CF-Access-Client-Id: <id>" \
+  --header "CF-Access-Client-Secret: <secret>" \
+  -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
 ```
 
 ### Architecture
 
 - **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
-- **Auth:** Bearer token via `MCP_AUTH_TOKEN`
+- **Auth:** Cloudflare Access (service token headers)
 - **Mount:** FastMCP app mounted on the existing FastAPI app at `/mcp`
 - **Tools:** Same ~25 LangChain tool functions used by the agent, wrapped as FastMCP tools
 - **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their

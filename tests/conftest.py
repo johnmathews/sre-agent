@@ -103,8 +103,6 @@ def mock_settings() -> Generator[Any]:
             "request_timeout_seconds": 120,
             # Documentation MCP server
             "documentation_mcp_url": "",
-            # MCP server auth token
-            "mcp_auth_token": "",
         },
     )()
     with (

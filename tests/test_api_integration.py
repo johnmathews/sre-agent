@@ -161,7 +161,7 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "healthy"
         assert body["model"] == "gpt-4o-mini"
-        assert len(body["components"]) == 7
+        assert len(body["components"]) == 8  # includes MCP (always enabled)
         assert all(c["status"] == "healthy" for c in body["components"])
 
     @pytest.mark.integration
@@ -253,8 +253,10 @@ class TestHealthEndpoint:
             resp = client.get("/health")
 
         body = resp.json()
-        assert body["status"] == "unhealthy"
-        assert all(c["status"] == "unhealthy" for c in body["components"])
+        # MCP is always healthy (always mounted), so status is degraded not unhealthy
+        assert body["status"] == "degraded"
+        non_mcp = [c for c in body["components"] if c["name"] != "mcp_server"]
+        assert all(c["status"] == "unhealthy" for c in non_mcp)
 
 
 # ---------------------------------------------------------------------------

@@ -155,20 +155,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _ = migrate_history_files(settings.conversation_history_dir)
 
     async with AsyncExitStack() as stack:
-        # Mount MCP server if auth token is configured
-        if settings.mcp_auth_token:
-            from src.api.mcp_server import build_fastmcp_server
+        # Mount MCP server — auth is handled by Cloudflare Access
+        from src.api.mcp_server import build_fastmcp_server
 
-            mcp_server = build_fastmcp_server(settings)
-            mcp_app = mcp_server.http_app(path="/", stateless_http=True)
-            await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
-            app.mount("/mcp", mcp_app)
-            app.state.mcp_enabled = True
-            tool_count = len(await mcp_server.list_tools())
-            logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
-        else:
-            app.state.mcp_enabled = False
-            logger.info("MCP server disabled — MCP_AUTH_TOKEN not set")
+        mcp_server = build_fastmcp_server(settings)
+        mcp_app = mcp_server.http_app(path="/", stateless_http=True)
+        await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
+        app.mount("/mcp", mcp_app)
+        app.state.mcp_enabled = True
+        tool_count = len(await mcp_server.list_tools())
+        logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
 
         start_scheduler()
         yield

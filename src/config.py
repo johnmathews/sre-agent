@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from typing import ClassVar
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,14 +68,6 @@ class Settings(BaseSettings):
     # Provides semantic search over indexed git repos (disk-status-exporter, etc.)
     # SDK/Anthropic path only — adds as an external MCP server alongside SRE tools.
     documentation_mcp_url: str = ""
-
-    # MCP server auth token (optional — empty string means MCP endpoint disabled)
-    # When set, exposes SRE tools as a Streamable HTTP MCP server at /mcp
-    # Env var: SRE_AGENT_MCP_AUTH_TOKEN
-    mcp_auth_token: str = Field(
-        default="",
-        validation_alias=AliasChoices("sre_agent_mcp_auth_token", "mcp_auth_token"),
-    )
 
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""

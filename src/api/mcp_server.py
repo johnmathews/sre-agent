@@ -4,7 +4,7 @@ Wraps the same LangChain tool functions used by the agent as FastMCP tools,
 served over Streamable HTTP so MCP clients (Claude Code, Claude Desktop, etc.)
 can call them directly without going through the agent loop.
 
-Gated on ``MCP_AUTH_TOKEN`` — if not set, the server is not mounted.
+Auth is handled externally by Cloudflare Access.
 """
 
 import asyncio

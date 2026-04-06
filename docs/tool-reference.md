@@ -25,8 +25,8 @@ Health checks (`GET /health`) also follow this pattern — only configured servi
 
 ## MCP Server Endpoint
 
-When `MCP_AUTH_TOKEN` is set, all tools (except Documentation) are also exposed as a Streamable HTTP MCP server at
-`/mcp`. This allows MCP clients to call individual tools directly without the agent loop.
+All tools (except Documentation) are also exposed as a Streamable HTTP MCP server at `/mcp`. This allows MCP clients
+to call individual tools directly without the agent loop. Auth is handled by Cloudflare Access.
 
 **Access patterns:**
 - **`POST /ask`** — question → agent selects tools → synthesized answer (full SRE experience)
@@ -34,9 +34,10 @@ When `MCP_AUTH_TOKEN` is set, all tools (except Documentation) are also exposed 
 
 **Claude Code setup:**
 ```bash
-claude mcp add --transport http sre-agent \
-  --header "Authorization: Bearer <MCP_AUTH_TOKEN>" \
-  http://<host>:8000/mcp
+claude mcp add --transport http \
+  --header "CF-Access-Client-Id: <id>" \
+  --header "CF-Access-Client-Secret: <secret>" \
+  -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
 ```
 
 ## Prometheus (always enabled)

@@ -179,8 +179,7 @@ class TestMcpServerDisabled:
     def _patch_settings(self, mock_settings: object) -> None:
         pass
 
-    async def test_build_still_works_without_token(self, mock_settings: Any) -> None:
-        """build_fastmcp_server works regardless of token — gating is in main.py."""
-        mock_settings.mcp_auth_token = ""
+    async def test_build_works(self, mock_settings: Any) -> None:
+        """build_fastmcp_server builds successfully."""
         server = build_fastmcp_server(mock_settings)
         assert server is not None

@@ -34,6 +34,14 @@ Width is constrained between 200-600px and persisted to `localStorage`. The
 handle is a 4px-wide column between the sidebar and chat area that highlights
 on hover.
 
+### Richer Homepage / Empty State
+Replaced the minimal two-line empty state with a full landing page listing all 8
+backend integrations (Prometheus, Grafana, Loki, Proxmox, TrueNAS, PBS, HDD
+power, Runbooks) as a color-coded grid, plus 8 clickable example questions that
+pre-fill the input. Layout is responsive: tool grid uses 3 columns on large
+screens, 2 on small, hidden on extra-small; example questions go from 2 columns
+to 1 on narrow viewports.
+
 ### Rename to "SRE Agent"
 Changed "SRE Assistant" to "SRE Agent" in the sidebar heading, page title,
 tests, and README.

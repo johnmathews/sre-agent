@@ -17,7 +17,7 @@ function handleNewConversation() {
     class="flex h-full flex-col gap-4 bg-gray-100 p-4 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
   >
     <div class="flex items-center justify-between">
-      <h1 class="text-xl font-semibold">SRE Assistant</h1>
+      <h1 class="text-xl font-semibold">SRE Agent</h1>
       <button
         class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
         :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"

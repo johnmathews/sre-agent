@@ -7,7 +7,7 @@ test.describe('initial load', () => {
     await page.goto('/')
 
     await expect(
-      page.getByRole('heading', { name: 'SRE Assistant', level: 1 }),
+      page.getByRole('heading', { name: 'SRE Agent', level: 1 }),
     ).toBeVisible()
 
     await expect(

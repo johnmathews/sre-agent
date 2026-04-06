@@ -1,6 +1,6 @@
 # sre-webapp
 
-Vue 3 SPA frontend for the [HomeLab SRE Assistant](https://github.com/johnmathews/sre-agent).
+Vue 3 SPA frontend for the [HomeLab SRE Agent](https://github.com/johnmathews/sre-agent).
 Streams chat responses from a FastAPI backend over Server-Sent Events.
 
 ## Stack

@@ -20,12 +20,16 @@ test.describe('health panel', () => {
     await expect(page.getByText('grafana:').first()).toBeVisible()
   })
 
-  test('auto-expands when health is degraded', async ({ page }) => {
+  test('stays collapsed when health is degraded, expands on click', async ({ page }) => {
     await mockBackend(page, { health: degradedHealth })
     await page.goto('/')
 
     await expect(page.getByText(/degraded \(\d+\/\d+\)/)).toBeVisible()
-    // Details shown without clicking
+    // Details collapsed by default even when degraded
+    await expect(page.getByText('grafana:')).not.toBeVisible()
+
+    // Click to expand
+    await page.getByRole('button').filter({ hasText: 'Health' }).click()
     await expect(page.getByText('grafana:').first()).toBeVisible()
     await expect(page.getByText('HTTP 503')).toBeVisible()
   })

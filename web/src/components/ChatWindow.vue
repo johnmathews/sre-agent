@@ -90,7 +90,7 @@ function handleKeydown(e: KeyboardEvent) {
           ref="textareaRef"
           v-model="input"
           rows="1"
-          placeholder="Ask about your infrastructure..."
+          placeholder="Ask about your infrastructure…"
           class="flex-1 resize-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
           :disabled="chat.isStreaming"
           @keydown="handleKeydown"

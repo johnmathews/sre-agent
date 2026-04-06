@@ -23,18 +23,9 @@ const statusColor = computed(() => {
   }
 })
 
-// Auto-expand when not healthy
-function autoExpand() {
-  if (health.data && health.data.status !== 'healthy') {
-    expanded.value = true
-  }
-}
-
 let pollId: number | null = null
 onMounted(async () => {
   await health.refresh()
-  autoExpand()
-  // Poll every 30s, matching Streamlit's cache TTL
   pollId = window.setInterval(() => health.refresh(), 30_000)
 })
 onUnmounted(() => {
@@ -43,8 +34,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="text-sm">
-    <div v-if="health.error" class="text-red-400">
+  <div class="text-base">
+    <div v-if="health.error" class="text-red-500 dark:text-red-400">
       Cannot reach API server.
     </div>
     <template v-else-if="health.data">
@@ -57,16 +48,16 @@ onUnmounted(() => {
           :class="statusColor"
         />
         <span class="font-medium">Health</span>
-        <span class="text-gray-400">
+        <span class="text-gray-500 dark:text-gray-400">
           {{ health.data.status }} ({{ healthyCount }}/{{ totalCount }})
         </span>
-        <span class="ml-auto text-gray-500">{{ expanded ? '▾' : '▸' }}</span>
+        <span class="ml-auto text-gray-400 dark:text-gray-500">{{ expanded ? '&#9662;' : '&#9656;' }}</span>
       </button>
 
-      <div v-if="expanded" class="mt-2 space-y-1 pl-4 text-xs text-gray-400">
+      <div v-if="expanded" class="mt-2 space-y-1 pl-4 text-sm text-gray-500 dark:text-gray-400">
         <div>
           LLM:
-          <code class="rounded bg-gray-700/40 px-1 py-0.5 text-gray-300">{{
+          <code class="rounded bg-gray-200/60 px-1 py-0.5 text-gray-600 dark:bg-gray-700/40 dark:text-gray-300">{{
             health.data.model
           }}</code>
         </div>
@@ -76,19 +67,19 @@ onUnmounted(() => {
           class="flex flex-wrap items-baseline gap-x-2"
         >
           <span>
-            {{ comp.status === 'healthy' ? '✓' : '✗' }} {{ comp.name }}:
+            {{ comp.status === 'healthy' ? '&#10003;' : '&#10007;' }} {{ comp.name }}:
             <span
               :class="
-                comp.status === 'healthy' ? 'text-green-400' : 'text-red-400'
+                comp.status === 'healthy' ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'
               "
             >{{ comp.status }}</span>
           </span>
-          <span v-if="comp.detail" class="text-gray-500">
-            — {{ comp.detail }}
+          <span v-if="comp.detail" class="text-gray-400 dark:text-gray-500">
+            &mdash; {{ comp.detail }}
           </span>
         </div>
       </div>
     </template>
-    <div v-else class="text-gray-500">Loading health…</div>
+    <div v-else class="text-gray-500">Loading health...</div>
   </div>
 </template>

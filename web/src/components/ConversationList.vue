@@ -35,21 +35,21 @@ async function handleDelete(sessionId: string) {
 <template>
   <div>
     <div class="mb-2 flex items-center justify-between">
-      <h2 class="text-sm font-semibold text-gray-300">Past conversations</h2>
+      <h2 class="text-base font-semibold text-gray-600 dark:text-gray-300">Past conversations</h2>
       <button
-        class="cursor-pointer text-xs text-gray-500 hover:text-gray-300"
+        class="cursor-pointer text-sm text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
         title="Refresh"
         @click="conversations.refresh()"
       >
         ↻
       </button>
     </div>
-    <div v-if="conversations.loading && conversations.items.length === 0" class="text-xs text-gray-500">
-      Loading…
+    <div v-if="conversations.loading && conversations.items.length === 0" class="text-sm text-gray-500">
+      Loading...
     </div>
     <div
       v-else-if="conversations.items.length === 0"
-      class="text-xs text-gray-500 italic"
+      class="text-sm text-gray-500 italic"
     >
       No past conversations yet.
     </div>

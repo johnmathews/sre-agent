@@ -64,50 +64,50 @@ const titleLabel = () => props.conv.title || `(${props.conv.session_id})`
 
 <template>
   <div class="group">
-    <!-- Main row: title + hover-only ⋯ menu button -->
+    <!-- Main row: title + hover-only ... menu button -->
     <div
-      class="flex items-center gap-1 rounded px-2 py-1.5 text-sm hover:bg-gray-700/40"
-      :class="{ 'bg-gray-700/30': isActive }"
+      class="flex items-center gap-1 rounded px-2 py-1.5 text-base hover:bg-gray-200/60 dark:hover:bg-gray-700/40"
+      :class="{ 'bg-gray-200/50 dark:bg-gray-700/30': isActive }"
     >
       <button
         class="flex-1 cursor-pointer truncate text-left"
         :title="`${conv.turn_count} turn${conv.turn_count !== 1 ? 's' : ''} — ${conv.provider}`"
         @click="emit('select', conv.session_id)"
       >
-        <span v-if="isActive" class="mr-1 text-gray-400">▶</span>
+        <span v-if="isActive" class="mr-1 text-gray-500 dark:text-gray-400">&#9654;</span>
         {{ titleLabel() }}
       </button>
       <button
-        class="cursor-pointer rounded px-1.5 py-0.5 text-gray-400 opacity-0 hover:bg-gray-600/60 hover:text-gray-100 group-hover:opacity-100"
+        class="cursor-pointer rounded px-1.5 py-0.5 text-gray-400 opacity-0 hover:bg-gray-300/60 hover:text-gray-800 group-hover:opacity-100 dark:text-gray-400 dark:hover:bg-gray-600/60 dark:hover:text-gray-100"
         :class="{ 'opacity-100': mode !== 'idle' }"
         title="Rename or delete"
         aria-label="Open menu"
         @click="openMenu"
       >
-        ⋯
+        &#8943;
       </button>
     </div>
 
     <!-- Inline menu -->
     <div
       v-if="mode === 'menu'"
-      class="mt-1 flex gap-1 pl-2 text-xs"
+      class="mt-1 flex gap-1 pl-2 text-sm"
       @click.stop
     >
       <button
-        class="cursor-pointer rounded bg-gray-700/60 px-2 py-1 hover:bg-gray-600"
+        class="cursor-pointer rounded bg-gray-200/60 px-2 py-1 hover:bg-gray-300 dark:bg-gray-700/60 dark:hover:bg-gray-600"
         @click="startRename"
       >
         Rename
       </button>
       <button
-        class="cursor-pointer rounded bg-gray-700/60 px-2 py-1 hover:bg-red-900/80"
+        class="cursor-pointer rounded bg-gray-200/60 px-2 py-1 hover:bg-red-100 dark:bg-gray-700/60 dark:hover:bg-red-900/80"
         @click="startDelete"
       >
         Delete
       </button>
       <button
-        class="cursor-pointer rounded px-2 py-1 text-gray-400 hover:text-gray-100"
+        class="cursor-pointer rounded px-2 py-1 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
         @click="cancel"
       >
         Cancel
@@ -124,18 +124,18 @@ const titleLabel = () => props.conv.title || `(${props.conv.session_id})`
         ref="inputRef"
         v-model="renameInput"
         type="text"
-        class="flex-1 rounded border border-gray-600 bg-gray-800 px-2 py-1 text-xs text-gray-100 focus:border-blue-500 focus:outline-none"
+        class="flex-1 rounded border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
         @keydown.enter="commitRename"
         @keydown.escape="cancel"
       />
       <button
-        class="cursor-pointer rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-500"
+        class="cursor-pointer rounded bg-blue-600 px-2 py-1 text-sm text-white hover:bg-blue-500"
         @click="commitRename"
       >
         Save
       </button>
       <button
-        class="cursor-pointer rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-100"
+        class="cursor-pointer rounded px-2 py-1 text-sm text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
         @click="cancel"
       >
         Cancel
@@ -145,10 +145,10 @@ const titleLabel = () => props.conv.title || `(${props.conv.session_id})`
     <!-- Delete confirmation -->
     <div
       v-else-if="mode === 'confirm-delete'"
-      class="mt-1 pl-2 text-xs"
+      class="mt-1 pl-2 text-sm"
       @click.stop
     >
-      <p class="mb-1 text-gray-300">Delete “{{ titleLabel() }}”?</p>
+      <p class="mb-1 text-gray-600 dark:text-gray-300">Delete "{{ titleLabel() }}"?</p>
       <div class="flex gap-1">
         <button
           class="cursor-pointer rounded bg-red-600 px-2 py-1 text-white hover:bg-red-500"
@@ -157,7 +157,7 @@ const titleLabel = () => props.conv.title || `(${props.conv.session_id})`
           Delete
         </button>
         <button
-          class="cursor-pointer rounded px-2 py-1 text-gray-400 hover:text-gray-100"
+          class="cursor-pointer rounded px-2 py-1 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
           @click="cancel"
         >
           Cancel

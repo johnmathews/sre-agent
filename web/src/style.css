@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Base reset + app-wide defaults */
 html,
 body,
@@ -15,7 +17,10 @@ body {
     "Segoe UI",
     Roboto,
     sans-serif;
-  color-scheme: light dark;
+}
+
+.dark {
+  color-scheme: dark;
 }
 
 /* Markdown content styling — applied to any element with .markdown */
@@ -84,17 +89,15 @@ body {
   border: 1px solid rgb(0 0 0 / 0.15);
 }
 
-@media (prefers-color-scheme: dark) {
-  .markdown code,
-  .markdown pre {
-    background: rgb(255 255 255 / 0.08);
-  }
-  .markdown blockquote {
-    border-left-color: rgb(255 255 255 / 0.2);
-    color: rgb(255 255 255 / 0.7);
-  }
-  .markdown th,
-  .markdown td {
-    border-color: rgb(255 255 255 / 0.15);
-  }
+.dark .markdown code,
+.dark .markdown pre {
+  background: rgb(255 255 255 / 0.08);
+}
+.dark .markdown blockquote {
+  border-left-color: rgb(255 255 255 / 0.2);
+  color: rgb(255 255 255 / 0.7);
+}
+.dark .markdown th,
+.dark .markdown td {
+  border-color: rgb(255 255 255 / 0.15);
 }

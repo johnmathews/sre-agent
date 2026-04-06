@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useConversationsStore } from '../stores/conversations'
 import ChatMessage from './ChatMessage.vue'
@@ -10,6 +10,11 @@ const conversations = useConversationsStore()
 
 const input = ref('')
 const scrollContainer = ref<HTMLDivElement | null>(null)
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+
+onMounted(() => {
+  textareaRef.value?.focus()
+})
 
 async function scrollToBottom() {
   await nextTick()
@@ -48,7 +53,7 @@ function handleKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="flex h-full flex-col bg-gray-950 text-gray-100">
+  <div class="flex h-full flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
     <!-- Scrollable message area -->
     <div
       ref="scrollContainer"
@@ -56,11 +61,11 @@ function handleKeydown(e: KeyboardEvent) {
     >
       <div
         v-if="!chat.hasMessages && !chat.isStreaming"
-        class="flex h-full items-center justify-center text-center text-gray-500"
+        class="flex h-full items-center justify-center text-center text-gray-400 dark:text-gray-500"
       >
         <div>
-          <p class="mb-2 text-lg">Ask about your infrastructure.</p>
-          <p class="text-sm text-gray-600">
+          <p class="mb-2 text-xl">Ask about your infrastructure.</p>
+          <p class="text-base text-gray-500 dark:text-gray-400">
             The assistant can query Prometheus, Grafana, Loki, and more.
           </p>
         </div>
@@ -76,16 +81,17 @@ function handleKeydown(e: KeyboardEvent) {
     </div>
 
     <!-- Input area -->
-    <div class="border-t border-gray-800 bg-gray-900 px-6 py-3">
+    <div class="border-t border-gray-200 bg-gray-50 px-6 py-3 dark:border-gray-800 dark:bg-gray-900">
       <form
         class="mx-auto flex max-w-3xl items-end gap-2"
         @submit.prevent="handleSubmit"
       >
         <textarea
+          ref="textareaRef"
           v-model="input"
           rows="1"
-          placeholder="Ask about your infrastructure…"
-          class="flex-1 resize-none rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+          placeholder="Ask about your infrastructure..."
+          class="flex-1 resize-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
           :disabled="chat.isStreaming"
           @keydown="handleKeydown"
         />
@@ -93,14 +99,14 @@ function handleKeydown(e: KeyboardEvent) {
           v-if="!chat.isStreaming"
           type="submit"
           :disabled="!input.trim()"
-          class="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+          class="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-base font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Send
         </button>
         <button
           v-else
           type="button"
-          class="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+          class="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-base font-medium text-white hover:bg-red-500"
           @click="chat.abort()"
         >
           Stop

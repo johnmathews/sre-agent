@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.agent.agent import build_agent, invoke_agent, stream_agent
 from src.agent.history import (
@@ -159,7 +160,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from src.api.mcp_server import build_fastmcp_server
 
             mcp_server = build_fastmcp_server(settings)
-            mcp_app = mcp_server.http_app(stateless_http=True)
+            mcp_app = mcp_server.http_app(path="/", stateless_http=True)
             await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
             app.mount("/mcp", mcp_app)
             app.state.mcp_enabled = True
@@ -176,6 +177,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="HomeLab SRE Assistant", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Middleware: rewrite /mcp → /mcp/ so Starlette mount() works without a 307
+# redirect (some MCP clients, including Claude Code, don't follow redirects).
+# ---------------------------------------------------------------------------
+
+
+class TrailingSlashForMCP:
+    """Add trailing slash to ``/mcp`` requests so the mounted sub-app handles them."""
+
+    def __init__(self, inner: ASGIApp) -> None:
+        self._inner = inner
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"] == "/mcp":
+            scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+        await self._inner(scope, receive, send)
+
+
+app.add_middleware(TrailingSlashForMCP)
 
 
 # ---------------------------------------------------------------------------

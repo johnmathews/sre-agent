@@ -1,6 +1,6 @@
 # Tool Reference
 
-The agent has up to 28 tools across 10 categories. Tools are conditionally registered based on configuration.
+The agent has up to 28 tools across 10 categories (plus 2 MCP-only conversation history tools). Tools are conditionally registered based on configuration.
 
 ## Conditional Registration
 
@@ -155,7 +155,8 @@ List all VMs and containers on the Proxmox node.
 
 - **Input:** `guest_type` (optional: "qemu" or "lxc")
 - **Example questions:** "What VMs are running?", "List all containers", "How many guests are there?"
-- **Returns:** VMID, name, type (VM/CT), status, vCPUs, RAM, CPU usage
+- **Returns:** VMID, name, type (VM/CT), status, vCPUs, RAM, CPU usage. For stopped guests, shows config
+  allocations with a note that no host resources are consumed (CPU% is omitted since it's zero)
 
 ### proxmox_get_guest_config
 
@@ -322,3 +323,23 @@ Search operational runbooks for procedures, troubleshooting steps, and architect
 - **Input:** `query` (string)
 - **Example questions:** "How do I restart the DNS stack?", "What's the procedure for NFS issues?"
 - **Returns:** Relevant runbook chunks with source attribution
+
+## Conversation History (MCP server only)
+
+These tools are registered on the MCP server but not in the agent loop. They allow MCP clients
+(e.g., Claude Code) to browse past conversations the deployed agent has had via the web UI or API.
+
+### sre_agent_list_conversations
+
+List recent conversations, most-recently-updated first.
+
+- **Input:** `limit` (int, default 20)
+- **Returns:** Session ID, title, timestamps, turn count, model, provider
+
+### sre_agent_get_conversation
+
+Retrieve the full dialogue for a specific conversation.
+
+- **Input:** `session_id` (string, e.g. "abc12345")
+- **Returns:** Full conversation JSON with all user/assistant turns and timestamps
+- **Note:** Use `sre_agent_list_conversations` first to find the session ID

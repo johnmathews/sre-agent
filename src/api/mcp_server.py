@@ -249,8 +249,7 @@ def _register_conversation_tools(mcp: FastMCP, history_dir: str) -> None:
     @mcp.tool(
         name="sre_agent_list_conversations",
         description=(
-            HOMELAB_CONTEXT
-            + "List recent conversations the deployed SRE agent has had via the web UI or API. "
+            HOMELAB_CONTEXT + "List recent conversations the deployed SRE agent has had via the web UI or API. "
             "Returns session IDs, titles (derived from the first user message), timestamps, "
             "turn counts, and which LLM model/provider was used. "
             "Most-recently-updated conversations appear first. "
@@ -275,8 +274,7 @@ def _register_conversation_tools(mcp: FastMCP, history_dir: str) -> None:
     @mcp.tool(
         name="sre_agent_get_conversation",
         description=(
-            HOMELAB_CONTEXT
-            + "Retrieve the full dialogue of a specific deployed SRE agent conversation by session ID. "
+            HOMELAB_CONTEXT + "Retrieve the full dialogue of a specific deployed SRE agent conversation by session ID. "
             "Returns all user and assistant turns with timestamps. "
             "Use sre_agent_list_conversations first to find the session_id you need."
         ),

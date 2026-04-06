@@ -188,7 +188,8 @@ claude mcp add --transport http \
 - **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
 - **Auth:** Cloudflare Access (service token headers)
 - **Mount:** FastMCP app mounted on the existing FastAPI app at `/mcp`
-- **Tools:** Same ~25 LangChain tool functions used by the agent, wrapped as FastMCP tools
+- **Tools:** Same LangChain tool functions used by the agent, wrapped as FastMCP tools, plus 2 conversation
+  history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) only available via MCP
 - **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their
   URLs are configured
 

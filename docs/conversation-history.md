@@ -126,6 +126,15 @@ All endpoints return 503 when `CONVERSATION_HISTORY_DIR` is empty
 - **422** — `PATCH` body has empty or whitespace-only `title`.
 - **503** — Persistence disabled on this deployment.
 
+## MCP Tools
+
+The conversation data is also accessible via the MCP server at `/mcp`:
+
+- **`sre_agent_list_conversations`** — equivalent to `GET /conversations` (returns metadata, most-recent first)
+- **`sre_agent_get_conversation`** — equivalent to `GET /conversations/{session_id}` (returns full dialogue)
+
+These allow MCP clients like Claude Code to browse past agent conversations without calling the HTTP API directly.
+
 ## Migration
 
 At FastAPI startup, `migrate_history_files()` runs once against the

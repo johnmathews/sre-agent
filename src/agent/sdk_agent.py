@@ -384,7 +384,8 @@ def _summarize_sdk_tool_input(tool_input: dict[str, Any] | None) -> str:
     for key in ("query", "expr", "search", "metric", "dashboard_uid", "session_id"):
         val = tool_input.get(key)
         if val and isinstance(val, str):
-            return val[:80]
+            result: str = val[:80]
+            return result
     return ""
 
 

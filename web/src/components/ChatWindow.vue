@@ -88,7 +88,10 @@ function handleKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="flex h-full flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+  <div
+    class="flex h-full flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100"
+    @click="textareaRef?.focus()"
+  >
     <!-- Scrollable message area -->
     <div
       ref="scrollContainer"

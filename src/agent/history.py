@@ -326,6 +326,84 @@ def _list_conversations_inner(history_dir: str) -> list[ConversationMetadata]:
     return results
 
 
+class SearchResult(TypedDict):
+    """A conversation that matched a search query, with matching snippets."""
+
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    turn_count: int
+    model: str
+    provider: str
+    matches: list[dict[str, str]]  # [{"role": "user"|"assistant", "snippet": "..."}]
+
+
+def search_conversations(history_dir: str, query: str, max_results: int = 20) -> list[SearchResult]:
+    """Search all conversations for a query string (case-insensitive).
+
+    Searches both titles and turn content. Returns conversations with
+    matching snippets, ordered by most-recently-updated first.
+    """
+    try:
+        return _search_conversations_inner(history_dir, query, max_results)
+    except Exception:
+        logger.exception("Failed to search conversations in %s", history_dir)
+        return []
+
+
+def _search_conversations_inner(history_dir: str, query: str, max_results: int) -> list[SearchResult]:
+    if not os.path.isdir(history_dir) or not query.strip():
+        return []
+
+    query_lower = query.strip().lower()
+    results: list[SearchResult] = []
+
+    for filepath in glob.glob(os.path.join(history_dir, "*.json")):
+        data = _read_conversation_file(filepath)
+        if data is None or "turns" not in data:
+            continue
+
+        matches: list[dict[str, str]] = []
+
+        # Search title
+        title = data.get("title", "")
+        if query_lower in title.lower():
+            matches.append({"role": "title", "snippet": title})
+
+        # Search turn content
+        for turn in data.get("turns", []):
+            content = turn.get("content", "")
+            if query_lower in content.lower():
+                # Extract a snippet around the match
+                idx = content.lower().index(query_lower)
+                start = max(0, idx - 60)
+                end = min(len(content), idx + len(query_lower) + 60)
+                snippet = content[start:end]
+                if start > 0:
+                    snippet = "..." + snippet
+                if end < len(content):
+                    snippet = snippet + "..."
+                matches.append({"role": turn.get("role", ""), "snippet": snippet})
+
+        if matches:
+            results.append(
+                {
+                    "session_id": data.get("session_id", ""),
+                    "title": title,
+                    "created_at": data.get("created_at", ""),
+                    "updated_at": data.get("updated_at", ""),
+                    "turn_count": data.get("turn_count", 0),
+                    "model": data.get("model", ""),
+                    "provider": data.get("provider", ""),
+                    "matches": matches[:5],  # Limit snippets per conversation
+                }
+            )
+
+    results.sort(key=lambda r: r["updated_at"], reverse=True)
+    return results[:max_results]
+
+
 def get_conversation(history_dir: str, session_id: str) -> dict[str, Any] | None:
     """Return the full conversation payload, or None if not found."""
     if not _validate_session_id_path_safe(session_id):

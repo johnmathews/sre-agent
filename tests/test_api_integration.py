@@ -496,3 +496,46 @@ class TestConversationEndpoints:
         mock_settings.conversation_history_dir = str(tmp_path)
         resp = client.patch("/conversations/a.b", json={"title": "x"})
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET /conversations/search
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSearchConversations:
+    """GET /conversations/search"""
+
+    def test_search_returns_matching_conversations(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        from src.agent.history import save_turn
+        from src.config import get_settings
+
+        settings = get_settings()
+        settings.conversation_history_dir = str(tmp_path)
+        save_turn(str(tmp_path), "s1", "user", "CPU spike investigation", "m", "anthropic")
+        save_turn(str(tmp_path), "s1", "assistant", "CPU is at 95%.", "m", "anthropic")
+
+        resp = client.get("/conversations/search", params={"q": "CPU"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) >= 1
+        assert data[0]["session_id"] == "s1"
+        assert len(data[0]["matches"]) >= 1
+
+    def test_search_empty_query_returns_empty(self, client: TestClient, mock_settings: Any) -> None:
+        resp = client.get("/conversations/search", params={"q": ""})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_search_no_matches(self, client: TestClient, mock_settings: Any, tmp_path: Any) -> None:
+        from src.agent.history import save_turn
+        from src.config import get_settings
+
+        settings = get_settings()
+        settings.conversation_history_dir = str(tmp_path)
+        save_turn(str(tmp_path), "s1", "user", "Disk check", "m", "anthropic")
+
+        resp = client.get("/conversations/search", params={"q": "kubernetes"})
+        assert resp.status_code == 200
+        assert resp.json() == []

@@ -30,6 +30,7 @@ from src.agent.history import (
     list_conversations,
     migrate_history_files,
     rename_conversation,
+    search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
 from src.config import get_settings
@@ -127,6 +128,26 @@ class RenameRequest(BaseModel):
     """Request body for PATCH /conversations/{id}."""
 
     title: str
+
+
+class SearchMatch(BaseModel):
+    """A single matching snippet within a conversation."""
+
+    role: str
+    snippet: str
+
+
+class ConversationSearchResult(BaseModel):
+    """A conversation that matched a search query."""
+
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    turn_count: int
+    model: str
+    provider: str
+    matches: list[SearchMatch]
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +574,28 @@ async def list_conversations_endpoint() -> list[ConversationSummary]:
     history_dir = _require_history_dir()
     items: list[ConversationMetadata] = list_conversations(history_dir)
     return [ConversationSummary(**item) for item in items]
+
+
+@app.get("/conversations/search", response_model=list[ConversationSearchResult])
+async def search_conversations_endpoint(q: str = "", limit: int = 20) -> list[ConversationSearchResult]:
+    """Full-text search across all conversation titles and turn content."""
+    if not q.strip():
+        return []
+    history_dir = _require_history_dir()
+    results = search_conversations(history_dir, q, max_results=min(limit, 50))
+    return [
+        ConversationSearchResult(
+            session_id=r["session_id"],
+            title=r["title"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+            turn_count=r["turn_count"],
+            model=r["model"],
+            provider=r["provider"],
+            matches=[SearchMatch(**m) for m in r["matches"]],
+        )
+        for r in results
+    ]
 
 
 @app.get("/conversations/{session_id}", response_model=ConversationDetail)

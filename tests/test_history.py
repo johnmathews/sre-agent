@@ -20,6 +20,7 @@ from src.agent.history import (
     migrate_history_files,
     rename_conversation,
     save_turn,
+    search_conversations,
 )
 
 
@@ -474,6 +475,65 @@ class TestLangchainMessagesToTurns:
         assert len(result) == 1
         assert "part 1" in result[0]["content"]
         assert "part 2" in result[0]["content"]
+
+
+class TestSearchConversations:
+    """Test full-text search across conversations."""
+
+    def test_search_by_title(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "What is the CPU usage?", "m", "p")
+        save_turn(str(tmp_path), "s1", "assistant", "CPU is at 73%.", "m", "p")
+        results = search_conversations(str(tmp_path), "CPU")
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+
+    def test_search_by_turn_content(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "Check disk status", "m", "p")
+        save_turn(str(tmp_path), "s1", "assistant", "ZFS pool is healthy with 4TB free.", "m", "p")
+        results = search_conversations(str(tmp_path), "ZFS")
+        assert len(results) == 1
+        assert any("ZFS" in m["snippet"] for m in results[0]["matches"])
+
+    def test_search_case_insensitive(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "Prometheus query", "m", "p")
+        results = search_conversations(str(tmp_path), "prometheus")
+        assert len(results) == 1
+
+    def test_search_no_results(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "Check disk status", "m", "p")
+        results = search_conversations(str(tmp_path), "kubernetes")
+        assert len(results) == 0
+
+    def test_search_empty_query(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "Check disk status", "m", "p")
+        results = search_conversations(str(tmp_path), "")
+        assert len(results) == 0
+
+    def test_search_multiple_conversations(self, tmp_path: Any) -> None:
+        save_turn(str(tmp_path), "s1", "user", "CPU spike on node1", "m", "p")
+        save_turn(str(tmp_path), "s2", "user", "CPU alert firing", "m", "p")
+        save_turn(str(tmp_path), "s3", "user", "Disk usage check", "m", "p")
+        results = search_conversations(str(tmp_path), "CPU")
+        assert len(results) == 2
+        session_ids = {r["session_id"] for r in results}
+        assert session_ids == {"s1", "s2"}
+
+    def test_search_snippets_have_context(self, tmp_path: Any) -> None:
+        long_content = "A" * 100 + "TARGET_WORD" + "B" * 100
+        save_turn(str(tmp_path), "s1", "user", "test", "m", "p")
+        save_turn(str(tmp_path), "s1", "assistant", long_content, "m", "p")
+        results = search_conversations(str(tmp_path), "TARGET_WORD")
+        assert len(results) == 1
+        snippet = results[0]["matches"][0]["snippet"]
+        assert "TARGET_WORD" in snippet
+        assert snippet.startswith("...")
+        assert snippet.endswith("...")
+
+    def test_search_respects_max_results(self, tmp_path: Any) -> None:
+        for i in range(10):
+            save_turn(str(tmp_path), f"s{i}", "user", "common term here", "m", "p")
+        results = search_conversations(str(tmp_path), "common", max_results=3)
+        assert len(results) == 3
 
 
 @pytest.mark.integration

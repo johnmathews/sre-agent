@@ -54,10 +54,19 @@ watch(
   },
 )
 
+function autoResize() {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${el.scrollHeight}px`
+}
+
 async function handleSubmit() {
   const q = input.value.trim()
   if (!q || chat.isStreaming) return
   input.value = ''
+  await nextTick()
+  autoResize()
   await chat.sendMessage(q)
   // Refresh conversation list after each turn (new convo appears, title updates)
   void conversations.refresh()
@@ -66,6 +75,7 @@ async function handleSubmit() {
 function useExample(question: string) {
   input.value = question
   textareaRef.value?.focus()
+  void nextTick(() => autoResize())
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -162,8 +172,10 @@ function handleKeydown(e: KeyboardEvent) {
           autofocus
           rows="1"
           placeholder="Ask about your infrastructure…"
-          class="flex-1 resize-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
+          class="flex-1 resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
+          style="min-height: 2.5rem; max-height: 50vh; overflow-y: auto"
           :disabled="chat.isStreaming"
+          @input="autoResize"
           @keydown="handleKeydown"
         />
         <button

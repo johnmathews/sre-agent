@@ -26,7 +26,7 @@ const statusColor = computed(() => {
 let pollId: number | null = null
 onMounted(async () => {
   await health.refresh()
-  pollId = window.setInterval(() => health.refresh(), 30_000)
+  pollId = window.setInterval(() => health.refresh(), 120_000)
 })
 onUnmounted(() => {
   if (pollId !== null) window.clearInterval(pollId)

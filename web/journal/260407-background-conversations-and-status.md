@@ -74,7 +74,8 @@ visible in chat). Cleaned up from session Map on deletion.
   (watch on `sessionId` + `nextTick`)
 - Textarea auto-grows with content (`@input` handler resets height then sets to
   `scrollHeight`), manually resizable via `resize-y`, capped at `50vh`
-- Clicking anywhere in the chat window focuses the textarea
+- Clicking anywhere in the chat window focuses the textarea (skips if user has
+  selected text, so copy/paste works on agent responses)
 
 ## Decisions
 

@@ -84,3 +84,17 @@ visible in chat). Cleaned up from session Map on deletion.
   longer than server-side tool execution due to network latency, but accurate enough for UX purposes
 - Status messages show elapsed time only after 2 seconds to avoid flickering on fast transitions
 - Local sidebar sessions use the first user message (truncated to 60 chars) as the title
+
+### Responsive mobile layout
+
+On screens < 768px, sidebar becomes a slide-in overlay (85vw, max 320px) hidden by
+default. Hamburger button in a mobile header bar opens it; closing happens via X button,
+backdrop tap, or any navigation action (select conversation, new conversation, search
+result click). Session ID hidden on mobile. Reduced padding on chat area and input bar.
+Desktop layout completely unchanged — same drag-resize sidebar.
+
+Mobile breakpoint detected via `window.resize` listener with `isMobile` ref. Sidebar
+rendered as `position: fixed` with CSS `translate-x` transition. Backdrop prevents
+interaction with chat area while sidebar is open.
+
+7 new e2e tests at iPhone 12 viewport (390x844).

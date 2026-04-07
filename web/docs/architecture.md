@@ -62,9 +62,15 @@ call `fetch` directly; the API layer never touches Vue reactivity.
 
 Each Pinia store owns a slice:
 
-- **`useChatStore`** — the active conversation: `sessionId`, `messages`,
-  streaming state (`isStreaming`, `currentStatus`, `completedTools`,
-  `streamError`). Orchestrates the SSE stream via `streamAsk()`.
+- **`useChatStore`** — all conversation streaming state, keyed by session ID.
+  Internally uses a `Map<sessionId, SessionStreamState>` where each entry holds
+  `messages`, `isStreaming`, `currentStatus`, `completedTools`, `streamError`,
+  and an `AbortController`. An `activeSessionId` ref determines which session
+  is displayed; computed properties expose the active session's state for
+  backward-compatible component access. Multiple conversations can stream
+  simultaneously — switching conversations does not abort background streams.
+  Exposes `streamingSessions` (list of session IDs with active streams) for
+  sidebar indicators.
 - **`useConversationsStore`** — the sidebar list of past conversations:
   `items`, `loading`, `error`, plus `refresh / rename / remove` actions.
 - **`useHealthStore`** — the health panel snapshot; polled every 30s.
@@ -73,7 +79,8 @@ Cross-store coordination is minimal: when a conversation is deleted and it
 was the active one, the conversation list store emits no signal — the
 `ConversationList` component checks `chat.sessionId` and calls
 `chat.startNewConversation()` directly. Keeps each store ignorant of the
-others.
+others. The `ConversationList` reads `chat.streamingSessions` to show
+processing indicators on sidebar rows.
 
 ## Streaming protocol
 
@@ -81,10 +88,20 @@ The core interaction is the SSE stream from `POST /ask/stream`. The backend
 sends events like:
 
 ```
-data: {"type": "tool_start", "content": "prometheus_query"}\n\n
-data: {"type": "tool_end", "content": "prometheus_query"}\n\n
+data: {"type": "status", "content": "Initializing..."}\n\n
+data: {"type": "status", "content": "Thinking..."}\n\n
+data: {"type": "tool_start", "content": "Querying Prometheus — up{job='node'}"}\n\n
+data: {"type": "tool_end", "content": "Querying Prometheus — up{job='node'}"}\n\n
+data: {"type": "status", "content": "Synthesizing response..."}\n\n
 data: {"type": "answer", "content": "CPU is at 73%..."}\n\n
 ```
+
+The Anthropic backend path emits richer status events throughout the request
+lifecycle: `"Initializing..."` during token refresh, `"Thinking..."` at
+startup, intermediate reasoning text, tool start/end events with parameter
+summaries, and `"Synthesizing response..."` during final answer generation.
+`completedTools` entries are `{ name, duration }` objects, enabling the
+`ToolProgress` component to show elapsed times.
 
 See [api-integration.md](./api-integration.md) for the event-type contract and
 the reasoning behind using `fetch` + `ReadableStream` instead of

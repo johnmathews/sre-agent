@@ -37,7 +37,7 @@ async function scrollToBottom() {
 watch(
   () => [
     chat.messages.length,
-    chat.completedTools.length,
+    chat.completedTools?.length ?? 0,
     chat.currentStatus,
   ],
   () => {

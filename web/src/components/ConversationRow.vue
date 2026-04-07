@@ -5,6 +5,7 @@ import type { ConversationSummary } from '../api/conversations'
 const props = defineProps<{
   conv: ConversationSummary
   isActive: boolean
+  isProcessing: boolean
 }>()
 
 const emit = defineEmits<{
@@ -74,7 +75,12 @@ const titleLabel = () => props.conv.title || `(${props.conv.session_id})`
         :title="`${conv.turn_count} turn${conv.turn_count !== 1 ? 's' : ''} — ${conv.provider}`"
         @click="emit('select', conv.session_id)"
       >
-        <span v-if="isActive" class="mr-1 text-gray-500 dark:text-gray-400">&#9654;</span>
+        <span
+          v-if="isProcessing && !isActive"
+          class="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500"
+          title="Agent is working..."
+        ></span>
+        <span v-else-if="isActive" class="mr-1 text-gray-500 dark:text-gray-400">&#9654;</span>
         {{ titleLabel() }}
       </button>
       <button

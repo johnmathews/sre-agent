@@ -59,6 +59,7 @@ async function handleDelete(sessionId: string) {
         :key="conv.session_id"
         :conv="conv"
         :is-active="conv.session_id === chat.sessionId"
+        :is-processing="chat.streamingSessions.includes(conv.session_id)"
         @select="handleSelect"
         @rename="handleRename"
         @delete="handleDelete"

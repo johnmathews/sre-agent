@@ -185,6 +185,24 @@ export async function mockBackend(
     return route.fulfill({ status: 405, body: 'Method not allowed' })
   })
 
+  // Register search AFTER conversations/* so it takes priority (Playwright: last match wins)
+  await page.route('**/api/conversations/search*', (route: Route) => {
+    const url = new URL(route.request().url())
+    const q = (url.searchParams.get('q') ?? '').toLowerCase()
+    const matches = state.conversations
+      .filter((c) => !state.deleted.has(c.session_id))
+      .filter((c) => c.title.toLowerCase().includes(q))
+      .map((c) => ({
+        ...c,
+        matches: [{ role: 'title', snippet: c.title }],
+      }))
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(matches),
+    })
+  })
+
   await page.route('**/api/ask/stream', (route) => {
     return route.fulfill({
       status: 200,

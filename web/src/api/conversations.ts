@@ -19,8 +19,25 @@ export interface ConversationDetail extends ConversationSummary {
   turns: ConversationTurn[]
 }
 
+export interface SearchMatch {
+  role: string
+  snippet: string
+}
+
+export interface ConversationSearchResult extends ConversationSummary {
+  matches: SearchMatch[]
+}
+
 export async function listConversations(): Promise<ConversationSummary[]> {
   return apiJson<ConversationSummary[]>('/conversations')
+}
+
+export async function searchConversations(
+  query: string,
+): Promise<ConversationSearchResult[]> {
+  return apiJson<ConversationSearchResult[]>(
+    `/conversations/search?q=${encodeURIComponent(query)}`,
+  )
 }
 
 export async function getConversation(

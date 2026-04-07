@@ -3,6 +3,7 @@ import { useChatStore } from '../stores/chat'
 import { useTheme } from '../composables/useTheme'
 import HealthPanel from './HealthPanel.vue'
 import ConversationList from './ConversationList.vue'
+import ConversationSearch from './ConversationSearch.vue'
 
 const chat = useChatStore()
 const { theme, toggle } = useTheme()
@@ -38,6 +39,8 @@ function handleNewConversation() {
     >
       + New conversation
     </button>
+
+    <ConversationSearch />
 
     <div class="text-sm text-gray-500">
       Session: <code class="rounded bg-gray-200 px-1 py-0.5 text-gray-600 dark:bg-gray-800 dark:text-gray-400">{{ chat.sessionId }}</code>

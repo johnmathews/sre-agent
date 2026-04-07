@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, triggerRef } from 'vue'
 import { streamAsk, type StreamEvent } from '../api/stream'
-import { getConversation } from '../api/conversations'
+import { getConversation, type ConversationSummary } from '../api/conversations'
 
 export type MessageRole = 'user' | 'assistant'
 
@@ -96,6 +96,35 @@ export const useChatStore = defineStore('chat', () => {
     return result
   })
 
+  /**
+   * Local sessions that have messages but may not yet exist in the backend's
+   * conversation list (the backend only persists after the stream completes).
+   * The ConversationList merges these with backend items so users can navigate
+   * back to in-progress conversations.
+   */
+  const localSessions = computed<ConversationSummary[]>(() => {
+    const result: ConversationSummary[] = []
+    for (const [id, s] of sessions.value) {
+      if (s.messages.length === 0) continue
+      // Skip the active session — the user can already see it in the chat area.
+      // It only needs a sidebar entry when the user switches away from it.
+      if (id === activeSessionId.value) continue
+      const firstUserMsg = s.messages.find((m) => m.role === 'user')
+      result.push({
+        session_id: id,
+        title: firstUserMsg
+          ? firstUserMsg.content.slice(0, 60) + (firstUserMsg.content.length > 60 ? '...' : '')
+          : `(${id})`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        turn_count: s.messages.length,
+        model: '',
+        provider: '',
+      })
+    }
+    return result
+  })
+
   // ---------- actions ----------
 
   function startNewConversation(): void {
@@ -140,6 +169,16 @@ export const useChatStore = defineStore('chat', () => {
       s.abortController = null
     }
     s.isStreaming = false
+    triggerRef(sessions)
+  }
+
+  /** Remove a session from the local Map (e.g., after backend deletion). */
+  function removeSession(id: string): void {
+    const s = sessions.value.get(id)
+    if (s?.abortController) {
+      s.abortController.abort()
+    }
+    sessions.value.delete(id)
     triggerRef(sessions)
   }
 
@@ -264,6 +303,7 @@ export const useChatStore = defineStore('chat', () => {
     completedTools,
     streamError,
     streamingSessions,
+    localSessions,
     sessions,
     // getters
     hasMessages,
@@ -272,5 +312,6 @@ export const useChatStore = defineStore('chat', () => {
     loadConversation,
     sendMessage,
     abort,
+    removeSession,
   }
 })

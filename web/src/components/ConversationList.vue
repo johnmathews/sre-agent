@@ -1,14 +1,28 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useConversationsStore } from '../stores/conversations'
 import { useChatStore } from '../stores/chat'
 import ConversationRow from './ConversationRow.vue'
+import type { ConversationSummary } from '../api/conversations'
 
 const conversations = useConversationsStore()
 const chat = useChatStore()
 
 onMounted(() => {
   void conversations.refresh()
+})
+
+/**
+ * Merge backend conversation list with local in-progress sessions.
+ * Local sessions appear at the top so users can navigate back to
+ * conversations that are still streaming (not yet persisted to backend).
+ */
+const mergedItems = computed<ConversationSummary[]>(() => {
+  const backendIds = new Set(conversations.items.map((c) => c.session_id))
+  const localOnly = chat.localSessions.filter(
+    (ls) => !backendIds.has(ls.session_id),
+  )
+  return [...localOnly, ...conversations.items]
 })
 
 async function handleSelect(sessionId: string) {
@@ -26,8 +40,11 @@ async function handleRename(sessionId: string, title: string) {
 async function handleDelete(sessionId: string) {
   const wasActive = chat.sessionId === sessionId
   const ok = await conversations.remove(sessionId)
-  if (ok && wasActive) {
-    chat.startNewConversation()
+  if (ok) {
+    chat.removeSession(sessionId)
+    if (wasActive) {
+      chat.startNewConversation()
+    }
   }
 }
 </script>
@@ -44,18 +61,18 @@ async function handleDelete(sessionId: string) {
         ↻
       </button>
     </div>
-    <div v-if="conversations.loading && conversations.items.length === 0" class="text-sm text-gray-500">
+    <div v-if="conversations.loading && mergedItems.length === 0" class="text-sm text-gray-500">
       Loading...
     </div>
     <div
-      v-else-if="conversations.items.length === 0"
+      v-else-if="mergedItems.length === 0"
       class="text-sm text-gray-500 italic"
     >
       No past conversations yet.
     </div>
     <div v-else class="space-y-0.5">
       <ConversationRow
-        v-for="conv in conversations.items"
+        v-for="conv in mergedItems"
         :key="conv.session_id"
         :conv="conv"
         :is-active="conv.session_id === chat.sessionId"

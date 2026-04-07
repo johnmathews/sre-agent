@@ -60,9 +60,26 @@ This is explicit but reliable. Alternative was `reactive()` which has proxy limi
 
 Non-active completed sessions clean up streaming artifacts after 60 seconds to prevent memory growth.
 
+### Local sidebar sessions
+
+After deploying, discovered that new conversations didn't appear in the sidebar until
+the stream completed (backend only persists after the answer). Added `localSessions`
+computed that synthesizes temporary `ConversationSummary` entries from in-progress
+sessions. Merged at the top of the sidebar list. Excludes the active session (already
+visible in chat). Cleaned up from session Map on deletion.
+
+### Input UX improvements
+
+- Textarea auto-focuses when switching conversations or clicking "+ New conversation"
+  (watch on `sessionId` + `nextTick`)
+- Textarea auto-grows with content (`@input` handler resets height then sets to
+  `scrollHeight`), manually resizable via `resize-y`, capped at `50vh`
+- Clicking anywhere in the chat window focuses the textarea
+
 ## Decisions
 
 - No limit on concurrent streams — browser connection limit (6 per domain) provides natural backpressure
 - Tool duration is measured client-side (time between tool_start and tool_end events) which is slightly
   longer than server-side tool execution due to network latency, but accurate enough for UX purposes
 - Status messages show elapsed time only after 2 seconds to avoid flickering on fast transitions
+- Local sidebar sessions use the first user message (truncated to 60 chars) as the title

@@ -78,6 +78,13 @@ function useExample(question: string) {
   void nextTick(() => autoResize())
 }
 
+function focusIfNoSelection() {
+  // Don't steal focus when the user is selecting/copying text from messages
+  const selection = window.getSelection()
+  if (selection && selection.toString().length > 0) return
+  textareaRef.value?.focus()
+}
+
 function handleKeydown(e: KeyboardEvent) {
   // Enter = submit; Shift+Enter = newline
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -90,7 +97,7 @@ function handleKeydown(e: KeyboardEvent) {
 <template>
   <div
     class="flex h-full flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100"
-    @click="textareaRef?.focus()"
+    @click="focusIfNoSelection"
   >
     <!-- Scrollable message area -->
     <div

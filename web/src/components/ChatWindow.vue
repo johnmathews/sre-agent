@@ -27,6 +27,15 @@ onMounted(() => {
   textareaRef.value?.focus()
 })
 
+// Re-focus textarea when switching conversations or starting a new one
+watch(
+  () => chat.sessionId,
+  async () => {
+    await nextTick()
+    textareaRef.value?.focus()
+  },
+)
+
 async function scrollToBottom() {
   await nextTick()
   const el = scrollContainer.value

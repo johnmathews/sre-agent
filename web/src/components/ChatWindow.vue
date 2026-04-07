@@ -5,6 +5,14 @@ import { useConversationsStore } from '../stores/conversations'
 import ChatMessage from './ChatMessage.vue'
 import ToolProgress from './ToolProgress.vue'
 
+defineProps<{
+  isMobile?: boolean
+}>()
+
+const emit = defineEmits<{
+  'open-sidebar': []
+}>()
+
 const chat = useChatStore()
 const conversations = useConversationsStore()
 
@@ -99,10 +107,28 @@ function handleKeydown(e: KeyboardEvent) {
     class="flex h-full flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100"
     @click="focusIfNoSelection"
   >
+    <!-- Mobile header bar -->
+    <div
+      v-if="isMobile"
+      class="flex items-center border-b border-gray-200 px-3 py-2 dark:border-gray-800"
+    >
+      <button
+        class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+        title="Open sidebar"
+        aria-label="Open sidebar"
+        @click.stop="emit('open-sidebar')"
+      >
+        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+      <span class="ml-2 text-sm font-medium text-gray-600 dark:text-gray-300">SRE Agent</span>
+    </div>
+
     <!-- Scrollable message area -->
     <div
       ref="scrollContainer"
-      class="flex-1 overflow-y-auto px-6 py-4"
+      class="flex-1 overflow-y-auto px-3 py-3 sm:px-6 sm:py-4"
     >
       <div
         v-if="!chat.hasMessages && !chat.isStreaming"
@@ -171,7 +197,7 @@ function handleKeydown(e: KeyboardEvent) {
     </div>
 
     <!-- Input area -->
-    <div class="border-t border-gray-200 bg-gray-50 px-6 py-3 dark:border-gray-800 dark:bg-gray-900">
+    <div class="border-t border-gray-200 bg-gray-50 px-3 py-2 sm:px-6 sm:py-3 dark:border-gray-800 dark:bg-gray-900">
       <form
         class="mx-auto flex max-w-3xl items-end gap-2"
         @submit.prevent="handleSubmit"

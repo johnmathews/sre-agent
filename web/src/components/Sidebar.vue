@@ -5,11 +5,20 @@ import HealthPanel from './HealthPanel.vue'
 import ConversationList from './ConversationList.vue'
 import ConversationSearch from './ConversationSearch.vue'
 
+const props = withDefaults(defineProps<{
+  isMobile?: boolean
+}>(), { isMobile: false })
+
+const emit = defineEmits<{
+  close: []
+}>()
+
 const chat = useChatStore()
 const { theme, toggle } = useTheme()
 
 function handleNewConversation() {
   chat.startNewConversation()
+  if (props.isMobile) emit('close')
 }
 </script>
 
@@ -19,18 +28,31 @@ function handleNewConversation() {
   >
     <div class="flex items-center justify-between">
       <h1 class="text-xl font-semibold">SRE Agent</h1>
-      <button
-        class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-        :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
-        @click="toggle"
-      >
-        <svg v-if="theme === 'dark'" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-        </svg>
-        <svg v-else class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-        </svg>
-      </button>
+      <div class="flex items-center gap-1">
+        <button
+          class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+          :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+          @click="toggle"
+        >
+          <svg v-if="theme === 'dark'" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+          <svg v-else class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+          </svg>
+        </button>
+        <button
+          v-if="isMobile"
+          class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+          title="Close sidebar"
+          aria-label="Close sidebar"
+          @click="emit('close')"
+        >
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <button
@@ -40,9 +62,9 @@ function handleNewConversation() {
       + New conversation
     </button>
 
-    <ConversationSearch />
+    <ConversationSearch @selected="isMobile && emit('close')" />
 
-    <div class="text-sm text-gray-500">
+    <div v-if="!isMobile" class="text-sm text-gray-500">
       Session: <code class="rounded bg-gray-200 px-1 py-0.5 text-gray-600 dark:bg-gray-800 dark:text-gray-400">{{ chat.sessionId }}</code>
     </div>
 
@@ -53,7 +75,7 @@ function handleNewConversation() {
     <hr class="border-gray-200 dark:border-gray-800" />
 
     <div class="min-h-0 flex-1 overflow-y-auto">
-      <ConversationList />
+      <ConversationList @selected="isMobile && emit('close')" />
     </div>
   </aside>
 </template>

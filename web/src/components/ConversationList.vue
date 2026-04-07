@@ -5,6 +5,10 @@ import { useChatStore } from '../stores/chat'
 import ConversationRow from './ConversationRow.vue'
 import type { ConversationSummary } from '../api/conversations'
 
+const emit = defineEmits<{
+  selected: []
+}>()
+
 const conversations = useConversationsStore()
 const chat = useChatStore()
 
@@ -28,6 +32,7 @@ const mergedItems = computed<ConversationSummary[]>(() => {
 async function handleSelect(sessionId: string) {
   try {
     await chat.loadConversation(sessionId)
+    emit('selected')
   } catch (err) {
     console.error('Failed to load conversation', err)
   }

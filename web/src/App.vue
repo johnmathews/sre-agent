@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue'
+import { ref, onUnmounted, onMounted, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatWindow from './components/ChatWindow.vue'
 import { useTheme } from './composables/useTheme'
@@ -8,6 +8,7 @@ useTheme()
 
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 600
+const MOBILE_BREAKPOINT = 768
 const SIDEBAR_STORAGE_KEY = 'sidebar-width'
 
 function getInitialWidth(): number {
@@ -21,8 +22,46 @@ function getInitialWidth(): number {
 
 const sidebarWidth = ref(getInitialWidth())
 const isDragging = ref(false)
+const isMobile = ref(false)
+const sidebarOpen = ref(false)
+
+function checkMobile() {
+  isMobile.value = window.innerWidth < MOBILE_BREAKPOINT
+  if (!isMobile.value) {
+    sidebarOpen.value = false // Reset overlay state on desktop
+  }
+}
+
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+  document.removeEventListener('mousemove', onDrag)
+  document.removeEventListener('mouseup', stopDrag)
+})
+
+function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value
+}
+
+function closeSidebar() {
+  sidebarOpen.value = false
+}
+
+// Close sidebar when a conversation is loaded on mobile
+watch(sidebarOpen, (open) => {
+  if (open) {
+    document.body.style.overflow = isMobile.value ? 'hidden' : ''
+  } else {
+    document.body.style.overflow = ''
+  }
+})
 
 function startDrag(e: MouseEvent) {
+  if (isMobile.value) return
   e.preventDefault()
   isDragging.value = true
   document.addEventListener('mousemove', onDrag)
@@ -39,24 +78,42 @@ function stopDrag() {
   document.removeEventListener('mousemove', onDrag)
   document.removeEventListener('mouseup', stopDrag)
 }
-
-onUnmounted(() => {
-  document.removeEventListener('mousemove', onDrag)
-  document.removeEventListener('mouseup', stopDrag)
-})
 </script>
 
 <template>
   <div class="flex h-screen w-screen overflow-hidden" :class="{ 'select-none': isDragging }">
-    <div :style="{ width: sidebarWidth + 'px', flexShrink: 0 }">
+    <!-- Mobile overlay backdrop -->
+    <div
+      v-if="isMobile && sidebarOpen"
+      class="fixed inset-0 z-30 bg-black/40"
+      @click="closeSidebar"
+    />
+
+    <!-- Sidebar -->
+    <div
+      v-if="!isMobile"
+      :style="{ width: sidebarWidth + 'px', flexShrink: 0 }"
+    >
       <Sidebar />
     </div>
     <div
+      v-else
+      class="fixed inset-y-0 left-0 z-40 w-[85vw] max-w-[320px] transform transition-transform duration-200 ease-in-out"
+      :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+    >
+      <Sidebar :is-mobile="true" @close="closeSidebar" />
+    </div>
+
+    <!-- Drag handle (desktop only) -->
+    <div
+      v-if="!isMobile"
       class="w-1 shrink-0 cursor-col-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500"
       @mousedown="startDrag"
     />
+
+    <!-- Main content -->
     <main class="min-w-0 flex-1">
-      <ChatWindow />
+      <ChatWindow :is-mobile="isMobile" @open-sidebar="toggleSidebar" />
     </main>
   </div>
 </template>

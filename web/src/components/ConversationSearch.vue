@@ -3,6 +3,10 @@ import { ref, watch } from 'vue'
 import { searchConversations, type ConversationSearchResult } from '../api/conversations'
 import { useChatStore } from '../stores/chat'
 
+const emit = defineEmits<{
+  selected: []
+}>()
+
 const chat = useChatStore()
 
 const query = ref('')
@@ -36,6 +40,7 @@ watch(query, (val) => {
 async function selectResult(sessionId: string) {
   await chat.loadConversation(sessionId)
   query.value = ''
+  emit('selected')
 }
 
 function highlightSnippet(snippet: string): string {

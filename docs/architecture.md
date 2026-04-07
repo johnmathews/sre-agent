@@ -134,6 +134,11 @@ Mitigations applied:
 - **SSE heartbeat events** — the `/ask/stream` endpoint wraps the agent event stream with `_with_heartbeats()`, which
   injects `{"type": "heartbeat", "content": ""}` events every 15 seconds during long tool executions. This keeps
   the Cloudflare tunnel and proxy connections alive. Clients silently ignore heartbeat events.
+- **Rich streaming events** — the Anthropic path (`stream_sdk_agent`) emits granular progress events throughout the
+  request lifecycle: `status` events for phase transitions ("Initializing...", "Thinking...", "Synthesizing
+  response...") and Claude's intermediate reasoning text; `tool_start` events with human-readable labels and parameter
+  summaries (e.g., "Querying Prometheus — up{job='node'}"); and `tool_end` events for each completed tool. These give
+  the frontend enough signal to show live progress and eliminate long silent periods.
 
 ### Query Correctness Safeguards
 

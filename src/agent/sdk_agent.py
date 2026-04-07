@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
@@ -62,6 +63,7 @@ _BLOCKED_BUILTINS = [
 
 # Tool name prefix added by the SDK for MCP server tools
 _MCP_PREFIX = "mcp__sre__"
+_DOCS_PREFIX = "mcp__docs__"
 
 # Guard against CLI-side inactivity timer not being reset by MCP responses
 # (anthropics/claude-agent-sdk-typescript#114).  Set to 1 hour so the CLI
@@ -359,14 +361,31 @@ _TOOL_LABELS: dict[str, str] = {
     "pbs_list_backups": "Listing PBS backups",
     "pbs_list_tasks": "Listing PBS tasks",
     "runbook_search": "Searching runbooks",
+    "memory_search_incidents": "Searching incident history",
+    "memory_record_incident": "Recording incident",
+    "memory_get_previous_report": "Retrieving previous report",
+    "memory_check_baseline": "Checking baseline metrics",
 }
 
 
 def _tool_display_name(name: str) -> str:
-    """Strip mcp__sre__ prefix for display purposes."""
+    """Strip MCP prefixes for display purposes."""
     if name.startswith(_MCP_PREFIX):
         return name[len(_MCP_PREFIX) :]
+    if name.startswith(_DOCS_PREFIX):
+        return name[len(_DOCS_PREFIX) :]
     return name
+
+
+def _summarize_sdk_tool_input(tool_input: dict[str, Any] | None) -> str:
+    """Extract a short parameter summary for display in tool_start events."""
+    if not tool_input:
+        return ""
+    for key in ("query", "expr", "search", "metric", "dashboard_uid", "session_id"):
+        val = tool_input.get(key)
+        if val and isinstance(val, str):
+            return val[:80]
+    return ""
 
 
 async def stream_sdk_agent(
@@ -377,12 +396,14 @@ async def stream_sdk_agent(
     """Stream SDK agent events as dicts suitable for SSE.
 
     Yields dicts with keys:
-      - type: "status" | "tool_start" | "answer" | "error"
+      - type: "status" | "tool_start" | "tool_end" | "answer" | "error"
       - content: human-readable text
+      - tool_name (on "tool_start" / "tool_end"): short tool name
       - session_id (only on "answer"): the session ID
     """
     from src.agent.oauth_refresh import ensure_valid_token
 
+    yield {"type": "status", "content": "Initializing..."}
     await ensure_valid_token()
     settings = get_settings()
 
@@ -420,6 +441,8 @@ async def stream_sdk_agent(
                 elapsed = time.monotonic() - tool_start
                 for name in pending_tools:
                     tool_durations.append((name, elapsed / len(pending_tools)))
+                    end_label = _TOOL_LABELS.get(name, f"Running {name}")
+                    yield {"type": "tool_end", "content": end_label, "tool_name": name}
                 pending_tools = []
 
             all_messages.append(msg)
@@ -428,10 +451,16 @@ async def stream_sdk_agent(
                     if isinstance(block, ToolUseBlock):
                         short_name = _tool_display_name(block.name)
                         label = _TOOL_LABELS.get(short_name, f"Running {short_name}")
+                        summary = _summarize_sdk_tool_input(block.input if hasattr(block, "input") else None)
+                        if summary:
+                            label = f"{label} — {summary}"
                         yield {"type": "tool_start", "content": label, "tool_name": short_name}
                         pending_tools.append(short_name)
                     elif isinstance(block, TextBlock) and block.text:
                         last_text_block = block.text
+                        short_text = block.text[:120].split("\n")[0].strip()
+                        if short_text:
+                            yield {"type": "status", "content": short_text}
                 if pending_tools:
                     tool_start = time.monotonic()
             elif isinstance(msg, ResultMessage):
@@ -445,6 +474,10 @@ async def stream_sdk_agent(
         elapsed = time.monotonic() - tool_start
         for name in pending_tools:
             tool_durations.append((name, elapsed / len(pending_tools)))
+            end_label = _TOOL_LABELS.get(name, f"Running {name}")
+            yield {"type": "tool_end", "content": end_label, "tool_name": name}
+
+    yield {"type": "status", "content": "Synthesizing response..."}
 
     # Prefer ResultMessage.result over intermediate AssistantMessage text
     if result_msg and isinstance(result_msg.result, str) and result_msg.result.strip():

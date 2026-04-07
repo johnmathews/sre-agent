@@ -9,6 +9,8 @@ from src.agent.sdk_agent import (
     _STREAM_CLOSE_TIMEOUT_MS,
     _build_system_prompt,
     _prefix_tool_names,
+    _summarize_sdk_tool_input,
+    _tool_display_name,
     build_sdk_options,
 )
 
@@ -118,3 +120,58 @@ class TestBuildSdkOptions:
             assert options.env.get("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT") == _STREAM_CLOSE_TIMEOUT_MS
             # Must be a large value (at least 10 minutes) to survive long agent loops
             assert int(_STREAM_CLOSE_TIMEOUT_MS) >= 600_000
+
+
+class TestToolDisplayName:
+    """Test MCP prefix stripping for display."""
+
+    def test_strips_sre_prefix(self) -> None:
+        assert _tool_display_name("mcp__sre__prometheus_instant_query") == "prometheus_instant_query"
+
+    def test_strips_docs_prefix(self) -> None:
+        assert _tool_display_name("mcp__docs__search_docs") == "search_docs"
+
+    def test_no_prefix_unchanged(self) -> None:
+        assert _tool_display_name("runbook_search") == "runbook_search"
+
+    def test_sre_prefix_takes_priority_over_docs(self) -> None:
+        # Ensure sre prefix is checked first
+        name = "mcp__sre__some_tool"
+        result = _tool_display_name(name)
+        assert result == "some_tool"
+
+
+class TestSummarizeSdkToolInput:
+    """Test parameter summary extraction for tool_start events."""
+
+    def test_extracts_query_param(self) -> None:
+        assert _summarize_sdk_tool_input({"query": "up{job='node'}"}) == "up{job='node'}"
+
+    def test_extracts_expr_param(self) -> None:
+        assert _summarize_sdk_tool_input({"expr": "rate(http_requests[5m])"}) == "rate(http_requests[5m])"
+
+    def test_extracts_search_param(self) -> None:
+        assert _summarize_sdk_tool_input({"search": "disk failure"}) == "disk failure"
+
+    def test_returns_empty_for_no_matching_keys(self) -> None:
+        assert _summarize_sdk_tool_input({"unrelated": "value"}) == ""
+
+    def test_returns_empty_for_none(self) -> None:
+        assert _summarize_sdk_tool_input(None) == ""
+
+    def test_returns_empty_for_empty_dict(self) -> None:
+        assert _summarize_sdk_tool_input({}) == ""
+
+    def test_truncates_long_values(self) -> None:
+        long_query = "x" * 200
+        result = _summarize_sdk_tool_input({"query": long_query})
+        assert len(result) == 80
+
+    def test_skips_non_string_values(self) -> None:
+        assert _summarize_sdk_tool_input({"query": 42}) == ""
+
+    def test_priority_order(self) -> None:
+        """First matching key in priority order wins."""
+        result = _summarize_sdk_tool_input({"expr": "rate(...)", "query": "up"})
+        # 'query' comes before 'expr' in the priority list
+        assert result == "up"

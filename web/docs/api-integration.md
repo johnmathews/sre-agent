@@ -17,6 +17,7 @@ real origin.
 | GET    | `/conversations/{id}`          | Load a past conversation        |
 | PATCH  | `/conversations/{id}`          | Rename                          |
 | DELETE | `/conversations/{id}`          | Delete                          |
+| GET    | `/conversations/search?q=...`  | Full-text search                |
 
 All JSON payloads match the Pydantic models in
 `src/api/main.py` of the backend repo. See `src/api/*.ts` for the

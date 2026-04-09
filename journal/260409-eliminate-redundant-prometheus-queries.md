@@ -54,8 +54,26 @@ The two independent Loki queries (error logs + lifecycle events) in
 `loki_correlate_changes` were sequential. Changed to fire both concurrently via
 `asyncio.create_task()`, roughly halving wall-clock time for this tool.
 
+### disk_status.py — report all transitions, not just the most recent
+
+After deploying the query deduplication fix, overnight spinup queries still timed out at
+125s. Direct MCP testing showed the tool itself returned in ~2s — the bottleneck was the
+LLM inference loop, not query speed.
+
+The tool reported "3 changes per disk" but only showed the **last** transition timestamp.
+The LLM then called `prometheus_range_query` to find all timestamps (481 samples per
+series), consuming multiple inference round trips (~15-20s each) and blowing the timeout.
+
+Fix: `_extract_transitions_from_data` now walks **forward** through the data and returns
+every group transition in chronological order. The output section was renamed from
+"Last power state change" to "Power state transitions" to reflect this.
+
+Key insight: when an agent tool reports a summary count, it should also enumerate the
+details. A mismatch between "N changes" and "here's 1 timestamp" forces the LLM to make
+N-1 follow-up queries.
+
 ## Testing
 
-- 7 new unit tests for `_compute_stats_from_data` and `_extract_transitions_from_data`
+- 8 new unit tests for `_compute_stats_from_data` and `_extract_transitions_from_data`
 - Updated all 12 integration test mocks to match reduced query counts
-- Full suite: 906 passed, lint clean, mypy clean
+- Full suite: 907 passed, lint clean, mypy clean

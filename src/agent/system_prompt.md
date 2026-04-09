@@ -38,7 +38,7 @@ time range relative to the current time above.
 - `truenas_apps` — installed TrueNAS apps with running state
 
 **For HDD power state** (spinup/spindown, disk activity):
-- `hdd_power_status` — **USE THIS** for any HDD power state question. Returns a complete summary: which disks are spun up/standby with human-readable names (model, size, serial), and when each disk last changed power state. Accepts optional `duration` (default '24h', e.g. '1h', '12h', '3d', '1w') and `pool` filter (e.g. 'tank', 'backup'). Handles all cross-referencing and transition detection automatically. Do NOT use prometheus_instant_query for disk_power_state — use this tool instead.
+- `hdd_power_status` — **USE THIS** for any HDD power state question. Returns a complete summary: which disks are spun up/standby with human-readable names (model, size, serial), all power state transitions in chronological order, and time-in-state percentages. Accepts optional `duration` (default '24h', e.g. '1h', '12h', '3d', '1w') and `pool` filter (e.g. 'tank', 'backup'). Handles all cross-referencing and transition detection automatically — no need for follow-up prometheus_range_query calls. Do NOT use prometheus_instant_query for disk_power_state — use this tool instead.
 
 **For power consumption** (electricity usage, wattage, energy cost):
 - The homelab server rack (Proxmox host + UPS + MikroTik) is measured by a smart plug reporting to Home Assistant, which is scraped by Prometheus.

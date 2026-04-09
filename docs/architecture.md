@@ -110,9 +110,11 @@ indefinitely, which is critical when external services (like a morning report ge
 
 ### Concurrency
 
-The production Dockerfile runs uvicorn with 2 workers to handle concurrent requests. The OAuth token refresh uses an
-`asyncio.Lock` to prevent concurrent requests from racing on single-use refresh tokens. The `hdd_power_status` tool
-parallelizes its independent API calls (Prometheus + TrueNAS) using `asyncio.create_task` to reduce wall-clock time.
+The production Dockerfile runs uvicorn with 1 worker (single process with asyncio event loop). The OAuth token refresh
+uses an `asyncio.Lock` to prevent concurrent requests from racing on single-use refresh tokens. The `hdd_power_status`
+tool fetches range data once and computes both statistics and transition times from the same data (eliminating redundant
+queries), with Prometheus and TrueNAS API calls parallelized via `asyncio.create_task`. The `loki_correlate_changes`
+tool fires its error-log and lifecycle-event queries concurrently for the same reason.
 
 ### SDK Stream Resilience
 

@@ -246,11 +246,12 @@ Complete HDD power status summary: current state, human-readable disk names, and
   state changes in the last 12 hours?" (`duration='12h'`), "Were the tank HDDs active this week?"
   (`duration='1w', pool='tank'`), "What fraction of the last 6h were my drives in standby?" (`duration='6h'`)
 - **Returns:** Per-disk power state (standby, idle, active_or_idle, idle_a/b/c, active, sleep, error, unknown) with
-  model, size, serial, pool. Change counts and time-in-state percentages for the requested duration. Last power state
-  change timestamp with from/to transition. Automatically cross-references Prometheus `disk_power_state` with TrueNAS
-  disk inventory, enriches pool assignments from `/pool` topology (since `/disk` returns pool as null), and uses
-  progressive `changes()` widening to find transitions. API calls to Prometheus and TrueNAS are made concurrently
-  using `asyncio.create_task` to minimize total query time.
+  model, size, serial, pool. Change counts and time-in-state percentages for the requested duration. All power state
+  transitions in chronological order per disk, with exact timestamps and from/to state labels. Automatically
+  cross-references Prometheus `disk_power_state` with TrueNAS disk inventory, enriches pool assignments from `/pool`
+  topology (since `/disk` returns pool as null). Fetches range data once and computes both stats and transitions from
+  the same data. Uses progressive widening (skipping already-covered windows) to find transitions beyond the requested
+  duration. Prometheus and TrueNAS API calls are parallelized using `asyncio.create_task`.
 
 ## Proxmox Backup Server (enabled when `PBS_URL` is set)
 

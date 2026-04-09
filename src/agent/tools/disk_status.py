@@ -380,39 +380,39 @@ def _compute_stats_from_data(range_data: Sequence[PrometheusSeries]) -> dict[str
     return stats
 
 
-def _extract_transitions_from_data(range_data: Sequence[PrometheusSeries]) -> dict[str, str]:
-    """Extract the most recent group transition per disk from already-fetched range data.
+def _extract_transitions_from_data(range_data: Sequence[PrometheusSeries]) -> dict[str, list[str]]:
+    """Extract ALL group transitions per disk from already-fetched range data.
 
-    Pure function — no HTTP calls. Walks each series backwards to find the
-    last transition between state groups (active ↔ standby ↔ error).
-    Returns a dict mapping device_id to a human-readable transition description.
+    Pure function — no HTTP calls. Walks each series forward to find every
+    transition between state groups (active ↔ standby ↔ error).
+    Returns a dict mapping device_id to a list of human-readable transition
+    descriptions in chronological order.
+
+    Reporting all transitions (not just the most recent) avoids forcing the
+    LLM to make additional prometheus_range_query calls when the user asks
+    about a multi-hour window.
     """
-    transitions: dict[str, str] = {}
+    transitions: dict[str, list[str]] = {}
     for series in range_data:
         device_id = series.get("metric", {}).get("device_id", "unknown")
         values = series.get("values", [])
         if len(values) < 2:
             continue
 
-        last_transition_ts: float | None = None
-        from_state: float | None = None
-        to_state: float | None = None
-
-        for i in range(len(values) - 1, 0, -1):
+        disk_transitions: list[str] = []
+        for i in range(1, len(values)):
             curr_val = float(values[i][1])
             prev_val = float(values[i - 1][1])
             if _state_group(curr_val) != _state_group(prev_val):
-                last_transition_ts = float(values[i][0])
-                from_state = prev_val
-                to_state = curr_val
-                break
+                ts = float(values[i][0])
+                dt = datetime.fromtimestamp(ts, tz=UTC)
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                from_label = _format_power_state(prev_val)
+                to_label = _format_power_state(curr_val)
+                disk_transitions.append(f"{time_str} ({from_label} → {to_label})")
 
-        if last_transition_ts is not None and from_state is not None and to_state is not None:
-            dt = datetime.fromtimestamp(last_transition_ts, tz=UTC)
-            time_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-            from_label = _format_power_state(from_state)
-            to_label = _format_power_state(to_state)
-            transitions[device_id] = f"{time_str} ({from_label} → {to_label})"
+        if disk_transitions:
+            transitions[device_id] = disk_transitions
 
     return transitions
 
@@ -598,7 +598,7 @@ async def hdd_power_status(
     # requested duration had no transitions.
     has_changes_in_stats = any(s.change_count > 0 for s in period_stats.values())
 
-    lines.append("\nLast power state change:")
+    lines.append("\nPower state transitions:")
     try:
         if has_changes_in_stats:
             # Transitions exist in the already-fetched data — extract directly.
@@ -622,11 +622,13 @@ async def hdd_power_status(
         if not transitions:
             lines.append("  Changes detected but could not pinpoint exact times.")
         else:
-            for device_id, transition_desc in transitions.items():
+            for device_id, transition_list in transitions.items():
                 hex_key = _extract_hex(device_id)
                 disk_entry = disk_lookup.get(hex_key)
                 disk_name = _format_disk_name(disk_entry, device_id)
-                lines.append(f"  {disk_name} — {transition_desc}")
+                lines.append(f"  {disk_name}:")
+                for desc in transition_list:
+                    lines.append(f"    {desc}")
 
             transition_hex_keys = {_extract_hex(did) for did in transitions}
             for series in power_states:

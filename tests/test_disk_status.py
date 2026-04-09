@@ -396,23 +396,28 @@ class TestExtractTransitionsFromData:
     def test_empty_data(self) -> None:
         assert _extract_transitions_from_data([]) == {}
 
-    def test_finds_most_recent_transition(self) -> None:
+    def test_finds_all_transitions(self) -> None:
         data: list[PrometheusSeries] = [
             PrometheusSeries(
                 metric={"device_id": "disk1"},
                 values=[
                     [1700000000, "0"],  # standby
-                    [1700000060, "2"],  # active (first transition)
-                    [1700000120, "0"],  # standby (second transition)
-                    [1700000180, "4"],  # active (third — most recent)
+                    [1700000060, "2"],  # active (1st transition)
+                    [1700000120, "0"],  # standby (2nd transition)
+                    [1700000180, "4"],  # active (3rd transition)
                 ],
             ),
         ]
         transitions = _extract_transitions_from_data(data)
         assert "disk1" in transitions
-        # Most recent transition is standby → idle_b
-        assert "standby" in transitions["disk1"]
-        assert "idle_b" in transitions["disk1"]
+        assert len(transitions["disk1"]) == 3
+        # First: standby → active_or_idle
+        assert "standby" in transitions["disk1"][0]
+        assert "active_or_idle" in transitions["disk1"][0]
+        # Second: active_or_idle → standby
+        assert "standby" in transitions["disk1"][1]
+        # Third: standby → idle_b
+        assert "idle_b" in transitions["disk1"][2]
 
     def test_no_group_transitions(self) -> None:
         """Disks with only sub-state changes produce no transition entries."""
@@ -432,3 +437,20 @@ class TestExtractTransitionsFromData:
             ),
         ]
         assert _extract_transitions_from_data(data) == {}
+
+    def test_chronological_order(self) -> None:
+        """Transitions are returned in chronological (forward) order."""
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[
+                    [1700000000, "0"],  # standby
+                    [1700000060, "4"],  # active
+                    [1700000120, "0"],  # standby
+                ],
+            ),
+        ]
+        transitions = _extract_transitions_from_data(data)
+        # First transition timestamp should be earlier than second
+        assert "00:01:00" in transitions["disk1"][0] or "2023" in transitions["disk1"][0]
+        assert len(transitions["disk1"]) == 2

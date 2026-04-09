@@ -249,11 +249,13 @@ class TestHddPowerStatus:
         assert "standby" in result
         assert "active_or_idle" in result
         assert "→" in result
-        # sdf should show no change
+        # sdf should show no change (no group transitions)
         assert "no change" in result.lower()
         # Should show 24h stats
         assert "1 change" in result
         assert "%" in result
+        # Should list transitions under the disk name
+        assert "Power state transitions:" in result
 
     @respx.mock
     async def test_shows_24h_change_counts(self) -> None:

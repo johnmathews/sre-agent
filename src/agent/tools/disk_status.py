@@ -307,53 +307,38 @@ async def _get_current_power_states() -> list[PrometheusSeries]:
     return list(data.get("data", {}).get("result", []))
 
 
-async def _find_transition_window() -> tuple[str | None, dict[str, int]]:
+async def _find_transition_window(
+    skip_below_seconds: int = 0,
+) -> tuple[str | None, list[PrometheusSeries]]:
     """Find the shortest time window that contains power state group changes.
 
     Uses range queries with progressive widening: 1h → 6h → 24h → 7d.
-    Only counts transitions between state groups (active/standby/error),
-    not sub-state fluctuations (e.g. idle_a ↔ idle_b).
-    Returns (window_string, per_device_change_counts) or (None, {}).
+    Windows whose duration is ≤ *skip_below_seconds* are skipped — use this
+    when the caller already queried a certain duration and found no transitions,
+    so shorter/equal windows are guaranteed empty too.
+
+    Returns (window_string, range_data) so the caller can extract transition
+    details without a redundant re-query, or (None, []) if no transitions found.
     """
     for window in TRANSITION_WINDOWS:
         duration = WINDOW_SECONDS.get(window, 3600)
-        now = datetime.now(UTC)
-        start_ts = str(int(now.timestamp()) - duration)
-        end_ts = str(int(now.timestamp()))
-        step = _select_step(duration)
-
-        data = await _query_prometheus(
-            "/api/v1/query_range",
-            {
-                "query": _HDD_QUERY,
-                "start": start_ts,
-                "end": end_ts,
-                "step": step,
-            },
-        )
-        if data.get("status") != "success":
+        if duration <= skip_below_seconds:
             continue
-        results = data.get("data", {}).get("result", [])
-        counts: dict[str, int] = {}
-        has_changes = False
-        for series in results:
-            metric = series.get("metric", {})
-            device_id = metric.get("device_id", "unknown") if isinstance(metric, dict) else "unknown"
-            values = series.get("values", [])
-            count = _count_group_transitions(values if isinstance(values, list) else [])
-            counts[device_id] = count
-            if count > 0:
-                has_changes = True
+        range_data = await _fetch_range_data(duration)
+        has_changes = any(
+            _count_group_transitions(s.get("values", []) if isinstance(s.get("values", []), list) else []) > 0
+            for s in range_data
+        )
         if has_changes:
-            return window, counts
-    return None, {}
+            return window, range_data
+    return None, []
 
 
-async def _get_stats(duration_seconds: int = 86400) -> dict[str, DiskStats]:
-    """Get per-disk stats for a given duration: group transition count and time-in-state.
+async def _fetch_range_data(duration_seconds: int) -> list[PrometheusSeries]:
+    """Fetch disk_power_state range data from Prometheus.
 
-    Counts transitions between groups (active/standby/error), not sub-state
-    fluctuations like idle_a ↔ idle_b.
+    Returns the raw series list so callers can compute stats and transitions
+    from the same data without making redundant queries.
     """
     now = datetime.now(UTC)
     start_ts = str(int(now.timestamp()) - duration_seconds)
@@ -369,9 +354,18 @@ async def _get_stats(duration_seconds: int = 86400) -> dict[str, DiskStats]:
         },
     )
     if data.get("status") != "success":
-        return {}
+        return []
+    return list(data.get("data", {}).get("result", []))
+
+
+def _compute_stats_from_data(range_data: Sequence[PrometheusSeries]) -> dict[str, DiskStats]:
+    """Compute per-disk stats from already-fetched range data.
+
+    Pure function — no HTTP calls. Counts transitions between groups
+    (active/standby/error), not sub-state fluctuations like idle_a ↔ idle_b.
+    """
     stats: dict[str, DiskStats] = {}
-    for series in data.get("data", {}).get("result", []):
+    for series in range_data:
         metric = series.get("metric", {})
         device_id = metric.get("device_id", "unknown") if isinstance(metric, dict) else "unknown"
         values = series.get("values", [])
@@ -386,38 +380,20 @@ async def _get_stats(duration_seconds: int = 86400) -> dict[str, DiskStats]:
     return stats
 
 
-async def _find_transition_times(window: str) -> dict[str, str]:
-    """Pinpoint when each disk last changed state by range-querying within the window.
+def _extract_transitions_from_data(range_data: Sequence[PrometheusSeries]) -> dict[str, str]:
+    """Extract the most recent group transition per disk from already-fetched range data.
 
+    Pure function — no HTTP calls. Walks each series backwards to find the
+    last transition between state groups (active ↔ standby ↔ error).
     Returns a dict mapping device_id to a human-readable transition description.
     """
-    duration = WINDOW_SECONDS.get(window, 3600)
-    now = datetime.now(UTC)
-    start_ts = str(int(now.timestamp()) - duration)
-    end_ts = str(int(now.timestamp()))
-    step = _select_step(duration)
-
-    data = await _query_prometheus(
-        "/api/v1/query_range",
-        {
-            "query": _HDD_QUERY,
-            "start": start_ts,
-            "end": end_ts,
-            "step": step,
-        },
-    )
-    if data.get("status") != "success":
-        return {}
-
     transitions: dict[str, str] = {}
-    for series in data.get("data", {}).get("result", []):
+    for series in range_data:
         device_id = series.get("metric", {}).get("device_id", "unknown")
         values = series.get("values", [])
         if len(values) < 2:
             continue
 
-        # Walk backwards to find the most recent group transition
-        # (active ↔ standby ↔ error), ignoring sub-state fluctuations
         last_transition_ts: float | None = None
         from_state: float | None = None
         to_state: float | None = None
@@ -489,13 +465,13 @@ async def _safe_truenas_disks() -> list[TruenasDiskEntry]:
         return []
 
 
-async def _safe_get_stats(dur_int: int) -> dict[str, DiskStats]:
-    """Fetch per-disk stats, returning {} on failure."""
+async def _safe_fetch_range_data(duration_seconds: int) -> list[PrometheusSeries]:
+    """Fetch range data, returning [] on failure."""
     try:
-        return await _get_stats(dur_int)
+        return await _fetch_range_data(duration_seconds)
     except Exception:
-        logger.warning("Failed to query stats for %ds", dur_int, exc_info=True)
-        return {}
+        logger.warning("Failed to fetch range data for %ds", duration_seconds, exc_info=True)
+        return []
 
 
 @tool("hdd_power_status", args_schema=HddPowerStatusInput)  # pyright: ignore[reportUnknownParameterType]
@@ -513,10 +489,10 @@ async def hdd_power_status(
     settings = get_settings()
 
     # --- Phase 1: Fire independent API calls in parallel ---
-    # Current power states (Prometheus instant) + TrueNAS disk inventory + stats (range query)
-    # are all independent and can run concurrently.
+    # Current power states (Prometheus instant) + range data (single query for
+    # both stats and transitions) + TrueNAS disk inventory — all independent.
     power_task = asyncio.create_task(_get_current_power_states())
-    stats_task = asyncio.create_task(_safe_get_stats(dur_int))
+    range_task = asyncio.create_task(_safe_fetch_range_data(dur_int))
     truenas_task = asyncio.create_task(_safe_truenas_disks()) if settings.truenas_url else None
 
     # Await all tasks (power_states may raise — that's intentional)
@@ -532,7 +508,8 @@ async def hdd_power_status(
     if not power_states:
         raise ToolException("No disk_power_state metrics found. Check that disk-status-exporter is running on TrueNAS.")
 
-    period_stats = await stats_task
+    range_data = await range_task
+    period_stats = _compute_stats_from_data(range_data)
     truenas_disks: list[TruenasDiskEntry] = await truenas_task if truenas_task else []
 
     # --- Phase 2: Build disk lookup + enrich pools (needs truenas_disks) ---
@@ -616,26 +593,29 @@ async def hdd_power_status(
             )
 
     # --- Phase 3: Transition history ---
-    # Use stats data to check if the requested duration already has transitions.
-    # This avoids the progressive-widening loop re-querying the same time ranges.
+    # Reuse the range data from Phase 1 to extract transitions without a
+    # redundant Prometheus query. Only widen the search window if the
+    # requested duration had no transitions.
     has_changes_in_stats = any(s.change_count > 0 for s in period_stats.values())
 
     lines.append("\nLast power state change:")
     try:
         if has_changes_in_stats:
-            # We know the requested duration has transitions — use it directly
-            # instead of progressively widening from 1h → 6h → 24h → 7d.
-            transitions = await _find_transition_times(duration)
+            # Transitions exist in the already-fetched data — extract directly.
+            transitions = _extract_transitions_from_data(range_data)
         else:
-            # Stats didn't show changes — check wider windows
-            window, _ = await _find_transition_window()
+            # Stats didn't show changes — check wider windows, skipping
+            # any window ≤ the already-queried duration (guaranteed empty).
+            window, wider_data = await _find_transition_window(
+                skip_below_seconds=dur_int,
+            )
             if window is None:
                 lines.append(
                     "  No power state changes detected in the last 7 days. "
                     "All disks have been in their current state for at least 7 days."
                 )
                 return "\n".join(lines)
-            transitions = await _find_transition_times(window)
+            transitions = _extract_transitions_from_data(wider_data)
 
         if pool_device_ids is not None:
             transitions = {k: v for k, v in transitions.items() if k in pool_device_ids}

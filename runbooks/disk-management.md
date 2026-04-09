@@ -142,9 +142,10 @@ the complexity automatically:
 - Queries current power state from Prometheus
 - Cross-references device IDs with TrueNAS disk inventory for human-readable names
 - Enriches disk entries with pool assignments from `/pool` topology (since `/disk` may return pool as null)
+- Fetches range data once and computes both stats and transition times from the same data (no redundant queries)
 - Reports change counts and time-in-state percentages for the requested duration
-- Uses progressive `changes()` widening (1h→6h→24h→7d) to find recent transitions
-- Pinpoints exact transition timestamps via range queries
+- If no transitions in the requested duration, widens the search (skipping already-covered windows)
+- Pinpoints exact transition timestamps from the fetched range data
 
 ### Attributing spinup causes
 

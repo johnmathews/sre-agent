@@ -9,9 +9,11 @@ from src.agent.tools.disk_status import (
     _STANDBY_STATES,
     POWER_STATE_LABELS,
     _build_disk_lookup,
+    _compute_stats_from_data,
     _compute_time_in_state,
     _count_group_transitions,
     _extract_hex,
+    _extract_transitions_from_data,
     _format_disk_name,
     _format_power_state,
     _resolve_pool_filter,
@@ -349,3 +351,84 @@ class TestSelectStep:
 
     def test_long_duration(self) -> None:
         assert _select_step(604800) == "5m"  # 7d
+
+
+class TestComputeStatsFromData:
+    """Tests for _compute_stats_from_data — pure function computing stats from raw series."""
+
+    def test_empty_data(self) -> None:
+        assert _compute_stats_from_data([]) == {}
+
+    def test_computes_stats_from_series(self) -> None:
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[
+                    [1700000000, "0"],  # standby
+                    [1700000060, "0"],
+                    [1700000120, "2"],  # active (1 transition)
+                    [1700000180, "2"],
+                ],
+            ),
+        ]
+        stats = _compute_stats_from_data(data)
+        assert "disk1" in stats
+        assert stats["disk1"].change_count == 1
+        assert stats["disk1"].standby_pct > 0
+        assert stats["disk1"].active_pct > 0
+
+    def test_no_transitions_within_group(self) -> None:
+        """Sub-state fluctuations don't count as transitions."""
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[[1700000000, "3"], [1700000060, "4"], [1700000120, "5"]],
+            ),
+        ]
+        stats = _compute_stats_from_data(data)
+        assert stats["disk1"].change_count == 0
+        assert stats["disk1"].active_pct == 100.0
+
+
+class TestExtractTransitionsFromData:
+    """Tests for _extract_transitions_from_data — pure function extracting transitions."""
+
+    def test_empty_data(self) -> None:
+        assert _extract_transitions_from_data([]) == {}
+
+    def test_finds_most_recent_transition(self) -> None:
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[
+                    [1700000000, "0"],  # standby
+                    [1700000060, "2"],  # active (first transition)
+                    [1700000120, "0"],  # standby (second transition)
+                    [1700000180, "4"],  # active (third — most recent)
+                ],
+            ),
+        ]
+        transitions = _extract_transitions_from_data(data)
+        assert "disk1" in transitions
+        # Most recent transition is standby → idle_b
+        assert "standby" in transitions["disk1"]
+        assert "idle_b" in transitions["disk1"]
+
+    def test_no_group_transitions(self) -> None:
+        """Disks with only sub-state changes produce no transition entries."""
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[[1700000000, "3"], [1700000060, "4"], [1700000120, "5"]],
+            ),
+        ]
+        assert _extract_transitions_from_data(data) == {}
+
+    def test_single_value_no_transition(self) -> None:
+        data: list[PrometheusSeries] = [
+            PrometheusSeries(
+                metric={"device_id": "disk1"},
+                values=[[1700000000, "0"]],
+            ),
+        ]
+        assert _extract_transitions_from_data(data) == {}

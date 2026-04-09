@@ -6,6 +6,7 @@ Provides three tools:
 - loki_correlate_changes: higher-level change correlation around a reference time
 """
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -843,8 +844,13 @@ async def loki_correlate_changes(
         error_selector,
     )
 
-    try:
-        error_data = await _query_loki(
+    # Query 2: Container lifecycle events (search all levels for lifecycle keywords)
+    lifecycle_filter = ' |~ "(?i)(started|stopped|exited|restarting|signal|killed|oom|healthcheck|unhealthy|crashed)"'
+    lifecycle_query = base_selector + lifecycle_filter
+
+    # Fire both queries concurrently — they are independent.
+    error_task = asyncio.create_task(
+        _query_loki(
             "/loki/api/v1/query_range",
             {
                 "query": error_selector,
@@ -854,17 +860,9 @@ async def loki_correlate_changes(
                 "direction": "forward",
             },
         )
-        error_response: LokiQueryResponse = error_data  # type: ignore[assignment]
-        all_events.extend(_extract_events_from_response(error_response))
-    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
-        logger.warning("Loki correlation error query failed: %s", e)
-
-    # Query 2: Container lifecycle events (search all levels for lifecycle keywords)
-    lifecycle_filter = ' |~ "(?i)(started|stopped|exited|restarting|signal|killed|oom|healthcheck|unhealthy|crashed)"'
-    lifecycle_query = base_selector + lifecycle_filter
-
-    try:
-        lifecycle_data = await _query_loki(
+    )
+    lifecycle_task = asyncio.create_task(
+        _query_loki(
             "/loki/api/v1/query_range",
             {
                 "query": lifecycle_query,
@@ -874,6 +872,18 @@ async def loki_correlate_changes(
                 "direction": "forward",
             },
         )
+    )
+
+    # Collect results — each query may fail independently.
+    try:
+        error_data = await error_task
+        error_response: LokiQueryResponse = error_data  # type: ignore[assignment]
+        all_events.extend(_extract_events_from_response(error_response))
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+        logger.warning("Loki correlation error query failed: %s", e)
+
+    try:
+        lifecycle_data = await lifecycle_task
         lifecycle_response: LokiQueryResponse = lifecycle_data  # type: ignore[assignment]
         lifecycle_events = _extract_events_from_response(lifecycle_response)
 

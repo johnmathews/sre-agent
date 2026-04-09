@@ -163,11 +163,12 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
-        # 24h counts + 4 transition windows (1h, 6h, 24h, 7d) all return stable data
+        # 1 range fetch (stats+transitions) + widening skips 1h/6h/24h (≤86400),
+        # tries only 7d — all return stable data (no group transitions).
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # 24h counts
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # transition windows
+                _mock_range_response(_stable_range_data()),  # 24h fetch
+                _mock_range_response(_stable_range_data()),  # 7d window
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())
@@ -192,11 +193,11 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
-        # 24h counts + 4 windows, all stable (no group transitions)
+        # 1 range fetch + widening skips ≤24h, tries only 7d — all stable
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # 24h counts
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # windows
+                _mock_range_response(_stable_range_data()),  # 24h fetch
+                _mock_range_response(_stable_range_data()),  # 7d window
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())
@@ -207,7 +208,7 @@ class TestHddPowerStatus:
 
     @respx.mock
     async def test_finds_transitions_with_range_query(self) -> None:
-        """When group transitions are detected, pinpoints time with range query."""
+        """When group transitions are detected, extracts times from same data (no re-query)."""
         # Range data with a real group transition: standby(0) → active(2)
         transition_range_data = [
             {
@@ -232,11 +233,10 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
+        # Only 1 range query — stats AND transitions extracted from same data
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(transition_range_data),  # 24h counts (1 transition on disk1)
-                _mock_range_response(transition_range_data),  # _find_transition_window 1h → found!
-                _mock_range_response(transition_range_data),  # _find_transition_times 1h
+                _mock_range_response(transition_range_data),  # single fetch
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())
@@ -281,25 +281,13 @@ class TestHddPowerStatus:
                 ],
             },
         ]
-        # 1h window data with a transition for _find_transition_window
-        one_h_data = [
-            {
-                "metric": {"device_id": "/dev/disk/by-id/wwn-0x5000c500eb02b449"},
-                "values": [[1699999800, "0"], [1699999830, "2"]],
-            },
-            {
-                "metric": {"device_id": "/dev/disk/by-id/wwn-0x5000c500f742ccbf"},
-                "values": [[1699999800, "2"], [1699999830, "0"]],
-            },
-        ]
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
+        # Only 1 range query — data has transitions so no widening needed
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(twentyfour_h_data),  # 24h counts
-                _mock_range_response(one_h_data),  # _find_transition_window 1h → found!
-                _mock_range_response(one_h_data),  # _find_transition_times 1h
+                _mock_range_response(twentyfour_h_data),  # single fetch
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())
@@ -338,10 +326,11 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
+        # 1 range fetch + widening skips ≤24h, tries only 7d
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # 24h counts
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # windows
+                _mock_range_response(_stable_range_data()),  # 24h fetch
+                _mock_range_response(_stable_range_data()),  # 7d window
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(side_effect=httpx.ConnectError("TrueNAS down"))
@@ -358,10 +347,12 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
+        # 1 range fetch (12h) + widening skips 1h/6h (≤43200), tries 24h then 7d
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # stats for 12h
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # windows
+                _mock_range_response(_stable_range_data()),  # 12h fetch
+                _mock_range_response(_stable_range_data()),  # 24h window
+                _mock_range_response(_stable_range_data()),  # 7d window
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())
@@ -395,10 +386,11 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(prom_results_no_pool),
         )
+        # 1 range fetch + widening skips ≤24h, tries only 7d
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # stats
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # windows
+                _mock_range_response(_stable_range_data()),  # 24h fetch
+                _mock_range_response(_stable_range_data()),  # 7d window
             ]
         )
         # /disk returns NO pool info (matches real TrueNAS API)
@@ -450,10 +442,11 @@ class TestHddPowerStatus:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(
             return_value=_mock_power_state_response(POWER_STATE_RESULTS),
         )
+        # 1 range fetch (1w=604800s) — widening skips ALL windows (≤604800),
+        # so only the initial fetch is made.
         respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
             side_effect=[
-                _mock_range_response(_stable_range_data()),  # stats for 1w
-                *[_mock_range_response(_stable_range_data()) for _ in range(4)],  # windows
+                _mock_range_response(_stable_range_data()),  # 1w fetch
             ]
         )
         respx.get("https://truenas.test/api/v2.0/disk").mock(return_value=_mock_truenas_disks())

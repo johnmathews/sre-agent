@@ -22,11 +22,16 @@ logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
 
+_MAX_NARRATIVE_RETRY_SECONDS = 21_600  # 6 hours
+
+
 async def _scheduled_report_job() -> None:
     """Async job executed by the scheduler: generate report, email, record metrics."""
     start = time.monotonic()
     try:
-        result = await generate_report()
+        result = await generate_report(
+            max_narrative_retry_seconds=_MAX_NARRATIVE_RETRY_SECONDS,
+        )
         if is_email_configured():
             emailed = await asyncio.to_thread(send_report_email, result.markdown, result.html)
             if emailed:

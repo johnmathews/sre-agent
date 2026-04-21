@@ -11,6 +11,7 @@ import html as html_mod
 import json
 import logging
 import ssl
+import time
 from datetime import UTC, datetime
 from typing import NamedTuple, NotRequired, TypedDict
 
@@ -23,6 +24,36 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 15
+
+# ---------------------------------------------------------------------------
+# Retry helpers for LLM narrative generation
+# ---------------------------------------------------------------------------
+
+# Initial delay before the first retry (seconds).
+_RETRY_INITIAL_DELAY = 30.0
+# Multiply delay by this factor after each retry.
+_RETRY_BACKOFF_FACTOR = 2.0
+# Cap individual retry delays at 30 minutes.
+_RETRY_MAX_DELAY = 1800.0
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    """Return True if *exc* is a transient LLM error worth retrying.
+
+    Retryable errors:
+      - HTTP 429 (rate limit) from Anthropic or OpenAI SDKs
+      - HTTP 5xx (server-side) from Anthropic or OpenAI SDKs
+      - Network / connection errors (httpx, OSError)
+
+    Non-retryable: auth errors (401/403), validation errors (400/422), etc.
+    """
+    # Both anthropic and openai SDKs expose a .status_code on their API errors.
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code == 429 or status_code >= 500
+
+    # Network-level failures (connection refused, DNS, timeout, etc.)
+    return isinstance(exc, (httpx.TransportError, OSError, ConnectionError, TimeoutError))
 
 
 # ---------------------------------------------------------------------------
@@ -643,37 +674,68 @@ async def collect_report_data(lookback_days: int) -> dict[str, object]:
 async def _generate_narrative(
     collected_data: dict[str, object],
     previous_report: str | None = None,
+    max_retry_seconds: float = 0,
 ) -> str:
-    """Generate a 2-3 paragraph executive summary via a single LLM call."""
+    """Generate a 2-3 paragraph executive summary via a single LLM call.
+
+    Args:
+        collected_data: Structured report data from collectors.
+        previous_report: Previous report text for trend comparison.
+        max_retry_seconds: Maximum wall-clock time (seconds) to spend
+            retrying on transient errors (429, 5xx, network).  ``0`` means
+            no retries — fail immediately (backwards-compatible default).
+            The scheduled weekly report passes a large budget (e.g. 21 600 s
+            = 6 hours) so the report is delayed rather than sent incomplete.
+    """
     settings = get_settings()
-    try:
-        llm = create_llm(settings, temperature=0.3)
-        user_prompt = (
-            "Given the following infrastructure data as JSON, write 3-5 concise bullet "
-            "points (one line each, starting with '- '). Cover: alert status, any SLO "
-            "violations (mention which components if per-component data is available), "
-            "notable error trends (mention if counts are up/down vs previous period), "
-            "backup health (any stale backups or storage concerns), and one actionable "
-            "recommendation. Be specific with numbers. Do not use markdown bold/italic "
-            "formatting. If data is missing (null), note the data source was unavailable.\n\n"
-            f"Data:\n```json\n{json.dumps(collected_data, indent=2, default=str)}\n```"
-        )
-        if previous_report:
-            # Truncate to avoid blowing up the context window
-            truncated = previous_report[:3000]
-            user_prompt += f"\n\nPrevious report for context (compare and note changes/trends):\n```\n{truncated}\n```"
 
-        # OAuth tokens require the system prompt to identify as Claude Code.
-        system_text = "You are an SRE assistant writing a weekly reliability report summary."
-        if settings.llm_provider == "anthropic" and _is_oauth_token(settings.anthropic_api_key):
-            system_text = "You are Claude Code, Anthropic's official CLI for Claude.\n\n" + system_text
+    user_prompt = (
+        "Given the following infrastructure data as JSON, write 3-5 concise bullet "
+        "points (one line each, starting with '- '). Cover: alert status, any SLO "
+        "violations (mention which components if per-component data is available), "
+        "notable error trends (mention if counts are up/down vs previous period), "
+        "backup health (any stale backups or storage concerns), and one actionable "
+        "recommendation. Be specific with numbers. Do not use markdown bold/italic "
+        "formatting. If data is missing (null), note the data source was unavailable.\n\n"
+        f"Data:\n```json\n{json.dumps(collected_data, indent=2, default=str)}\n```"
+    )
+    if previous_report:
+        truncated = previous_report[:3000]
+        user_prompt += f"\n\nPrevious report for context (compare and note changes/trends):\n```\n{truncated}\n```"
 
-        messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
-        response = await llm.ainvoke(messages)
-        return str(response.content)
-    except Exception as exc:
-        logger.exception("Failed to generate narrative")
-        return f"Narrative unavailable — LLM call failed: {exc}"
+    system_text = "You are an SRE assistant writing a weekly reliability report summary."
+    if settings.llm_provider == "anthropic" and _is_oauth_token(settings.anthropic_api_key):
+        system_text = "You are Claude Code, Anthropic's official CLI for Claude.\n\n" + system_text
+
+    messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
+
+    deadline = time.monotonic() + max_retry_seconds
+    delay = _RETRY_INITIAL_DELAY
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            llm = create_llm(settings, temperature=0.3)
+            response = await llm.ainvoke(messages)
+            return str(response.content)
+        except Exception as exc:
+            remaining = deadline - time.monotonic()
+            if _is_retryable_llm_error(exc) and remaining > 0:
+                sleep_for = min(delay, remaining, _RETRY_MAX_DELAY)
+                logger.warning(
+                    "Narrative LLM call failed (attempt %d, %s), retrying in %.0fs (%.0fs remaining in budget)",
+                    attempt,
+                    type(exc).__name__,
+                    sleep_for,
+                    remaining,
+                )
+                await asyncio.sleep(sleep_for)
+                delay = min(delay * _RETRY_BACKOFF_FACTOR, _RETRY_MAX_DELAY)
+                continue
+
+            logger.exception("Failed to generate narrative (attempt %d)", attempt)
+            return f"Narrative unavailable — LLM call failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -1292,7 +1354,10 @@ def format_report_html(data: ReportData) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def generate_report(lookback_days: int | None = None) -> GeneratedReport:
+async def generate_report(
+    lookback_days: int | None = None,
+    max_narrative_retry_seconds: float = 0,
+) -> GeneratedReport:
     """Generate a full weekly reliability report in both markdown and HTML.
 
     After generation, archives the report to the memory store (if configured)
@@ -1301,6 +1366,8 @@ async def generate_report(lookback_days: int | None = None) -> GeneratedReport:
 
     Args:
         lookback_days: Number of days to look back. Defaults to settings value.
+        max_narrative_retry_seconds: Wall-clock budget for retrying the LLM
+            narrative call on transient errors.  ``0`` = no retries.
 
     Returns:
         A GeneratedReport with .markdown and .html fields.
@@ -1313,7 +1380,11 @@ async def generate_report(lookback_days: int | None = None) -> GeneratedReport:
     # Load previous report for narrative context (if memory configured)
     previous_report = _load_previous_report()
 
-    narrative = await _generate_narrative(collected, previous_report=previous_report)
+    narrative = await _generate_narrative(
+        collected,
+        previous_report=previous_report,
+        max_retry_seconds=max_narrative_retry_seconds,
+    )
 
     report_data = ReportData(
         generated_at=datetime.now(UTC).isoformat(),

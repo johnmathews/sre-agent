@@ -341,7 +341,8 @@ _load_previous_report()             → Memory store (previous report for contex
   |
   v
 _generate_narrative(collected_data)  → Single LLM call for executive summary
-  |
+  |                                    (exponential backoff on 429/5xx/network errors;
+  |                                     scheduled: up to 6h retry budget, on-demand: no retry)
   v
 format_report_markdown(report_data)  → Markdown with 7 sections
 format_report_html(report_data)      → HTML email with inline CSS

@@ -339,7 +339,7 @@ POST /report {lookback_days: 7}
                  _collect_backup_health(),   # PBS API (if configured)
                )
        -> _load_previous_report()              # Memory store (if configured)
-       -> _generate_narrative(collected, prev)  # Single LLM call with prior context
+       -> _generate_narrative(collected, prev)  # Single LLM call (no retry for on-demand)
        -> format_report_markdown(report_data)   # Pure function → markdown
        -> format_report_html(report_data)       # Pure function → HTML email
        -> _archive_report(report_data, md)      # Memory store (if configured)
@@ -359,10 +359,26 @@ start_scheduler()  (called in FastAPI lifespan)
   -> CronTrigger.from_crontab(settings.report_schedule_cron)
   -> AsyncIOScheduler.add_job(_scheduled_report_job)
   -> _scheduled_report_job()  (fires on cron schedule)
-       -> generate_report()  → GeneratedReport(markdown, html)
+       -> generate_report(max_narrative_retry_seconds=21600)
+            -> _generate_narrative(..., max_retry_seconds=21600)
+                 # Retries LLM call with exponential backoff (30s → 60s → ... → 1800s cap)
+                 # on transient errors (429, 5xx, network) for up to 6 hours
        -> send_report_email(result.markdown, result.html)  (if configured)
        -> REPORTS_TOTAL.labels(trigger="scheduled", status=...).inc()
 ```
+
+### Narrative Retry (Exponential Backoff)
+
+The `_generate_narrative()` function accepts a `max_retry_seconds` budget. When a transient LLM error occurs (HTTP 429
+rate limit, 5xx server error, or network failure), it retries with exponential backoff:
+
+- **Initial delay:** 30 seconds
+- **Backoff factor:** 2x per retry (30s → 60s → 120s → 240s → ...)
+- **Max per-retry delay:** 1800 seconds (30 minutes)
+- **Scheduled reports:** 6-hour budget — the report is delayed rather than sent with "Narrative unavailable"
+- **On-demand (`POST /report`):** No retry (budget = 0) — fails immediately to avoid blocking the HTTP request
+
+Non-retryable errors (401 auth, 400 bad request, etc.) fail immediately regardless of the budget.
 
 ### Collector Error Handling
 

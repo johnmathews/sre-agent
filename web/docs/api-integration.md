@@ -53,8 +53,9 @@ server holds the connection open until it finishes or errors.
 ### Why `fetch` + `ReadableStream` instead of `EventSource`?
 
 `EventSource` (the browser's built-in SSE client) is **GET-only**. The backend
-accepts `POST /ask/stream` with a JSON body (`question` + optional
-`session_id`), so `EventSource` is not usable. Instead we:
+accepts `POST /ask/stream` with a JSON body (`question`, optional
+`session_id`, and optional `user_timezone` — see "Device timezone" below),
+so `EventSource` is not usable. Instead we:
 
 1. Open a `fetch` POST request.
 2. Read `response.body.getReader()` — a `ReadableStream` of `Uint8Array` chunks.
@@ -84,6 +85,25 @@ The parser handles three cases:
 - **Heartbeats** — the backend emits `{type: "heartbeat"}` every 15 s so
   Cloudflare's 100 s idle timeout doesn't close the connection. The chat
   store's `handleEvent` switches on `heartbeat` and returns immediately.
+
+## Device timezone
+
+`streamAsk` automatically reads the device's IANA timezone via
+`Intl.DateTimeFormat().resolvedOptions().timeZone` (helper in
+`src/api/timezone.ts`) and includes it in the request body as
+`user_timezone`. The backend uses this to render "now" — and the
+`get_current_time` tool — in the user's local clock.
+
+The value is read **fresh on every request**, not cached, so a user who
+changes their device's timezone (Settings → General → Date & Time on iOS;
+the OS picks the IANA name from "Time Zone Automatically" if enabled) gets
+the new zone on their next message without needing a page reload.
+
+If the browser does not expose `Intl` (vanishingly rare on modern devices),
+the field is omitted and the backend falls back to `USER_TIMEZONE` env var.
+
+The user can also pass `user_timezone` explicitly to `streamAsk` to override
+the device tz — useful in tests, but unused in production code paths today.
 
 ## Error handling
 

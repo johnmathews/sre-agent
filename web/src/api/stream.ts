@@ -15,6 +15,7 @@
 //   - error       — error message
 
 import { API_BASE } from './client'
+import { getDeviceTimezone } from './timezone'
 
 export type StreamEventType =
   | 'heartbeat'
@@ -33,22 +34,41 @@ export interface StreamEvent {
 export interface StreamRequest {
   question: string
   session_id?: string
+  /**
+   * Override the device timezone used for this request. Normally the helper
+   * fills this in automatically from `Intl.DateTimeFormat()`; tests pass
+   * explicit values to assert the wire payload.
+   */
+  user_timezone?: string
 }
 
 /**
  * POST /ask/stream and yield each decoded SSE event as it arrives.
  *
  * The caller supplies an AbortSignal to cancel the stream (e.g. if the user
- * navigates away or starts a new question).
+ * navigates away or starts a new question). The device's IANA timezone is
+ * attached automatically (read fresh per request so a travelling user gets
+ * answers in the zone they're currently in) unless the caller passed one
+ * explicitly.
  */
 export async function* streamAsk(
   req: StreamRequest,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent, void, void> {
+  const body: StreamRequest = {
+    ...req,
+    user_timezone: req.user_timezone ?? getDeviceTimezone(),
+  }
+  // Don't send the field at all when it's undefined — keeps the wire shape
+  // identical to today for clients that have no Intl support.
+  if (body.user_timezone === undefined) {
+    delete body.user_timezone
+  }
+
   const res = await fetch(`${API_BASE}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify(body),
     signal,
   })
 

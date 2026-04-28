@@ -44,6 +44,10 @@ class TestPrefixToolNames:
 class TestBuildSystemPrompt:
     """Test system prompt construction."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_settings(self, mock_settings: object) -> None:
+        pass
+
     def test_contains_current_date(self) -> None:
         from datetime import UTC, datetime
 
@@ -59,6 +63,30 @@ class TestBuildSystemPrompt:
     def test_contains_retention_cutoff(self) -> None:
         prompt = _build_system_prompt()
         assert "retains data" in prompt.lower() or "retention" in prompt.lower()
+
+    def test_contains_weekday(self) -> None:
+        from datetime import UTC, datetime
+
+        prompt = _build_system_prompt()
+        today_weekday = datetime.now(UTC).strftime("%A")
+        assert today_weekday in prompt
+
+    def test_contains_get_current_time_tool_with_mcp_prefix(self) -> None:
+        prompt = _build_system_prompt()
+        assert "mcp__sre__get_current_time" in prompt
+
+    def test_contains_elapsed_time_guidance(self) -> None:
+        prompt = _build_system_prompt()
+        assert "Computing Elapsed Time" in prompt
+        assert "epoch" in prompt.lower()
+
+    def test_no_unfilled_placeholders(self) -> None:
+        prompt = _build_system_prompt()
+        # Catch leftover {placeholder} patterns from the prompt template
+        import re
+
+        leftover = re.findall(r"\{[a-z_]+\}", prompt)
+        assert leftover == [], f"unfilled placeholders: {leftover}"
 
 
 class TestBuildSdkOptions:

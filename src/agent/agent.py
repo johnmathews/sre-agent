@@ -8,7 +8,6 @@ Supports two backend paths:
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -178,7 +177,10 @@ def _post_response_actions(messages: list[Any], question: str, response_text: st
 
 def _get_tools() -> list[BaseTool]:
     """Collect all agent tools, conditionally including optional integrations."""
+    from src.agent.tools.clock import get_current_time
+
     tools: list[BaseTool] = [
+        get_current_time,
         prometheus_search_metrics,
         prometheus_instant_query,
         prometheus_range_query,
@@ -304,12 +306,12 @@ def build_agent(
     resolved_model = model_name or settings.openai_model
     logger.info("Building agent with model=%s, %d tools: %s", resolved_model, len(tools), [t.name for t in tools])
 
-    now = datetime.now(UTC)
-    system_prompt = (
-        SYSTEM_PROMPT_TEMPLATE.replace("{current_time}", now.strftime("%Y-%m-%d %H:%M:%S"))
-        .replace("{current_date}", now.strftime("%Y-%m-%d"))
-        .replace("{retention_cutoff}", (now - timedelta(days=90)).strftime("%Y-%m-%d"))
-    )
+    from src.agent.tools.clock import render_prompt_time_fields
+
+    fields = render_prompt_time_fields(settings)
+    system_prompt = SYSTEM_PROMPT_TEMPLATE
+    for key, value in fields.items():
+        system_prompt = system_prompt.replace("{" + key + "}", value)
 
     # Inject dynamic context from memory store (best-effort, never fails build)
     system_prompt += _get_memory_context()

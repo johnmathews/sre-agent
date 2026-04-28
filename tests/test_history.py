@@ -214,8 +214,8 @@ class TestFormatHistoryAsPrompt:
 
     def test_wraps_history_in_tags(self) -> None:
         turns: list[Any] = [
-            {"role": "user", "content": "q1", "timestamp": "t"},
-            {"role": "assistant", "content": "a1", "timestamp": "t"},
+            {"role": "user", "content": "q1", "timestamp": ""},
+            {"role": "assistant", "content": "a1", "timestamp": ""},
         ]
         result = format_history_as_prompt(turns, "q2")
         assert "<conversation_history>" in result
@@ -223,6 +223,38 @@ class TestFormatHistoryAsPrompt:
         assert "Human: q1" in result
         assert "Assistant: a1" in result
         assert result.endswith("Human: q2")
+
+    def test_annotates_turns_with_iso_timestamp(self) -> None:
+        turns: list[Any] = [
+            {"role": "user", "content": "did truenas reboot?", "timestamp": "2026-04-28T07:59:29.205546+00:00"},
+            {"role": "assistant", "content": "yes, at 21:58 UTC", "timestamp": "2026-04-28T07:59:29.206563+00:00"},
+        ]
+        result = format_history_as_prompt(turns, "follow up")
+        assert "Human [2026-04-28 07:59 UTC]: did truenas reboot?" in result
+        assert "Assistant [2026-04-28 07:59 UTC]: yes, at 21:58 UTC" in result
+
+    def test_falls_back_when_timestamp_missing(self) -> None:
+        turns: list[Any] = [
+            {"role": "user", "content": "legacy turn", "timestamp": ""},
+        ]
+        result = format_history_as_prompt(turns, "next")
+        assert "Human: legacy turn" in result
+        assert "Human [" not in result.split("Human: legacy turn")[0]
+
+    def test_falls_back_when_timestamp_unparseable(self) -> None:
+        turns: list[Any] = [
+            {"role": "user", "content": "garbled", "timestamp": "not-a-date"},
+        ]
+        result = format_history_as_prompt(turns, "next")
+        assert "Human: garbled" in result
+        assert "Human [" not in result.split("Human: garbled")[0]
+
+    def test_naive_iso_timestamp_treated_as_utc(self) -> None:
+        turns: list[Any] = [
+            {"role": "user", "content": "x", "timestamp": "2026-04-28T07:59:29"},
+        ]
+        result = format_history_as_prompt(turns, "y")
+        assert "Human [2026-04-28 07:59 UTC]: x" in result
 
 
 class TestListConversations:

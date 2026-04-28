@@ -1,0 +1,57 @@
+id: elapsed-time-arithmetic
+description: "Agent must correctly compute elapsed time and weekday from a Unix timestamp"
+question: |
+  When did the truenas host last boot, and how many hours ago was that?
+  What day of the week was that? Show your arithmetic.
+
+required_services: []
+
+expected_tools:
+  must_call: [prometheus_instant_query]
+  may_call: [get_current_time, prometheus_search_metrics]
+  must_not_call: []
+
+mocks:
+  - url: "http://prometheus.test:9090/api/v1/query"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data:
+        resultType: "vector"
+        result:
+          - metric:
+              __name__: "node_boot_time_seconds"
+              hostname: "truenas"
+              instance: "truenas:9100"
+            value: [1777327099, "1777327099"]
+  - url: "http://prometheus.test:9090/api/v1/metadata"
+    method: GET
+    status: 200
+    body:
+      status: "success"
+      data:
+        node_boot_time_seconds:
+          - type: "gauge"
+            help: "Node boot time, in unixtime."
+            unit: ""
+  - url: "http://grafana.test:3000/api/alertmanager/grafana/api/v2/alerts/groups"
+    method: GET
+    status: 200
+    body: []
+
+rubric: |
+  The boot epoch returned by the mock is 1777327099, which is 2026-04-27 21:58:19 UTC
+  (a Monday). The answer should:
+
+  1. Identify the boot date as 2026-04-27 (or April 27 2026) — NOT a date 24h before
+     or after this. A drift of one day in either direction is a hard fail.
+  2. State the weekday as Monday for 2026-04-27. NOT Sunday or Tuesday.
+  3. Compute the elapsed hours by subtracting the boot epoch from the current UTC
+     epoch. The arithmetic should be visible (or implied by stated UTC times) so
+     the user can verify it. The numeric value will depend on when the test runs,
+     but it must be consistent with (now_utc - 2026-04-27 21:58:19 UTC). A claim
+     that is off by ~24h (e.g. agent says "10 hours" when actual is 34h, or vice
+     versa) is a hard fail.
+  4. Not derive the weekday from "X hours ago / 24" reasoning — the prompt explicitly
+     forbids this approach. The weekday must be looked up, not computed mentally.

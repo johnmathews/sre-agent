@@ -1,6 +1,6 @@
 # Tool Reference
 
-The agent has up to 28 tools across 10 categories (plus 2 MCP-only conversation history tools). Tools are conditionally registered based on configuration.
+The agent has up to 29 tools across 11 categories (plus 2 MCP-only conversation history tools). Tools are conditionally registered based on configuration.
 
 ## Conditional Registration
 
@@ -9,6 +9,7 @@ is skipped entirely (no failed connections, no error logs).
 
 | Tool Group       | Tools                                                                                                      | Required Config             | Always Available          |
 | ---------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------- |
+| Time             | `get_current_time`                                                                                         | None                        | Yes                       |
 | Prometheus       | `prometheus_search_metrics`, `prometheus_instant_query`, `prometheus_range_query`                          | `PROMETHEUS_URL`            | Yes (required)            |
 | Grafana Alerting | `grafana_get_alerts`, `grafana_get_alert_rules`                                                            | `GRAFANA_URL`               | Yes (required)            |
 | Grafana Dashboards | `grafana_get_dashboard`, `grafana_search_dashboards`                                                     | `GRAFANA_URL`               | Yes (required)            |
@@ -39,6 +40,17 @@ claude mcp add --transport http \
   --header "CF-Access-Client-Secret: <secret>" \
   -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
 ```
+
+## Time (always enabled)
+
+### get_current_time
+
+Return the current date, time, weekday, and the user's local time. Used by the agent to ground "how long ago" claims and to verify the day-of-week for past events instead of deriving it by mental modular arithmetic (a known LLM failure mode).
+
+- **Input:** none
+- **Returns:** UTC ISO timestamp, UTC epoch seconds, weekday name, today's date, the user's IANA timezone, and the user's local time
+- **Example questions where the agent calls this:** "How long has truenas been up?", "When did this incident start, in local time?", "What day was the last backup?"
+- **User timezone:** controlled by `USER_TIMEZONE` env var (default `UTC`). Used by both this tool and the system prompt's "Current Date and Time" section.
 
 ## Prometheus (always enabled)
 

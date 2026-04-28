@@ -9,7 +9,6 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +72,8 @@ _STREAM_CLOSE_TIMEOUT_MS = "3600000"
 # Regex to match short tool names in the system prompt (word boundary)
 _TOOL_NAME_PATTERN = re.compile(
     r"\b("
-    r"prometheus_search_metrics|prometheus_instant_query|prometheus_range_query"
+    r"get_current_time"
+    r"|prometheus_search_metrics|prometheus_instant_query|prometheus_range_query"
     r"|grafana_get_alerts|grafana_get_alert_rules|grafana_get_dashboard|grafana_search_dashboards"
     r"|proxmox_list_guests|proxmox_get_guest_config|proxmox_node_status|proxmox_list_tasks"
     r"|truenas_pool_status|truenas_list_shares|truenas_snapshots|truenas_system_status|truenas_apps"
@@ -115,12 +115,12 @@ def _get_memory_context() -> str:
 
 def _build_system_prompt() -> str:
     """Build a fresh system prompt with current timestamps and SDK tool name prefixes."""
-    now = datetime.now(UTC)
-    prompt = (
-        _SYSTEM_PROMPT_TEMPLATE.replace("{current_time}", now.strftime("%Y-%m-%d %H:%M:%S"))
-        .replace("{current_date}", now.strftime("%Y-%m-%d"))
-        .replace("{retention_cutoff}", (now - timedelta(days=90)).strftime("%Y-%m-%d"))
-    )
+    from src.agent.tools.clock import render_prompt_time_fields
+
+    fields = render_prompt_time_fields(get_settings())
+    prompt = _SYSTEM_PROMPT_TEMPLATE
+    for key, value in fields.items():
+        prompt = prompt.replace("{" + key + "}", value)
     # Add MCP tool name prefixes for the SDK path
     prompt = _prefix_tool_names(prompt)
     # Inject dynamic memory context

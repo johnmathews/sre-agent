@@ -64,9 +64,14 @@ is stuffed into the prompt:
 1. On each request, call `load_turns(history_dir, session_id)`.
 2. Call `format_history_as_prompt(turns, new_message)` — wraps prior turns
    in a `<conversation_history>...</conversation_history>` block followed
-   by the new user message.
+   by the new user message. Each turn is prefixed with its UTC timestamp
+   (e.g. `Human [2026-04-28 07:59 UTC]: ...`) so the agent can ground
+   duration claims against when the turn actually happened, rather than
+   re-anchoring stale "X hours ago" statements as if they were spoken now.
 3. The SDK sees all of it as a single user message.
 4. Trimmed to the last 20 user/assistant pairs.
+5. Turns missing a timestamp (legacy data) fall back to `Human: ...` with
+   no bracketed prefix — backward-compatible with older history files.
 
 ### LangGraph path (OpenAI)
 

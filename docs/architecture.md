@@ -166,6 +166,24 @@ failures" means "expired token" without checking the actual error messages). The
    fail identically, auth is ruled out)
 4. **Form and state diagnosis** — only after evidence, with appropriate hedging when evidence is incomplete
 
+### Date, Time, and Elapsed-Duration Handling
+
+LLMs reliably mishandle two related operations: deriving a weekday from a date by mental modular arithmetic, and
+computing elapsed time from clock-time + day-of-week reasoning rather than epoch subtraction. To prevent these
+failure modes the agent is given:
+
+1. The current UTC weekday, date, and time injected into the system prompt at the start of every invocation by
+   `render_prompt_time_fields` in `src/agent/tools/clock.py`.
+2. The user's local time, rendered using the IANA timezone in `USER_TIMEZONE` (default `UTC`).
+3. A `get_current_time` tool the agent can call mid-conversation to re-anchor "now" — returns UTC ISO timestamp,
+   UTC epoch seconds, weekday, today's date, and the user's local time.
+4. An explicit "Computing Elapsed Time and Durations" section in the system prompt that mandates epoch-second
+   subtraction and forbids deriving duration from day-of-week reasoning, with cross-check rules that catch
+   weekday/elapsed-hours disagreement.
+5. Per-turn UTC timestamps in the replayed conversation history (`format_history_as_prompt`), so a stale
+   "X hours ago" claim from an earlier turn is anchored to the time it was uttered rather than treated as
+   if it were spoken now.
+
 ## MCP Server Endpoint
 
 The assistant optionally exposes its SRE tools as a Streamable HTTP MCP server at `/mcp`, allowing MCP clients (Claude

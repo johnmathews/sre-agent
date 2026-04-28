@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # SDK/Anthropic path only — adds as an external MCP server alongside SRE tools.
     documentation_mcp_url: str = ""
 
+    # User's local timezone (IANA name, e.g. "Europe/Madrid", "America/Los_Angeles").
+    # Used by the system prompt and the get_current_time tool so the agent can render
+    # "now" in the user's local clock without having to guess the offset.
+    user_timezone: str = "UTC"
+
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""
     pbs_api_token: str = ""

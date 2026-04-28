@@ -260,11 +260,33 @@ def load_turns_as_langchain_messages(
     return messages
 
 
+def _format_turn_timestamp(raw: str) -> str:
+    """Render an ISO timestamp as 'YYYY-MM-DD HH:MM UTC' for inline display.
+
+    Returns an empty string for missing or unparseable values, so callers
+    can tolerate legacy turns that lack timestamps.
+    """
+    if not raw:
+        return ""
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def format_history_as_prompt(turns: list[Turn], new_message: str) -> str:
     """Format prior turns + new user message into a single prompt string.
 
     Used by the SDK path (stateless subprocesses) to stuff prior context
     into each query. Keeps the last ``_MAX_HISTORY_TURNS`` pairs.
+
+    Each turn is annotated with its ISO timestamp so the agent can ground
+    duration claims against when the turn actually happened — without this,
+    a stale "X hours ago" claim from a prior turn looks current, compounding
+    any earlier arithmetic mistake.
     """
     recent = turns[-_MAX_HISTORY_TURNS * 2 :] if len(turns) > _MAX_HISTORY_TURNS * 2 else turns
     if not recent:
@@ -274,10 +296,12 @@ def format_history_as_prompt(turns: list[Turn], new_message: str) -> str:
     for turn in recent:
         role = turn.get("role", "user")
         content = turn.get("content", "")
-        if role == "user":
-            parts.append(f"Human: {content}")
+        ts_label = _format_turn_timestamp(turn.get("timestamp", ""))
+        prefix = "Human" if role == "user" else "Assistant"
+        if ts_label:
+            parts.append(f"{prefix} [{ts_label}]: {content}")
         else:
-            parts.append(f"Assistant: {content}")
+            parts.append(f"{prefix}: {content}")
     parts.append("</conversation_history>")
     parts.append("")
     parts.append(f"Human: {new_message}")

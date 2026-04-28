@@ -194,6 +194,7 @@ Create a `.env` file on the deployment host. See `.env.example` for the full lis
 | `EXTRA_DOCS_DIRS`     | Additional RAG doc directories (comma-separated absolute paths) |
 | `CONVERSATION_HISTORY_HOST_DIR` | Host path for conversation JSON files (bind-mounted to `/app/conversations` in Docker) |
 | `REQUEST_TIMEOUT_SECONDS` | Timeout for `/ask` endpoint in seconds (default: 120). Requests exceeding this return HTTP 504 |
+| `USER_TIMEZONE`       | IANA timezone name used by the system prompt and the `get_current_time` tool to render the user's local clock (e.g. `Europe/Madrid`). Default `UTC` |
 
 All URLs must point to addresses reachable from inside the Docker container — see [Networking](#networking).
 

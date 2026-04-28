@@ -95,6 +95,7 @@ _SETTINGS_PATCH_SITES = [
     "src.agent.tools.loki.get_settings",
     "src.agent.tools.truenas.get_settings",
     "src.agent.tools.disk_status.get_settings",
+    "src.agent.tools.clock.get_settings",
     "src.agent.agent.get_settings",
     "src.agent.retrieval.embeddings.get_settings",
     "src.api.main.get_settings",
@@ -156,6 +157,7 @@ def _build_fake_settings(
         "truenas_ca_cert": "",
         "memory_db_path": "",
         "documentation_mcp_url": "",
+        "user_timezone": "UTC",
     }
 
     # Enable services that the case needs

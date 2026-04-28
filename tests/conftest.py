@@ -1,6 +1,7 @@
 """Shared pytest configuration and fixtures."""
 
 from collections.abc import Generator
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import patch
 
@@ -103,28 +104,34 @@ def mock_settings() -> Generator[Any]:
             "request_timeout_seconds": 120,
             # Documentation MCP server
             "documentation_mcp_url": "",
+            # User timezone (used by clock tool and prompt time fields)
+            "user_timezone": "UTC",
         },
     )()
-    with (
-        patch("src.config.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.prometheus.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.grafana_alerts.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.grafana_dashboards.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.proxmox.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.pbs.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.loki.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.truenas.get_settings", return_value=fake_settings),
-        patch("src.agent.agent.get_settings", return_value=fake_settings),
-        patch("src.agent.tools.disk_status.get_settings", return_value=fake_settings),
-        patch("src.agent.retrieval.embeddings.get_settings", return_value=fake_settings),
-        patch("src.api.main.get_settings", return_value=fake_settings),
-        patch("src.report.generator.get_settings", return_value=fake_settings),
-        patch("src.report.email.get_settings", return_value=fake_settings),
-        patch("src.report.scheduler.get_settings", return_value=fake_settings),
-        patch("src.memory.store.get_settings", return_value=fake_settings),
-        patch("src.memory.baselines.get_settings", return_value=fake_settings),
-        patch("src.agent.mcp_tools.get_settings", return_value=fake_settings),
-        patch("src.agent.sdk_agent.get_settings", return_value=fake_settings),
-        patch("src.api.mcp_server.get_settings", return_value=fake_settings),
-    ):
+    patch_sites = [
+        "src.config.get_settings",
+        "src.agent.tools.prometheus.get_settings",
+        "src.agent.tools.grafana_alerts.get_settings",
+        "src.agent.tools.grafana_dashboards.get_settings",
+        "src.agent.tools.proxmox.get_settings",
+        "src.agent.tools.pbs.get_settings",
+        "src.agent.tools.loki.get_settings",
+        "src.agent.tools.truenas.get_settings",
+        "src.agent.agent.get_settings",
+        "src.agent.tools.disk_status.get_settings",
+        "src.agent.tools.clock.get_settings",
+        "src.agent.retrieval.embeddings.get_settings",
+        "src.api.main.get_settings",
+        "src.report.generator.get_settings",
+        "src.report.email.get_settings",
+        "src.report.scheduler.get_settings",
+        "src.memory.store.get_settings",
+        "src.memory.baselines.get_settings",
+        "src.agent.mcp_tools.get_settings",
+        "src.agent.sdk_agent.get_settings",
+        "src.api.mcp_server.get_settings",
+    ]
+    with ExitStack() as stack:
+        for site in patch_sites:
+            stack.enter_context(patch(site, return_value=fake_settings))
         yield fake_settings

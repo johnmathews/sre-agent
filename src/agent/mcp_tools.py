@@ -528,6 +528,22 @@ def _pbs_tools() -> list[SdkMcpTool[Any]]:
     return tools
 
 
+def _clock_tools() -> list[SdkMcpTool[Any]]:
+    from src.agent.tools.clock import GetCurrentTimeInput, get_current_time
+
+    async def _now(_args: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(_call_sync_tool, get_current_time)
+
+    return [
+        SdkMcpTool(
+            name="get_current_time",
+            description=get_current_time.description,
+            input_schema=_schema_from_pydantic(GetCurrentTimeInput),
+            handler=_now,
+        )
+    ]
+
+
 def _runbook_tools() -> list[SdkMcpTool[Any]]:
     try:
         from src.agent.retrieval.runbooks import RunbookSearchInput, runbook_search
@@ -670,6 +686,7 @@ def build_mcp_server(settings: Settings | None = None) -> McpSdkServerConfig:
     tools: list[SdkMcpTool[Any]] = []
 
     # Always-on tools
+    tools.extend(_clock_tools())
     tools.extend(_prometheus_tools())
     tools.extend(_grafana_alert_tools())
     tools.extend(_grafana_dashboard_tools())

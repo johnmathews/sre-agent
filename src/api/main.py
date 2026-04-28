@@ -18,7 +18,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from starlette.responses import StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -60,6 +60,27 @@ class AskRequest(BaseModel):
 
     question: str
     session_id: str | None = None
+    # IANA timezone name from the user's device (e.g. the browser's
+    # ``Intl.DateTimeFormat().resolvedOptions().timeZone``). Optional —
+    # falls back to ``settings.user_timezone`` when omitted, which is what
+    # CLI clients, scheduled reports, and direct MCP callers do.
+    user_timezone: str | None = None
+
+    @field_validator("user_timezone")
+    @classmethod
+    def _validate_user_timezone(cls, value: str | None) -> str | None:
+        """Reject non-IANA values at the request boundary so clients fail fast."""
+        if value is None or value == "":
+            return None
+        from src.agent.tools.clock import is_valid_timezone
+
+        if not is_valid_timezone(value):
+            raise ValueError(
+                f"user_timezone={value!r} is not a valid IANA timezone. "
+                "Use a continent/city name like 'Europe/Amsterdam' or 'Asia/Seoul', "
+                "not an abbreviation like 'CEST' or a fixed offset."
+            )
+        return value
 
 
 class AskResponse(BaseModel):
@@ -298,17 +319,20 @@ async def ask(request: AskRequest) -> AskResponse:
     REQUESTS_IN_PROGRESS.labels(endpoint="/ask").inc()
     start = time.monotonic()
 
+    from src.agent.tools.clock import request_user_timezone
+
     try:
-        coro = invoke_agent(
-            app.state.agent,
-            request.question,
-            session_id=session_id,
-        )
-        timeout = settings.request_timeout_seconds
-        if timeout > 0:
-            response = await asyncio.wait_for(coro, timeout=timeout)
-        else:
-            response = await coro
+        with request_user_timezone(request.user_timezone):
+            coro = invoke_agent(
+                app.state.agent,
+                request.question,
+                session_id=session_id,
+            )
+            timeout = settings.request_timeout_seconds
+            if timeout > 0:
+                response = await asyncio.wait_for(coro, timeout=timeout)
+            else:
+                response = await coro
     except TimeoutError:
         duration = time.monotonic() - start
         REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
@@ -344,20 +368,23 @@ async def ask_stream(request: AskRequest) -> StreamingResponse:
     REQUESTS_IN_PROGRESS.labels(endpoint="/ask").inc()
     start = time.monotonic()
 
+    from src.agent.tools.clock import request_user_timezone
+
     async def event_generator() -> AsyncIterator[str]:
         try:
-            raw_events = stream_agent(
-                app.state.agent,
-                request.question,
-                session_id=session_id,
-            )
-            async for event in _with_heartbeats(raw_events):
-                yield f"data: {json.dumps(event)}\n\n"
+            with request_user_timezone(request.user_timezone):
+                raw_events = stream_agent(
+                    app.state.agent,
+                    request.question,
+                    session_id=session_id,
+                )
+                async for event in _with_heartbeats(raw_events):
+                    yield f"data: {json.dumps(event)}\n\n"
 
-                if event.get("type") == "answer":
-                    REQUESTS_TOTAL.labels(endpoint="/ask", status="success").inc()
-                elif event.get("type") == "error":
-                    REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
+                    if event.get("type") == "answer":
+                        REQUESTS_TOTAL.labels(endpoint="/ask", status="success").inc()
+                    elif event.get("type") == "error":
+                        REQUESTS_TOTAL.labels(endpoint="/ask", status="error").inc()
         except Exception as exc:
             logger.exception("Streaming agent invocation failed")
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"

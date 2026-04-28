@@ -32,11 +32,18 @@ Both the LangGraph (OpenAI) and SDK (Anthropic) paths write the same shape:
   "model": "gpt-4o-mini",
   "provider": "openai",
   "turns": [
-    {"role": "user", "content": "...", "timestamp": "..."},
-    {"role": "assistant", "content": "...", "timestamp": "..."}
+    {"role": "user", "content": "...", "timestamp": "...", "user_timezone": "Europe/Amsterdam"},
+    {"role": "assistant", "content": "...", "timestamp": "...", "user_timezone": "Europe/Amsterdam"}
   ]
 }
 ```
+
+`user_timezone` is the IANA timezone the user was in when the turn happened (read from the device on each
+`/ask/stream` request, falling back to the `USER_TIMEZONE` env var when the client did not send one). The
+field is optional — turns saved before the per-request timezone feature shipped do not have it, and turns
+where neither the request nor the env var supplied a tz simply omit it. This means a user travelling
+mid-conversation will have different `user_timezone` values on different turns, which is the correct
+record of what happened.
 
 | Field          | Description |
 |----------------|-------------|

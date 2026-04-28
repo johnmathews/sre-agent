@@ -307,9 +307,12 @@ async def invoke_sdk_agent(
     if suggestion:
         response_text += suggestion
 
-    # Save conversation history
+    # Save conversation history (with the timezone the user was in for this request)
     if settings.conversation_history_dir:
+        from src.agent.tools.clock import effective_timezone
+
         model_name = options.model or settings.anthropic_model
+        tz = effective_timezone(settings)
         save_turn(
             settings.conversation_history_dir,
             session_id,
@@ -317,6 +320,7 @@ async def invoke_sdk_agent(
             message,
             model_name,
             "anthropic",
+            user_timezone=tz,
         )
         save_turn(
             settings.conversation_history_dir,
@@ -325,6 +329,7 @@ async def invoke_sdk_agent(
             response_text,
             model_name,
             "anthropic",
+            user_timezone=tz,
         )
 
     return response_text
@@ -497,9 +502,12 @@ async def stream_sdk_agent(
     if suggestion:
         response_text += suggestion
 
-    # Save conversation
+    # Save conversation (with the timezone the user was in for this request)
     if settings.conversation_history_dir:
+        from src.agent.tools.clock import effective_timezone
+
         model_name = options.model or settings.anthropic_model
+        tz = effective_timezone(settings)
         save_turn(
             settings.conversation_history_dir,
             session_id,
@@ -507,6 +515,7 @@ async def stream_sdk_agent(
             message,
             model_name,
             "anthropic",
+            user_timezone=tz,
         )
         save_turn(
             settings.conversation_history_dir,
@@ -515,6 +524,7 @@ async def stream_sdk_agent(
             response_text,
             model_name,
             "anthropic",
+            user_timezone=tz,
         )
 
     yield {"type": "answer", "content": response_text, "session_id": session_id}

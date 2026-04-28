@@ -108,6 +108,42 @@ class TestSaveTurn:
         data = _read(filepath)
         assert data["title"] == ""
 
+    def test_persists_user_timezone_when_provided(self, tmp_path: Any) -> None:
+        history_dir = str(tmp_path)
+        save_turn(history_dir, "s1", "user", "q", "m", "anthropic", user_timezone="Asia/Seoul")
+        save_turn(history_dir, "s1", "assistant", "a", "m", "anthropic", user_timezone="Asia/Seoul")
+
+        filepath = _find_session_file(history_dir, "s1")
+        data = _read(filepath)
+        assert data["turns"][0]["user_timezone"] == "Asia/Seoul"
+        assert data["turns"][1]["user_timezone"] == "Asia/Seoul"
+
+    def test_omits_user_timezone_when_none(self, tmp_path: Any) -> None:
+        history_dir = str(tmp_path)
+        save_turn(history_dir, "s1", "user", "q", "m", "openai", user_timezone=None)
+
+        filepath = _find_session_file(history_dir, "s1")
+        data = _read(filepath)
+        # backward-compat: don't pollute legacy history files with empty fields
+        assert "user_timezone" not in data["turns"][0]
+
+    def test_different_turns_can_have_different_timezones(self, tmp_path: Any) -> None:
+        """When the user travels mid-conversation, each turn records its own tz."""
+        history_dir = str(tmp_path)
+        save_turn(history_dir, "s1", "user", "q1 from home", "m", "anthropic", user_timezone="Europe/Amsterdam")
+        save_turn(history_dir, "s1", "assistant", "a1", "m", "anthropic", user_timezone="Europe/Amsterdam")
+        save_turn(history_dir, "s1", "user", "q2 from seoul", "m", "anthropic", user_timezone="Asia/Seoul")
+        save_turn(history_dir, "s1", "assistant", "a2", "m", "anthropic", user_timezone="Asia/Seoul")
+
+        filepath = _find_session_file(history_dir, "s1")
+        data = _read(filepath)
+        assert [t.get("user_timezone") for t in data["turns"]] == [
+            "Europe/Amsterdam",
+            "Europe/Amsterdam",
+            "Asia/Seoul",
+            "Asia/Seoul",
+        ]
+
     def test_preserves_created_at_across_saves(self, tmp_path: Any) -> None:
         history_dir = str(tmp_path)
         save_turn(history_dir, "s1", "user", "q1", "m", "openai")

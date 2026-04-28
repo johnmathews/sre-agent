@@ -36,7 +36,7 @@ class TestResolveTimezone:
 class TestFormatNow:
     def test_returns_all_keys(self) -> None:
         now = datetime(2026, 4, 28, 8, 1, 0, tzinfo=UTC)
-        out = _format_now(_FakeSettings("UTC"), now)
+        out = _format_now("UTC", now)
         for key in (
             "utc_iso",
             "utc_epoch",
@@ -51,14 +51,14 @@ class TestFormatNow:
     def test_weekday_is_correct(self) -> None:
         # 2026-04-27 is a Monday — this is the date that previously confused the agent
         monday = datetime(2026, 4, 27, 21, 58, 19, tzinfo=UTC)
-        assert _format_now(_FakeSettings(), monday)["weekday"] == "Monday"
+        assert _format_now("UTC", monday)["weekday"] == "Monday"
 
         tuesday = datetime(2026, 4, 28, 8, 1, 0, tzinfo=UTC)
-        assert _format_now(_FakeSettings(), tuesday)["weekday"] == "Tuesday"
+        assert _format_now("UTC", tuesday)["weekday"] == "Tuesday"
 
     def test_local_time_uses_user_timezone(self) -> None:
         now = datetime(2026, 4, 28, 8, 1, 0, tzinfo=UTC)
-        out = _format_now(_FakeSettings("Europe/Madrid"), now)
+        out = _format_now("Europe/Madrid", now)
         # Madrid is UTC+2 in late April (CEST)
         assert "10:01" in out["user_local_human"]
         assert "Tuesday" in out["user_local_human"]
@@ -67,7 +67,7 @@ class TestFormatNow:
     def test_utc_epoch_matches_input(self) -> None:
         now = datetime(2026, 4, 27, 21, 58, 19, tzinfo=UTC)
         # 1777327099 is the documented boot epoch from the production conversation
-        assert _format_now(_FakeSettings(), now)["utc_epoch"] == 1777327099
+        assert _format_now("UTC", now)["utc_epoch"] == 1777327099
 
 
 class TestRenderPromptTimeFields:
@@ -129,6 +129,87 @@ class TestGetCurrentTimeTool:
             mock_dt.now.return_value = datetime(2026, 4, 27, 21, 58, 19, tzinfo=UTC)
             result = get_current_time.func()
         assert "1777327099" in result
+
+
+class TestPerRequestTimezoneOverride:
+    """The contextvar set by request_user_timezone() wins over settings."""
+
+    def test_no_override_falls_back_to_settings(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import effective_timezone
+
+        # mock_settings sets user_timezone='UTC'
+        assert effective_timezone() == "UTC"
+
+    def test_override_wins_over_settings(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import effective_timezone, request_user_timezone
+
+        with request_user_timezone("Asia/Seoul"):
+            assert effective_timezone() == "Asia/Seoul"
+        # contextvar resets after the with-block
+        assert effective_timezone() == "UTC"
+
+    def test_render_prompt_time_fields_uses_override(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import render_prompt_time_fields, request_user_timezone
+
+        with patch("src.agent.tools.clock.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 28, 8, 1, 0, tzinfo=UTC)
+            with request_user_timezone("Asia/Seoul"):
+                fields = render_prompt_time_fields()
+        # Seoul is UTC+9 → 17:01 local
+        assert "17:01" in fields["current_local_time"]
+        assert fields["user_timezone"] == "Asia/Seoul"
+
+    def test_get_current_time_tool_uses_override(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import request_user_timezone
+
+        with patch("src.agent.tools.clock.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 28, 8, 1, 0, tzinfo=UTC)
+            with request_user_timezone("Asia/Seoul"):
+                result = get_current_time.func()
+        assert "Asia/Seoul" in result
+        assert "17:01" in result
+
+    def test_none_override_does_nothing(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import effective_timezone, request_user_timezone
+
+        with request_user_timezone(None):
+            assert effective_timezone() == "UTC"
+
+    def test_nested_overrides_restore_correctly(self, mock_settings: object) -> None:
+        from src.agent.tools.clock import effective_timezone, request_user_timezone
+
+        with request_user_timezone("Europe/Amsterdam"):
+            assert effective_timezone() == "Europe/Amsterdam"
+            with request_user_timezone("Asia/Seoul"):
+                assert effective_timezone() == "Asia/Seoul"
+            assert effective_timezone() == "Europe/Amsterdam"
+        assert effective_timezone() == "UTC"
+
+
+class TestIsValidTimezone:
+    def test_accepts_iana(self) -> None:
+        from src.agent.tools.clock import is_valid_timezone
+
+        assert is_valid_timezone("Europe/Amsterdam") is True
+        assert is_valid_timezone("Asia/Seoul") is True
+        assert is_valid_timezone("UTC") is True
+
+    def test_rejects_short_abbreviation(self) -> None:
+        from src.agent.tools.clock import is_valid_timezone
+
+        # CEST/PDT are not in the IANA tz database (they are wall-clock
+        # abbreviations, not zones). Note: 'EST' and 'GMT' historically ship
+        # in the tzdata package as fixed-offset aliases, so we don't test
+        # rejection of those — the contract is "CEST and similar must fail."
+        assert is_valid_timezone("CEST") is False
+        assert is_valid_timezone("PDT") is False
+        assert is_valid_timezone("BST") is False
+
+    def test_rejects_offset(self) -> None:
+        from src.agent.tools.clock import is_valid_timezone
+
+        assert is_valid_timezone("+02:00") is False
+        assert is_valid_timezone("-08:00") is False
 
 
 class TestUserTimezoneSettingValidation:

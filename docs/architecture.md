@@ -184,6 +184,30 @@ failure modes the agent is given:
    "X hours ago" claim from an earlier turn is anchored to the time it was uttered rather than treated as
    if it were spoken now.
 
+### Per-Request User Timezone
+
+`POST /ask` and `POST /ask/stream` accept an optional `user_timezone` field in the JSON body — an IANA name
+the client read from the user's device (the webapp uses `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+This lets a travelling user get answers in the timezone they are currently in without redeploying with a
+new `USER_TIMEZONE` env var.
+
+Implementation:
+
+1. `AskRequest._validate_user_timezone` (`src/api/main.py`) calls `is_valid_timezone()` to reject non-IANA
+   values (e.g. `"CEST"`, `"+02:00"`) at the boundary with HTTP 422.
+2. The handler wraps the agent invocation in `request_user_timezone(tz)`, a context manager that sets a
+   `ContextVar` for the duration of the request. ContextVars propagate across `async/await` within a task,
+   so both the system-prompt build and any `get_current_time` tool calls during the agent loop see the
+   same value.
+3. `effective_timezone(settings)` returns the contextvar override when set, falling back to
+   `settings.user_timezone`. Both `render_prompt_time_fields` and the `get_current_time` tool consume it.
+4. Each saved turn records `user_timezone` in the conversation history JSON (optional field, backward
+   compatible with pre-feature data). When a user travels mid-conversation, each turn captures the zone
+   it actually happened in.
+
+Clients without `Intl` support, CLI callers, scheduled reports, and direct MCP callers omit the field and
+the agent falls back to the deployment default.
+
 ## MCP Server Endpoint
 
 The assistant optionally exposes its SRE tools as a Streamable HTTP MCP server at `/mcp`, allowing MCP clients (Claude

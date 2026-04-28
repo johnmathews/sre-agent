@@ -437,7 +437,10 @@ async def _invoke_langgraph_agent(
         response_text += suggestion
 
     if settings.conversation_history_dir:
+        from src.agent.tools.clock import effective_timezone
+
         active_model = settings.openai_model
+        tz = effective_timezone(settings)
         save_turn(
             settings.conversation_history_dir,
             effective_session_id,
@@ -445,6 +448,7 @@ async def _invoke_langgraph_agent(
             message,
             active_model,
             "openai",
+            user_timezone=tz,
         )
         save_turn(
             settings.conversation_history_dir,
@@ -453,6 +457,7 @@ async def _invoke_langgraph_agent(
             response_text,
             active_model,
             "openai",
+            user_timezone=tz,
         )
 
     return response_text
@@ -663,7 +668,10 @@ async def _stream_langgraph_agent(
     response_text_final = response_text + suggestion if suggestion else response_text
 
     if settings.conversation_history_dir and all_messages:
+        from src.agent.tools.clock import effective_timezone
+
         active_model = settings.openai_model
+        tz = effective_timezone(settings)
         save_turn(
             settings.conversation_history_dir,
             effective_session_id,
@@ -671,6 +679,7 @@ async def _stream_langgraph_agent(
             message,
             active_model,
             "openai",
+            user_timezone=tz,
         )
         save_turn(
             settings.conversation_history_dir,
@@ -679,6 +688,7 @@ async def _stream_langgraph_agent(
             response_text_final,
             active_model,
             "openai",
+            user_timezone=tz,
         )
 
     yield {

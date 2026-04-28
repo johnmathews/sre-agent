@@ -367,6 +367,79 @@ class TestAskStreamEndpoint:
         resp = client.post("/ask/stream", json={})
         assert resp.status_code == 422
 
+    @pytest.mark.integration
+    def test_user_timezone_sets_contextvar_for_agent(self, client: TestClient) -> None:
+        """A request-supplied user_timezone is exposed via effective_timezone()."""
+        from src.agent.tools.clock import effective_timezone
+
+        observed: list[str] = []
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            observed.append(effective_timezone())
+            yield {"type": "answer", "content": "ok", "session_id": "s1"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "what time is it?", "user_timezone": "Asia/Seoul"},
+            )
+
+        assert resp.status_code == 200
+        assert observed == ["Asia/Seoul"]
+
+    @pytest.mark.integration
+    def test_user_timezone_falls_back_when_omitted(self, client: TestClient) -> None:
+        """Omitting user_timezone falls back to settings.user_timezone (UTC in mocks)."""
+        from src.agent.tools.clock import effective_timezone
+
+        observed: list[str] = []
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            observed.append(effective_timezone())
+            yield {"type": "answer", "content": "ok", "session_id": "s1"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post("/ask/stream", json={"question": "what time?"})
+
+        assert resp.status_code == 200
+        assert observed == ["UTC"]
+
+    @pytest.mark.integration
+    def test_invalid_user_timezone_returns_422(self, client: TestClient) -> None:
+        resp = client.post(
+            "/ask/stream",
+            json={"question": "x", "user_timezone": "CEST"},
+        )
+        assert resp.status_code == 422
+        assert "IANA" in resp.text
+
+    @pytest.mark.integration
+    def test_offset_user_timezone_returns_422(self, client: TestClient) -> None:
+        resp = client.post(
+            "/ask/stream",
+            json={"question": "x", "user_timezone": "+02:00"},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.integration
+    def test_empty_string_user_timezone_treated_as_unset(self, client: TestClient) -> None:
+        from src.agent.tools.clock import effective_timezone
+
+        observed: list[str] = []
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            observed.append(effective_timezone())
+            yield {"type": "answer", "content": "ok", "session_id": "s1"}
+
+        with patch("src.api.main.stream_agent", return_value=fake_stream()):
+            resp = client.post(
+                "/ask/stream",
+                json={"question": "x", "user_timezone": ""},
+            )
+
+        assert resp.status_code == 200
+        assert observed == ["UTC"]
+
 
 # ---------------------------------------------------------------------------
 # GET /conversations, GET/DELETE/PATCH /conversations/{id}

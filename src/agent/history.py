@@ -44,12 +44,19 @@ _MAX_TITLE_CHARS = 60
 _MIGRATION_MARKER = ".unified-format-v1"
 
 
-class Turn(TypedDict):
-    """Single conversation turn."""
+class Turn(TypedDict, total=False):
+    """Single conversation turn.
+
+    Required keys: ``role``, ``content``, ``timestamp``.
+    Optional ``user_timezone``: IANA timezone the conversation happened in
+    (the device's tz at request time, or the deployment default when the
+    client didn't send one). Absent on turns saved before this field existed.
+    """
 
     role: str
     content: str
     timestamp: str
+    user_timezone: str
 
 
 class ConversationMetadata(TypedDict):
@@ -133,6 +140,7 @@ def save_turn(
     model: str,
     provider: str,
     timestamp: str | None = None,
+    user_timezone: str | None = None,
 ) -> None:
     """Append a single turn to the conversation file. Never raises.
 
@@ -148,9 +156,12 @@ def save_turn(
         model: LLM model name.
         provider: "openai" or "anthropic".
         timestamp: ISO8601 timestamp; defaults to now.
+        user_timezone: IANA timezone the user was in when this turn happened.
+            ``None`` skips the field, preserving backward compatibility with
+            existing history files.
     """
     try:
-        _save_turn_inner(history_dir, session_id, role, content, model, provider, timestamp)
+        _save_turn_inner(history_dir, session_id, role, content, model, provider, timestamp, user_timezone)
     except Exception:
         logger.exception("Failed to save turn for session '%s'", session_id)
 
@@ -163,6 +174,7 @@ def _save_turn_inner(
     model: str,
     provider: str,
     timestamp: str | None,
+    user_timezone: str | None,
 ) -> None:
     if not _validate_session_id_path_safe(session_id):
         logger.warning("Rejecting unsafe session_id: %r", session_id)
@@ -171,6 +183,8 @@ def _save_turn_inner(
     os.makedirs(history_dir, exist_ok=True)
     ts = timestamp or _now_iso()
     new_turn: Turn = {"role": role, "content": content, "timestamp": ts}
+    if user_timezone:
+        new_turn["user_timezone"] = user_timezone
 
     existing_path = _find_existing_file(history_dir, session_id)
 

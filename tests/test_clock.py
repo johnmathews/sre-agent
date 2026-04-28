@@ -129,3 +129,32 @@ class TestGetCurrentTimeTool:
             mock_dt.now.return_value = datetime(2026, 4, 27, 21, 58, 19, tzinfo=UTC)
             result = get_current_time.func()
         assert "1777327099" in result
+
+
+class TestUserTimezoneSettingValidation:
+    """Reject non-IANA values at startup so DST is handled automatically."""
+
+    @staticmethod
+    def _build_settings(tz: str) -> object:
+        from src.config import Settings
+
+        return Settings(
+            llm_provider="openai",
+            openai_api_key="sk-test",
+            prometheus_url="http://x:9090",
+            grafana_url="http://x:3000",
+            grafana_service_account_token="x",
+            user_timezone=tz,
+        )
+
+    def test_rejects_short_abbreviation(self) -> None:
+        with pytest.raises(ValueError, match="not a valid IANA timezone"):
+            self._build_settings("CEST")
+
+    def test_rejects_fixed_offset(self) -> None:
+        with pytest.raises(ValueError, match="not a valid IANA timezone"):
+            self._build_settings("+02:00")
+
+    def test_accepts_iana_name(self) -> None:
+        s = self._build_settings("Europe/Amsterdam")
+        assert s.user_timezone == "Europe/Amsterdam"  # type: ignore[attr-defined]

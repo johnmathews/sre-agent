@@ -1,8 +1,9 @@
 import os
 from functools import lru_cache
 from typing import ClassVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +82,21 @@ class Settings(BaseSettings):
     pbs_ca_cert: str = ""
     pbs_node: str = "localhost"
     pbs_default_datastore: str = ""
+
+    @field_validator("user_timezone")
+    @classmethod
+    def _validate_user_timezone(cls, value: str) -> str:
+        """Reject non-IANA values like 'CEST' so DST is handled automatically."""
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as e:
+            raise ValueError(
+                f"USER_TIMEZONE={value!r} is not a valid IANA timezone. "
+                "Use a continent/city name like 'Europe/Amsterdam' or 'Asia/Seoul', "
+                "not an abbreviation like 'CEST' or a fixed offset. See "
+                "https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+            ) from e
+        return value
 
     @model_validator(mode="after")
     def _validate_provider_keys(self) -> "Settings":

@@ -557,6 +557,13 @@ docker-compose.yml
 The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. Run it explicitly
 with `docker compose run --rm sre-ingest`.
 
+Both services run as uid/gid **1001:1001** (baked into the image via `USER 1001:1001` in the Dockerfile). They share
+the `chroma_data` volume, so matching uids matter: chromadb 1.x opens the persisted sqlite read-write even on read paths
+(WAL/journal), so if `sre-ingest` writes the volume as a different uid than `sre-agent`, the runtime fails with
+`"attempt to write a readonly database"` and the langchain wrapper surfaces a misleading "tenant default_tenant" error.
+If you ever need to migrate from a root-owned volume, run `chown -R 1001:1001` on the host volume mountpoint and then
+re-ingest.
+
 See the [README — Deploying with Docker](../readme.md#deploying-with-docker) for full setup instructions including how to
 merge into an existing compose stack.
 

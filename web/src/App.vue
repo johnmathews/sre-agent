@@ -32,13 +32,26 @@ function checkMobile() {
   }
 }
 
+// Drives the app's --vvh CSS var from visualViewport so the layout shrinks
+// when the iOS keyboard opens, keeping the composer above the keyboard.
+function updateViewportHeight() {
+  const vv = window.visualViewport
+  const h = vv ? vv.height : window.innerHeight
+  document.documentElement.style.setProperty('--vvh', `${h}px`)
+}
+
 onMounted(() => {
   checkMobile()
+  updateViewportHeight()
   window.addEventListener('resize', checkMobile)
+  window.visualViewport?.addEventListener('resize', updateViewportHeight)
+  window.visualViewport?.addEventListener('scroll', updateViewportHeight)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  window.visualViewport?.removeEventListener('resize', updateViewportHeight)
+  window.visualViewport?.removeEventListener('scroll', updateViewportHeight)
   document.removeEventListener('mousemove', onDrag)
   document.removeEventListener('mouseup', stopDrag)
 })
@@ -81,7 +94,11 @@ function stopDrag() {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen overflow-hidden" :class="{ 'select-none': isDragging }">
+  <div
+    class="flex w-screen overflow-hidden"
+    :class="{ 'select-none': isDragging }"
+    :style="{ height: 'var(--vvh, 100dvh)' }"
+  >
     <!-- Mobile overlay backdrop -->
     <div
       v-if="isMobile && sidebarOpen"

@@ -23,6 +23,59 @@ body {
   color-scheme: dark;
 }
 
+/* iOS Safari auto-zooms when a focused input renders below 16px. Force >=16px
+   on all form controls so we never trigger that zoom. */
+input,
+textarea,
+select {
+  font-size: max(16px, 1rem);
+}
+
+/* Composer bar — respect iPhone safe areas. The 1rem horizontal floor keeps
+   the Send button clear of the screen's rounded corner curve in portrait, where
+   safe-area-inset-right is 0 but the corner radius (~47pt) still clips content
+   placed within ~12px of the edge. */
+.composer-area {
+  padding-inline-start: max(1rem, env(safe-area-inset-left));
+  padding-inline-end: max(1rem, env(safe-area-inset-right));
+  padding-block-start: 0.5rem;
+  padding-block-end: max(0.75rem, env(safe-area-inset-bottom));
+}
+@media (min-width: 640px) {
+  .composer-area {
+    padding-inline-start: max(1.5rem, env(safe-area-inset-left));
+    padding-inline-end: max(1.5rem, env(safe-area-inset-right));
+    padding-block-start: 0.75rem;
+    padding-block-end: max(0.75rem, env(safe-area-inset-bottom));
+  }
+}
+
+/* Mobile header — clear the iOS status bar when viewport-fit=cover is on. */
+.app-header-mobile {
+  padding-inline-start: max(1rem, env(safe-area-inset-left));
+  padding-inline-end: max(1rem, env(safe-area-inset-right));
+  padding-block-start: max(0.5rem, env(safe-area-inset-top));
+  padding-block-end: 0.5rem;
+}
+
+/* Chat scroll area — match composer/header insets so messages don't run into
+   the curved screen edges on iPhone (esp. landscape, where safe-area-inset-left/
+   right become non-zero). */
+.chat-scroll-area {
+  padding-inline-start: max(1rem, env(safe-area-inset-left));
+  padding-inline-end: max(1rem, env(safe-area-inset-right));
+  padding-block-start: 0.75rem;
+  padding-block-end: 0.75rem;
+}
+@media (min-width: 640px) {
+  .chat-scroll-area {
+    padding-inline-start: max(1.5rem, env(safe-area-inset-left));
+    padding-inline-end: max(1.5rem, env(safe-area-inset-right));
+    padding-block-start: 1rem;
+    padding-block-end: 1rem;
+  }
+}
+
 /* Markdown content styling — applied to any element with .markdown */
 .markdown {
   line-height: 1.55;

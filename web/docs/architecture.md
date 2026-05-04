@@ -117,3 +117,27 @@ with `dark:` variants throughout — no design tokens yet.
 The `.markdown` class in `src/style.css` handles LLM-rendered chat content
 (headings, lists, code blocks, tables). This is the one place where we
 style HTML we did not author.
+
+## Mobile / iOS layout
+
+The app is used heavily on iPhone in portrait, so several pieces of the
+layout exist specifically to keep the iOS experience clean:
+
+- **Viewport meta tag** uses `viewport-fit=cover` so `env(safe-area-inset-*)`
+  returns non-zero on iPhones with a Dynamic Island / home indicator.
+- **`.composer-area`, `.app-header-mobile`, `.chat-scroll-area`** in
+  `src/style.css` apply `max(<floor>, env(safe-area-inset-*))` for
+  horizontal/vertical padding. The 1rem horizontal floor is what keeps the
+  Send button (and other corner content) clear of the iPhone screen's
+  rounded-corner curve in portrait, where `safe-area-inset-right` is 0.
+- **Input font-size is forced to ≥16px** on all `input`/`textarea`/`select`,
+  which prevents iOS Safari's auto-zoom on focus.
+- **Root container height** binds to a `--vvh` CSS variable that `App.vue`
+  drives from `window.visualViewport`. This is what keeps the composer above
+  the iOS keyboard when it opens; plain `100vh` / `h-screen` would be hidden
+  behind the keyboard.
+
+Headless Chromium reports `env(safe-area-inset-*)` as 0, so the Playwright
+spec at `tests/e2e/ios-viewport.spec.ts` only validates the *floor* values
+from `max(<floor>, env(...))`. Verify on a real iPhone (or DevTools iOS
+device emulation at 390×844) when changing this layout.

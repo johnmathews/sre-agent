@@ -110,7 +110,7 @@ function handleKeydown(e: KeyboardEvent) {
     <!-- Mobile header bar -->
     <div
       v-if="isMobile"
-      class="flex items-center border-b border-gray-200 px-3 py-2 dark:border-gray-800"
+      class="app-header-mobile flex items-center border-b border-gray-200 dark:border-gray-800"
     >
       <button
         class="cursor-pointer rounded p-1.5 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
@@ -128,7 +128,7 @@ function handleKeydown(e: KeyboardEvent) {
     <!-- Scrollable message area -->
     <div
       ref="scrollContainer"
-      class="flex-1 overflow-y-auto px-3 py-3 sm:px-6 sm:py-4"
+      class="chat-scroll-area flex-1 overflow-y-auto"
     >
       <div
         v-if="!chat.hasMessages && !chat.isStreaming"
@@ -197,7 +197,7 @@ function handleKeydown(e: KeyboardEvent) {
     </div>
 
     <!-- Input area -->
-    <div class="border-t border-gray-200 bg-gray-50 px-3 py-2 sm:px-6 sm:py-3 dark:border-gray-800 dark:bg-gray-900">
+    <div class="composer-area border-t border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900">
       <form
         class="mx-auto flex max-w-3xl items-end gap-2"
         @submit.prevent="handleSubmit"

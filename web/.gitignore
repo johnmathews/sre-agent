@@ -20,6 +20,7 @@ dist-ssr
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+/.playwright-mcp/
 
 # Editor directories and files
 .vscode/*

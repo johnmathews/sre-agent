@@ -56,8 +56,12 @@ def runbook_search(query: str, num_results: int = DEFAULT_K) -> str:
         vector_store = load_vector_store()
         results = vector_store.similarity_search_with_relevance_scores(query, k=num_results)
     except Exception as e:
-        logger.error("Runbook search failed: %s", e)
-        return f"Runbook search failed: {e}. The vector store may need to be rebuilt with 'make ingest'."
+        logger.exception("Runbook search failed")
+        return (
+            f"Runbook search failed ({type(e).__name__}): {e}. "
+            "Likely causes: vector store not yet built (run 'make ingest'), "
+            "permission error on the persist directory, or a chromadb version mismatch."
+        )
 
     if not results:
         return (

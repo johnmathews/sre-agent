@@ -24,15 +24,26 @@ RUN uv sync --frozen --no-dev
 # Stage 2: runtime — slim image with just the venv + source
 FROM python:3.13-slim
 
+# Non-root user. uid/gid 1001 matches the ownership expected on the host-mounted
+# chroma_data, conversations, and .claude volumes. Both the API server and the
+# `make ingest` setup container run from this image, so baking the user in keeps
+# files written by ingest readable+writable by the runtime (chromadb 1.x opens
+# the sqlite read-write even on read paths, so a uid mismatch breaks RAG).
+RUN groupadd --system --gid 1001 app \
+ && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app
+
 WORKDIR /app
 
-# Copy the entire venv from the builder
-COPY --from=builder /app/.venv .venv/
+# Copy the entire venv from the builder, owned by the app user
+COPY --from=builder --chown=1001:1001 /app/.venv .venv/
 
-# Copy application code and data
-COPY --from=builder /app/src/ src/
-COPY --from=builder /app/scripts/ scripts/
-COPY --from=builder /app/runbooks/ runbooks/
+# Copy application code and data, owned by the app user
+COPY --from=builder --chown=1001:1001 /app/src/ src/
+COPY --from=builder --chown=1001:1001 /app/scripts/ scripts/
+COPY --from=builder --chown=1001:1001 /app/runbooks/ runbooks/
+
+# Ensure /app itself is owned by the app user (mount points and HOME=/app)
+RUN chown 1001:1001 /app
 
 # Put the venv on PATH so `python`, `uvicorn` resolve from it
 ENV PATH="/app/.venv/bin:$PATH"
@@ -41,6 +52,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 # The pip wheel includes it at _bundled/claude inside the package.
 # Ensure it has execute permission (some container runtimes strip it).
 RUN chmod +x .venv/lib/python*/site-packages/claude_agent_sdk/_bundled/claude 2>/dev/null || true
+
+USER 1001:1001
 
 EXPOSE 8000
 

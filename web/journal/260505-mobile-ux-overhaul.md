@@ -185,6 +185,71 @@ is the worse failure mode.
 `desktop-chromium`, `desktop-webkit`, `mobile-safari`, `mobile-chrome`.
 Production build clean (`vue-tsc -b && vite build`).
 
+## How this prevents the failure recurring
+
+The handoff itself can't be prevented — it's an iPhone OS event outside
+our code. What changed is the layered response when one happens.
+
+1. **Classify, don't generalise.** `src/api/stream.ts:53-122` defines
+   `StreamError` with a `category` enum and the reader loop tracks
+   `receivedAnyBytes`, so iOS Safari's opaque `TypeError: Load failed`
+   becomes `network-midstream` (vs `network-before-headers` etc.).
+   Before: any failure was an `Error` whose `.message` became
+   user-visible text. After: callers can route by category.
+
+2. **Recover the persisted answer before retrying.**
+   `src/api/streamWithRecovery.ts:101-123` (`tryRecoverPersistedAnswer`).
+   On `network-midstream`, the wrapper calls
+   `GET /conversations/:session_id` and walks persisted turns. If the
+   backend has an assistant turn whose preceding user turn matches our
+   question (which is exactly what happened in the triage — server had
+   already saved the 6,285-byte answer), we synthesise an `answer`
+   event from that turn. **The original failure mode now ends silently
+   with the correct answer, not an error.**
+
+3. **Auto-retry transient categories once.**
+   `src/api/streamWithRecovery.ts:43-99` retries `network-*` and
+   `http-5xx` once with 1s backoff. So a true transient (server hadn't
+   persisted yet, brief proxy blip) gets a silent second attempt. `4xx`
+   and `aborted` skip retry intentionally.
+
+4. **When everything above fails, surface something actionable.**
+   `src/components/ErrorBubble.vue` replaces the "fake assistant
+   bubble with `**Error:** Load failed`" pattern. Red border,
+   category-specific copy ("Connection dropped mid-reply"), an inline
+   Retry button that re-issues the question and removes the failed
+   bubble, plus a Details disclosure exposing category, status, and
+   raw `cause.message` for the technical user.
+
+5. **Cross-engine regression coverage.**
+   `tests/e2e/error-resilience.spec.ts` exercises every layer (SSE
+   error event, mid-stream-then-success-on-retry, mid-stream-with-
+   recovery, mid-stream-no-recovery, HTTP 503 retry, HTTP 401 no-retry,
+   Retry button, same-question-twice edge case). Runs on
+   `desktop-chromium`, `desktop-webkit`, `mobile-safari`, and
+   `mobile-chrome` so a Safari-specific quirk fails CI.
+
+### What this *doesn't* cover (honest trade-offs)
+
+1. Transport is unchanged — still POST + `ReadableStream`. A truly
+   handoff-proof design would use SSE with `Last-Event-ID` resumption
+   or chunked downloads with `Range` requests, but both require
+   backend changes beyond this PR's scope.
+2. `navigator.onLine` and `online`/`offline` listeners aren't wired
+   up. `onLine` is unreliable on iOS PWAs across Wi-Fi↔cellular
+   handoffs per Phase 1 research; the recovery + retry approach covers
+   the same ground more reliably.
+3. If the disconnect happens *before* the backend has finished
+   persisting the answer, recovery returns no match and the retry
+   re-issues the question — paying for a second LLM call. There's no
+   way around this without the backend signalling "answer-ready"
+   before closing the socket; out of scope here.
+
+The protection is the layering itself: the exact triage failure
+recovers silently because the answer was already on the server;
+variants get caught by the auto-retry; anything surviving both gets
+an actionable Retry instead of an opaque dead-end.
+
 ## Real-device verification needed
 
 Some bugs only manifest on a real iPhone PWA install. Before declaring

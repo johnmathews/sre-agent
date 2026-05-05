@@ -139,6 +139,78 @@ bytes. Recovering a persisted answer keeps the conversation coherent
 across iOS network handoffs, Cloudflare 100s idle timeouts, and similar
 mid-flight interruptions.
 
+### Layered resilience model — why it's designed this way
+
+A worked example: the iOS network handoff that motivated this layer.
+The user's iPhone switched IPv6 prefixes mid-stream during a 63-second
+agent reply. The backend completed and persisted the 6,285-byte answer;
+the client's `fetch()` socket died and surfaced
+`TypeError: Load failed`. The layered response below catches that case
+silently — and degrades gracefully to user-actionable failure for
+anything it can't recover.
+
+1. **Classification, not generalisation.** `streamAsk` distinguishes
+   `network-before-headers` (fetch rejected before any byte) from
+   `network-midstream` (rejected after some bytes) by tracking
+   `receivedAnyBytes` across the reader loop. They have different
+   recovery strategies — only midstream is worth checking the
+   conversations endpoint for, because the server only starts
+   responding after it has accepted the request. Mixing them would
+   waste a recovery call on every offline-tap.
+
+2. **Recovery before retry.** On `network-midstream` the wrapper
+   *first* calls `GET /conversations/:session_id` and looks for an
+   assistant turn whose preceding user turn matches the question we
+   just asked. If found, we synthesise an `answer` event from the
+   persisted text and surface it as if the stream had completed
+   normally. This is what makes the iOS-handoff case end silently
+   instead of with an error — the answer was already on the server,
+   we just needed to fetch it. Crucially, recovery is *cheaper* than
+   retry: no LLM call, no token spend, no agent rerun.
+
+3. **Retry as fallback.** If recovery turns up no match (the
+   disconnect happened before the backend finished persisting), we
+   retry the question once with a 1s backoff. `network-*` and
+   `http-5xx` are retried; `http-4xx`, `aborted`, and `sse-error-event`
+   are not — those are deterministic outcomes where retrying without
+   changes is wasteful.
+
+4. **Actionable failure surface.** When everything above is exhausted,
+   we render `ErrorBubble.vue` instead of a fake assistant bubble.
+   Category-specific heading, copy explaining what's likely wrong, an
+   inline Retry button that re-issues the same question (and removes
+   the failed bubble + duplicate user bubble so the conversation
+   reads cleanly post-recovery), and a Details disclosure for the
+   technical user.
+
+### Trade-offs deliberately accepted
+
+1. **Transport is still POST + `ReadableStream`.** A truly
+   handoff-proof design would use SSE with `Last-Event-ID` resumption
+   or chunked downloads with `Range` headers — both require backend
+   changes beyond the resilience layer's scope and a bigger protocol
+   commitment than the value justified.
+
+2. **`navigator.onLine` is not wired up.** It's unreliable on iOS
+   PWAs across Wi-Fi↔cellular handoffs (the failure mode we care
+   most about). Recovery + retry covers the same ground more
+   reliably than acting on a flaky online/offline event.
+
+3. **The retry path can double-charge if the backend hadn't
+   persisted yet.** If the disconnect lands between "agent finished
+   computing" and "answer written to DB", recovery returns no match
+   and the retry re-issues the question, costing a second LLM call.
+   There's no way around this without the backend signalling
+   "answer-ready" before closing the socket. Acceptable trade for a
+   rare narrow window.
+
+4. **Same-question deduplication is positional, not content-based.**
+   `retryMessage` removes the immediately-preceding user bubble, not
+   "the most recent user bubble whose content matches" — the latter
+   could splice intermediate history if the same question was asked
+   earlier. Tested by `tests/e2e/error-resilience.spec.ts` ›
+   "retry only removes the immediately-preceding user bubble".
+
 ### Implementation locations
 
 - `src/api/stream.ts` — `StreamError` class, low-level `streamAsk` generator.

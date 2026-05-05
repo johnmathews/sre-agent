@@ -74,27 +74,57 @@ parent-repo `CLAUDE.md`).
 
 ## iOS / mobile considerations
 
-The app is used heavily on iPhone in portrait. Several pieces of CSS and JS
-exist specifically to keep the iOS experience clean — be careful when touching
-these:
+Primary form factor is an **installed iOS PWA in portrait**. Several pieces
+of CSS, HTML, and JS exist specifically to keep the iOS experience clean —
+be careful when touching these:
 
-1. **`index.html`** has `viewport-fit=cover` — required for `env(safe-area-inset-*)`
-   to return non-zero values on iPhones with a home indicator / Dynamic Island.
-2. **`src/style.css`** defines `.composer-area` and `.app-header-mobile`. They
-   apply `max(<base>, env(safe-area-inset-*))` so the input bar clears the home
-   indicator and the header clears the status bar. If you restyle these regions
-   with raw Tailwind padding, you will re-introduce the curved-corner clip.
-3. **`src/style.css`** forces `font-size: max(16px, 1rem)` on `input/textarea/select`.
-   This prevents iOS Safari's auto-zoom on focus. Don't lower input font-size
-   below 16px.
-4. **`src/App.vue`** drives a `--vvh` CSS variable from `window.visualViewport`
-   and sets the root container height to `var(--vvh, 100dvh)`. This is what
-   keeps the composer above the iOS keyboard. Plain `100vh`/`h-screen` will
-   break this — keep using the var.
+1. **`index.html` PWA shell**. The manifest link, `apple-mobile-web-app-capable`,
+   `apple-mobile-web-app-status-bar-style="black-translucent"`,
+   `apple-touch-icon`, and `theme-color` tags are what make iOS launch
+   the home-screen bookmark in standalone mode. Without them
+   `env(safe-area-inset-*)` resolves to 0 and the title overlaps the
+   status bar. **Don't remove any of these tags.** Status-bar style
+   must stay `black-translucent` — the alternatives either reserve a
+   white strip or paint a black bar that fights the dark theme.
+2. **`index.html` viewport meta** has `viewport-fit=cover` — required
+   for `env(safe-area-inset-*)` to return non-zero values, on top of
+   the PWA shell tags.
+3. **`src/style.css`** defines `.composer-area`, `.app-header-mobile`,
+   and `.chat-scroll-area`. They apply
+   `max(<floor>, var(--safe-area-inset-*, env(safe-area-inset-*)))` so
+   the input bar clears the home indicator and the header clears the
+   status bar. The CSS-variable indirection lets tests in
+   `tests/e2e/helpers/pwa.ts` simulate notched insets without a real
+   device. If you restyle these regions with raw Tailwind padding,
+   you'll re-introduce the curved-corner clip.
+4. **`src/style.css`** forces `font-size: max(16px, 1rem)` on
+   `input/textarea/select`. This prevents iOS Safari's auto-zoom on
+   focus. Don't lower input font-size below 16px.
+5. **Root container uses `100dvh`** (`src/App.vue`). We *removed* the
+   old `--vvh` JS observer that drove a CSS variable from
+   `window.visualViewport`. `dvh` is Baseline Widely Available since
+   2025 and shrinks correctly when the keyboard opens. If you see
+   keyboard-overlap regressions on a future iOS, prefer adding a
+   feature-detected fallback over reverting to the JS observer.
+6. **Composer Enter behaviour is platform-aware** (`ChatWindow.vue#handleKeydown`).
+   On `(pointer: coarse)` Enter inserts a newline (mobile soft
+   keyboards have no Shift modifier for textareas; otherwise users
+   can't write multi-line lists). On desktop Enter submits and
+   Shift+Enter inserts. Cmd/Ctrl+Enter always submits. `enterkeyhint`
+   is `"send"`. Don't UA-sniff — the pointer-quality media query
+   correctly puts iPad with a hardware keyboard on the desktop path.
+7. **Markdown tables** are wrapped in `<div class="md-table-wrap">`
+   by `src/lib/markdown.ts` — `overflow-x: auto` on the wrap keeps
+   wide tables inside the bubble. The flex chain has `min-width: 0`
+   on `.markdown` so children can clip; **do not remove that rule**
+   or wide tables will burst through the bubble background again
+   (the desktop bug from the May 2026 evaluation).
 
-If you change the mobile layout, verify on a real iPhone (or at least at
-390×844 in DevTools with iOS device emulation). Headless Chromium reports
-`env(safe-area-inset-*)` as 0, so Playwright cannot fully validate insets.
+If you change the mobile layout, verify on a real iPhone PWA install.
+The Playwright suite covers a lot — including a simulated-inset test on
+all four projects — but device-only behaviour (real keyboard, real
+network handoff, real Dynamic Island) needs a real-device pass. See
+`docs/development.md` § "Mobile testing checklist".
 
 ## Conventions
 

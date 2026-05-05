@@ -1,13 +1,34 @@
 import { defineStore } from 'pinia'
 import { computed, ref, triggerRef } from 'vue'
-import { streamAsk, type StreamEvent } from '../api/stream'
+import {
+  streamWithRecovery,
+  type StreamEvent,
+  StreamError,
+} from '../api/streamWithRecovery'
+import type { StreamErrorCategory } from '../api/stream'
 import { getConversation, type ConversationSummary } from '../api/conversations'
 
 export type MessageRole = 'user' | 'assistant'
+export type MessageKind = 'normal' | 'error'
+
+export interface ChatMessageError {
+  /** What broke — drives the heading and copy in `ErrorBubble`. */
+  category: StreamErrorCategory | 'sse-error-event'
+  /** HTTP status if the failure had one. */
+  status?: number
+  /** Raw upstream message — shown inside the "Details" disclosure. */
+  causeMessage?: string
+  /** The user's question — used by the inline Retry button. */
+  originalQuestion: string
+}
 
 export interface ChatMessage {
   role: MessageRole
   content: string
+  /** Defaults to 'normal'. Errors render via `ErrorBubble`. */
+  kind?: MessageKind
+  /** Populated when `kind === 'error'`. */
+  error?: ChatMessageError
 }
 
 export interface CompletedTool {
@@ -21,7 +42,6 @@ export interface SessionStreamState {
   isStreaming: boolean
   currentStatus: string
   completedTools: CompletedTool[]
-  streamError: string | null
   abortController: AbortController | null
   toolStartTime: number // Date.now() when current tool started
 }
@@ -37,7 +57,6 @@ function createEmptySession(): SessionStreamState {
     isStreaming: false,
     currentStatus: '',
     completedTools: [],
-    streamError: null,
     abortController: null,
     toolStartTime: 0,
   }
@@ -79,9 +98,6 @@ export const useChatStore = defineStore('chat', () => {
   )
   const completedTools = computed<CompletedTool[]>(
     () => getOrCreateSession(activeSessionId.value).completedTools,
-  )
-  const streamError = computed<string | null>(
-    () => getOrCreateSession(activeSessionId.value).streamError,
   )
   const hasMessages = computed(
     () => getOrCreateSession(activeSessionId.value).messages.length > 0,
@@ -150,12 +166,12 @@ export const useChatStore = defineStore('chat', () => {
     s.messages = detail.turns.map((t) => ({
       role: (t.role === 'user' ? 'user' : 'assistant') as MessageRole,
       content: t.content,
+      kind: 'normal',
     }))
     // Reset streaming state for a freshly loaded conversation
     s.isStreaming = false
     s.currentStatus = ''
     s.completedTools = []
-    s.streamError = null
     activeSessionId.value = id
     triggerRef(sessions)
   }
@@ -189,24 +205,34 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!q || s.isStreaming) return
 
-    s.messages.push({ role: 'user', content: q })
+    s.messages.push({ role: 'user', content: q, kind: 'normal' })
 
     // Reset streaming state for this session
     s.isStreaming = true
     s.currentStatus = ''
     s.completedTools = []
-    s.streamError = null
     s.toolStartTime = 0
     triggerRef(sessions)
 
     const controller = new AbortController()
     s.abortController = controller
     let answer: string | null = null
+    let sseError: { content: string } | null = null
 
     try {
-      for await (const event of streamAsk(
+      for await (const event of streamWithRecovery(
         { question: q, session_id: id },
         controller.signal,
+        (status) => {
+          // Surface recovery state via the same channel that drives the
+          // ToolProgress spinner — keeps the user oriented during the
+          // silent retry / persisted-answer lookup.
+          s.currentStatus =
+            status === 'recovering'
+              ? 'Connection lost — checking for a saved answer…'
+              : 'Reconnecting…'
+          triggerRef(sessions)
+        },
       )) {
         handleEvent(id, event)
         if (event.type === 'answer') {
@@ -224,16 +250,31 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
         } else if (event.type === 'error') {
-          s.streamError = event.content || 'Unknown error'
+          sseError = { content: event.content || 'Backend reported an error' }
         }
         triggerRef(sessions)
       }
     } catch (err) {
-      if ((err as Error).name === 'AbortError') {
+      if (err instanceof DOMException && err.name === 'AbortError') {
         return
       }
-      s.streamError =
-        err instanceof Error ? err.message : 'Streaming failed'
+      const se = err instanceof StreamError ? err : null
+      // Keep the user bubble — the user can see what they asked. The error
+      // bubble appears below with a Retry that re-issues the question.
+      s.messages.push({
+        role: 'assistant',
+        content: '',
+        kind: 'error',
+        error: {
+          category: se?.category ?? 'network-before-headers',
+          status: se?.status,
+          causeMessage:
+            err instanceof Error ? err.message : String(err),
+          originalQuestion: q,
+        },
+      })
+      triggerRef(sessions)
+      return
     } finally {
       s.abortController = null
       s.isStreaming = false
@@ -242,11 +283,19 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     if (answer !== null) {
-      s.messages.push({ role: 'assistant', content: answer })
-    } else if (s.streamError) {
+      s.messages.push({ role: 'assistant', content: answer, kind: 'normal' })
+    } else if (sseError) {
+      // The agent itself reported an error (clean SSE error event). Render
+      // as a proper ErrorBubble with retry, not as a fake assistant reply.
       s.messages.push({
         role: 'assistant',
-        content: `**Error:** ${s.streamError}`,
+        content: '',
+        kind: 'error',
+        error: {
+          category: 'sse-error-event',
+          causeMessage: sseError.content,
+          originalQuestion: q,
+        },
       })
     }
     triggerRef(sessions)
@@ -259,11 +308,39 @@ export const useChatStore = defineStore('chat', () => {
           // Keep messages but clear streaming artifacts
           session.completedTools = []
           session.currentStatus = ''
-          session.streamError = null
           triggerRef(sessions)
         }
       }, 60_000)
     }
+  }
+
+  /**
+   * Re-issue the question that produced an error message. Removes both the
+   * error bubble and the original user bubble (sendMessage will re-push the
+   * user message), so the conversation reads cleanly after a recovery.
+   */
+  async function retryMessage(messageIndex: number): Promise<void> {
+    const id = activeSessionId.value
+    const s = sessions.value.get(id)
+    if (!s) return
+    const target = s.messages[messageIndex]
+    if (!target || target.kind !== 'error' || !target.error) return
+    const question = target.error.originalQuestion
+
+    // The error bubble is always appended directly after the user bubble
+    // that produced it — see sendMessage's push order. Look only at the
+    // immediately preceding entry; a backward scan would mis-match if the
+    // user has asked the same question earlier in the session and wipe out
+    // a chunk of intermediate history.
+    const prev = s.messages[messageIndex - 1]
+    if (prev && prev.role === 'user' && prev.content === question) {
+      s.messages.splice(messageIndex - 1, 2)
+    } else {
+      // Defensive: just remove the error bubble.
+      s.messages.splice(messageIndex, 1)
+    }
+    triggerRef(sessions)
+    await sendMessage(question)
   }
 
   function handleEvent(targetId: string, event: StreamEvent): void {
@@ -301,7 +378,6 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming,
     currentStatus,
     completedTools,
-    streamError,
     streamingSessions,
     localSessions,
     sessions,
@@ -311,6 +387,7 @@ export const useChatStore = defineStore('chat', () => {
     startNewConversation,
     loadConversation,
     sendMessage,
+    retryMessage,
     abort,
     removeSession,
   }

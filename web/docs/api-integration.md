@@ -107,12 +107,47 @@ the device tz — useful in tests, but unused in production code paths today.
 
 ## Error handling
 
-- **HTTP errors** (non-2xx on non-stream endpoints) throw `ApiError` with
-  the status code and parsed JSON body if available (`src/api/client.ts`).
-- **Stream HTTP errors** (the POST itself fails, e.g. 500) throw a plain
-  `Error` from `streamAsk` before any events are yielded.
-- **Stream content errors** (the agent fails mid-response) arrive as a
-  regular `{type: "error"}` event and are written to `streamError` in the
-  chat store, then rendered as an error bubble.
-- **User abort** — the chat store catches `AbortError` and silently
-  returns; no error bubble is added.
+The frontend distinguishes failure modes so it can pick the right UX
+(silent retry, conversation recovery, or surface to the user with a Retry
+button). All classifications live in `src/api/stream.ts` as
+`StreamErrorCategory`.
+
+### Error categories and contracts
+
+| Category | Trigger | Auto-retry? | Recovery? | UX |
+|---|---|---|---|---|
+| `network-before-headers` | `fetch()` rejects (DNS, TLS, offline) | 1× with 1s backoff | — | If still failing: ErrorBubble "Couldn't reach the agent" + Retry |
+| `network-midstream` | `reader.read()` rejects after some bytes; clean stream close with no `answer` event | 1× **after** persisted-answer recovery attempt | Yes — `GET /conversations/:session_id` and surface persisted assistant turn if found | ErrorBubble "Connection dropped mid-reply" + Retry |
+| `http-4xx` | Status 400-499 from `/ask/stream` | No | — | ErrorBubble with status; 401 → "Session expired"; 429 → "Rate limited" |
+| `http-5xx` | Status 500+ from `/ask/stream` | 1× with 1s backoff | — | ErrorBubble "Agent unavailable (HTTP 5xx)" + Retry |
+| `sse-error-event` | Backend emits `{type: "error"}` | No | — | ErrorBubble "Agent reported an error" + Retry; cause shown under Details |
+| `no-body` | 200 OK but `res.body` is null (proxy bug) | No | — | ErrorBubble "Empty response from agent" |
+| `aborted` | User pressed Stop | No | — | No bubble; turn left in place |
+
+The classification distinguishes Safari's `TypeError: Load failed` between
+`network-before-headers` and `network-midstream` based on whether any bytes
+were received before the failure — they have different retry strategies
+(plain retry vs. persisted-answer-recovery-then-retry).
+
+### Resilience contract
+
+After any transient failure, the client MUST attempt
+`GET /conversations/:session_id` before showing an error to the user. The
+backend persists the assistant turn at the end of the stream's
+server-side processing, regardless of whether the client received the
+bytes. Recovering a persisted answer keeps the conversation coherent
+across iOS network handoffs, Cloudflare 100s idle timeouts, and similar
+mid-flight interruptions.
+
+### Implementation locations
+
+- `src/api/stream.ts` — `StreamError` class, low-level `streamAsk` generator.
+- `src/api/streamWithRecovery.ts` — wraps `streamAsk` with retry + recovery.
+- `src/stores/chat.ts` — converts errors into `ChatMessage{kind:'error'}`
+  entries with `originalQuestion` so the inline Retry button can re-issue.
+- `src/components/ErrorBubble.vue` — distinct red-bordered alert with
+  Retry, Details disclosure, and category-specific copy.
+- `src/api/client.ts` — `apiJson()` adds a 30s default timeout and wraps
+  network `TypeError`s as `NetworkError`. Pass `timeoutMs: null` to
+  disable the timeout for long-running calls (the streaming layer manages
+  its own).

@@ -94,11 +94,34 @@ function focusIfNoSelection() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  // Enter = submit; Shift+Enter = newline
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Slack-style key handling. On touch devices the iOS / Android soft
+  // keyboard has no Shift modifier when typing into a <textarea>, so if
+  // Enter submitted on mobile the user could never enter a newline (or
+  // a bullet list, or a multi-paragraph reply). The chosen rules:
+  //   - Cmd/Ctrl+Enter:   always submits (Slack / Mac convention).
+  //   - Plain Enter on a *fine-pointer* device (mouse/trackpad): submits.
+  //     Shift+Enter on the same device: newline.
+  //   - Plain Enter on a *coarse-pointer* device (touch): newline. Submit
+  //     is via the Send button only. Tap Send to deliver.
+  //
+  // We use `pointer: coarse` rather than UA sniffing because it's a
+  // pointer-quality signal — iPad with a hardware keyboard reports
+  // `pointer: fine` and gets the desktop behaviour, which is what we want.
+  if (e.key !== 'Enter') return
+  if (e.metaKey || e.ctrlKey) {
+    e.preventDefault()
+    void handleSubmit()
+    return
+  }
+  const coarsePointer =
+    typeof window !== 'undefined' &&
+    window.matchMedia &&
+    window.matchMedia('(pointer: coarse)').matches
+  if (!coarsePointer && !e.shiftKey) {
     e.preventDefault()
     void handleSubmit()
   }
+  // Otherwise: let the browser insert a newline natively.
 }
 </script>
 
@@ -186,11 +209,13 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
         </div>
       </div>
-      <div v-else class="mx-auto flex max-w-3xl flex-col gap-4">
+      <div v-else class="mx-auto flex max-w-3xl min-w-0 flex-col gap-4">
         <ChatMessage
           v-for="(msg, i) in chat.messages"
           :key="i"
           :message="msg"
+          :retry-disabled="chat.isStreaming"
+          @retry="chat.retryMessage(i)"
         />
         <ToolProgress />
       </div>
@@ -207,6 +232,7 @@ function handleKeydown(e: KeyboardEvent) {
           v-model="input"
           autofocus
           rows="1"
+          enterkeyhint="send"
           placeholder="Ask about your infrastructure…"
           class="flex-1 resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
           style="min-height: 2.5rem; max-height: 50vh; overflow-y: auto"

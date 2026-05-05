@@ -24,7 +24,7 @@ test.describe('chat streaming', () => {
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
   })
 
-  test('renders an error bubble when the stream emits an error event', async ({
+  test('renders an ErrorBubble when the stream emits an error event', async ({
     page,
   }) => {
     const errorBody = buildSseBody([
@@ -39,25 +39,71 @@ test.describe('chat streaming', () => {
       .fill('query something')
     await page.getByRole('button', { name: 'Send' }).click()
 
-    await expect(page.getByText(/Error.*Prometheus connection refused/)).toBeVisible()
+    // ErrorBubble is rendered with role="alert" and a distinct heading.
+    // The full failure-class matrix lives in error-resilience.spec.ts;
+    // this test is the smoke check that the SSE error event still produces
+    // a user-visible bubble with a Retry affordance.
+    const alert = page.getByRole('alert')
+    await expect(alert).toBeVisible()
+    await expect(alert).toContainText('Agent reported an error')
+    await expect(alert.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 
-  test('Enter submits, Shift+Enter inserts newline', async ({ page }) => {
+  test('Enter behaviour follows Slack-style platform rules', async ({
+    page,
+  }, testInfo) => {
     await mockBackend(page)
     await page.goto('/')
 
     const input = page.getByPlaceholder('Ask about your infrastructure…')
 
-    // Shift+Enter adds newline, does not submit
-    await input.fill('line one')
-    await input.press('Shift+Enter')
-    await input.pressSequentially('line two')
-    await expect(input).toHaveValue('line one\nline two')
+    // The component branches on `(pointer: coarse)`. Playwright's mobile
+    // device descriptors set `hasTouch: true` which makes that media query
+    // match, putting us on the "Enter = newline" path. Desktop projects
+    // get "Enter = submit, Shift+Enter = newline".
+    const isMobile = testInfo.project.name.startsWith('mobile-')
 
-    // Plain Enter submits
-    await input.press('Enter')
-    await expect(page.getByText('line one')).toBeVisible()
+    if (isMobile) {
+      // Plain Enter inserts a newline (no submit).
+      await input.fill('line one')
+      await input.press('Enter')
+      await input.pressSequentially('line two')
+      await expect(input).toHaveValue('line one\nline two')
+      // Send button submits.
+      await page.getByRole('button', { name: 'Send' }).click()
+      await expect(page.getByText('line one')).toBeVisible()
+      await expect(input).toHaveValue('')
+    } else {
+      // Shift+Enter adds newline, plain Enter submits.
+      await input.fill('line one')
+      await input.press('Shift+Enter')
+      await input.pressSequentially('line two')
+      await expect(input).toHaveValue('line one\nline two')
+      await input.press('Enter')
+      await expect(page.getByText('line one')).toBeVisible()
+      await expect(input).toHaveValue('')
+    }
+  })
+
+  test('Cmd/Ctrl+Enter submits on every platform', async ({ page }) => {
+    await mockBackend(page)
+    await page.goto('/')
+    const input = page.getByPlaceholder('Ask about your infrastructure…')
+    await input.fill('cmd-enter test')
+    await input.press('ControlOrMeta+Enter')
+    await expect(page.getByText('cmd-enter test')).toBeVisible()
     await expect(input).toHaveValue('')
+  })
+
+  test('textarea has enterkeyhint=send (relabels iOS Return key)', async ({
+    page,
+  }) => {
+    await mockBackend(page)
+    await page.goto('/')
+    const hint = await page
+      .getByPlaceholder('Ask about your infrastructure…')
+      .getAttribute('enterkeyhint')
+    expect(hint).toBe('send')
   })
 
   test('Send button disabled for empty input', async ({ page }) => {

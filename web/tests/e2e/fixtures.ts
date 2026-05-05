@@ -217,3 +217,216 @@ export async function mockBackend(
 
   return state
 }
+
+// ---- per-route stream-failure overrides ----
+//
+// `mockBackend` installs a single happy-path stream handler. These helpers
+// re-register the `/api/ask/stream` route with a specific failure mode for a
+// fixed number of requests. The browser-level override has higher priority
+// than the one installed by mockBackend (Playwright: last route registered
+// wins). Combine with `appendBackendConversation` to recreate the
+// "server persisted but client missed" recovery case.
+
+export type StreamFailureKind =
+  | 'network-before-headers' // fetch rejects before any byte (DNS / TLS / abort('failed'))
+  | 'http-500'
+  | 'http-503'
+  | 'http-401'
+  | 'midstream-abort' // some events delivered, then connection closed
+  | 'corrupt-json' // SSE chunk with malformed payload, no answer event
+  | 'sse-error-event' // backend emits {type:'error'} cleanly
+
+export interface StreamFailureOptions {
+  kind: StreamFailureKind
+  /** Events to send before the midstream-abort kicks in. Ignored for other kinds. */
+  preAbortEvents?: SseEvent[]
+  /** Custom message for sse-error-event. */
+  errorMessage?: string
+  /**
+   * Apply this failure to the next N requests, then fall through to the
+   * happy-path body installed by `mockBackend`. Default: 1.
+   */
+  times?: number
+}
+
+/**
+ * Override `/api/ask/stream` for the next `times` requests with a specific
+ * failure mode. After that the original `mockBackend` handler resumes.
+ */
+export async function overrideAskStream(
+  page: Page,
+  options: StreamFailureOptions,
+): Promise<void> {
+  const limit = options.times ?? 1
+  let count = 0
+  await page.route('**/api/ask/stream', async (route) => {
+    if (count >= limit) {
+      // fall through to the next-registered handler (the happy-path one)
+      return route.fallback()
+    }
+    count += 1
+    switch (options.kind) {
+      case 'network-before-headers':
+        return route.abort('failed')
+      case 'http-500':
+        return route.fulfill({ status: 500, body: 'Internal Server Error' })
+      case 'http-503':
+        return route.fulfill({ status: 503, body: 'Service Unavailable' })
+      case 'http-401':
+        return route.fulfill({
+          status: 401,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'Session expired' }),
+        })
+      case 'midstream-abort': {
+        // Send some events, then close the body without a final \n\n.
+        // Playwright's route.fulfill closes cleanly, so we use an explicit
+        // truncated body — the SSE parser will be mid-frame when the read
+        // ends, which the client must treat as a transient failure.
+        const events = options.preAbortEvents ?? [
+          { type: 'status', content: 'Thinking...' },
+        ]
+        const partial = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('')
+        // Append a half-written event (no trailing \n\n) so the parser
+        // discards it and sees no answer event.
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: partial + 'data: {"type":"answ',
+        })
+      }
+      case 'corrupt-json':
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: 'data: {bad json}\n\ndata: {"type":"status","content":"x"\n\n',
+        })
+      case 'sse-error-event':
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: buildSseBody([
+            { type: 'status', content: 'Thinking...' },
+            {
+              type: 'error',
+              content: options.errorMessage ?? 'Backend exploded',
+            },
+          ]),
+        })
+    }
+  })
+}
+
+/**
+ * Pretend the backend persisted a successful conversation that the client
+ * missed mid-stream — used by recovery tests. After registering the override,
+ * the recovery path's `GET /conversations/:session_id` lookup will see the
+ * answer the client never received.
+ */
+export function appendBackendConversation(
+  state: MockState,
+  args: {
+    session_id: string
+    title: string
+    userQuestion: string
+    assistantAnswer: string
+  },
+): void {
+  state.conversations.unshift({
+    session_id: args.session_id,
+    title: args.title,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    turn_count: 2,
+    model: 'claude-sonnet-4-5',
+    provider: 'anthropic',
+  })
+  // The mockBackend GET handler reads from `sampleConversationDetail`. Patch
+  // it for this session id.
+  recoveryDetail.set(args.session_id, {
+    user: args.userQuestion,
+    assistant: args.assistantAnswer,
+  })
+}
+
+const recoveryDetail = new Map<string, { user: string; assistant: string }>()
+
+export interface RecoveryRouteOptions {
+  /**
+   * If set, ANY GET /api/conversations/:id returns a fabricated conversation
+   * with these turns. Useful when the client generates a random session id
+   * the test doesn't know in advance — the recovery path will find this
+   * persisted "answer" for whatever id it queries.
+   */
+  matchAny?: { userQuestion: string; assistantAnswer: string }
+}
+
+/**
+ * Augment `mockBackend`'s GET /api/conversations/:id handler with
+ * recovery-mode fixtures registered via `appendBackendConversation`, OR — if
+ * `matchAny` is set — return a fabricated answer for every session id.
+ *
+ * Call this AFTER `mockBackend` so it registers later and wins (Playwright:
+ * last route registered wins). The fallback still flows through to the
+ * mockBackend handler when this one declines.
+ */
+export async function installRecoveryRoute(
+  page: Page,
+  options: RecoveryRouteOptions = {},
+): Promise<void> {
+  await page.route('**/api/conversations/*', (route) => {
+    const url = new URL(route.request().url())
+    const sessionId = decodeURIComponent(url.pathname.split('/').pop() ?? '')
+    if (route.request().method() !== 'GET') {
+      return route.fallback()
+    }
+    if (options.matchAny) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: sessionId,
+          title: options.matchAny.userQuestion.slice(0, 40),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          turn_count: 2,
+          model: 'claude-sonnet-4-5',
+          provider: 'anthropic',
+          turns: [
+            { role: 'user', content: options.matchAny.userQuestion },
+            { role: 'assistant', content: options.matchAny.assistantAnswer },
+          ],
+        }),
+      })
+    }
+    const detail = recoveryDetail.get(sessionId)
+    if (!detail) {
+      return route.fallback()
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        session_id: sessionId,
+        title: detail.user.slice(0, 40),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        turn_count: 2,
+        model: 'claude-sonnet-4-5',
+        provider: 'anthropic',
+        turns: [
+          { role: 'user', content: detail.user },
+          { role: 'assistant', content: detail.assistant },
+        ],
+      }),
+    })
+  })
+}
+
+/** Reset cross-test recovery state. Call in `test.beforeEach`. */
+export function resetRecoveryFixtures(): void {
+  recoveryDetail.clear()
+}

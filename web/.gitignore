@@ -12,8 +12,22 @@ dist
 dist-ssr
 *.local
 
+# Secrets / credentials (defensive — repo currently has no .env, but
+# anyone running `npm run dev` against a non-default backend may add one)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+vault_password
+*.secret
+
 # Claude Code workspace-local config
 .claude/
+
+# Engineering team working dir (evaluation reports, plans, screenshots)
+.engineering-team/
 
 # Playwright
 /test-results/

@@ -13,6 +13,10 @@
 //   - tool_end    — tool name that just finished
 //   - answer      — final answer text (may include a session_id)
 //   - error       — error message
+//
+// Errors are surfaced as `StreamError` so callers can classify and route
+// them — see `streamWithRecovery.ts` for the retry / recovery logic that
+// builds on this generator.
 
 import { API_BASE } from './client'
 import { getDeviceTimezone } from './timezone'
@@ -43,13 +47,84 @@ export interface StreamRequest {
 }
 
 /**
+ * Categories the recovery layer cares about. Each maps to a different UX
+ * decision (auto-retry, conversation-recovery, or surface to the user).
+ */
+export type StreamErrorCategory =
+  | 'network-before-headers' // fetch rejected before any byte received
+  | 'network-midstream' // reader rejected after at least one chunk
+  | 'http-4xx'
+  | 'http-5xx'
+  | 'no-body' // 200 OK but res.body was null
+  | 'aborted' // user-initiated abort
+
+export interface StreamErrorOptions {
+  status?: number
+  detail?: unknown
+  cause?: unknown
+}
+
+/**
+ * Classified error thrown by `streamAsk`. The recovery wrapper inspects
+ * `category` to decide whether to retry, attempt conversation recovery, or
+ * surface to the UI.
+ */
+export class StreamError extends Error {
+  readonly category: StreamErrorCategory
+  readonly status?: number
+  readonly detail?: unknown
+
+  constructor(
+    category: StreamErrorCategory,
+    message: string,
+    options: StreamErrorOptions = {},
+  ) {
+    super(
+      message,
+      options.cause !== undefined ? { cause: options.cause } : undefined,
+    )
+    this.name = 'StreamError'
+    this.category = category
+    this.status = options.status
+    this.detail = options.detail
+  }
+
+  /**
+   * Map an arbitrary thrown value into a StreamError. `receivedAnyBytes`
+   * disambiguates Safari's `TypeError: Load failed` between "fetch failed
+   * before headers" (network-before-headers) and "stream interrupted
+   * mid-flight" (network-midstream) — they differ in retry strategy.
+   */
+  static from(err: unknown, ctx: { receivedAnyBytes: boolean }): StreamError {
+    if (err instanceof StreamError) return err
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return new StreamError('aborted', 'Request aborted', { cause: err })
+    }
+    // Safari surfaces all fetch failures (DNS, TLS, mid-stream socket close,
+    // CORS) as `TypeError: Load failed`. Chromium uses `TypeError: Failed to
+    // fetch`. Both land here.
+    if (err instanceof TypeError) {
+      return new StreamError(
+        ctx.receivedAnyBytes ? 'network-midstream' : 'network-before-headers',
+        err.message || 'Network error',
+        { cause: err },
+      )
+    }
+    return new StreamError(
+      ctx.receivedAnyBytes ? 'network-midstream' : 'network-before-headers',
+      err instanceof Error ? err.message : String(err),
+      { cause: err },
+    )
+  }
+}
+
+/**
  * POST /ask/stream and yield each decoded SSE event as it arrives.
  *
- * The caller supplies an AbortSignal to cancel the stream (e.g. if the user
- * navigates away or starts a new question). The device's IANA timezone is
- * attached automatically (read fresh per request so a travelling user gets
- * answers in the zone they're currently in) unless the caller passed one
- * explicitly.
+ * Throws `StreamError` (with a category) on any failure. The caller passes
+ * an AbortSignal to cancel the stream (e.g. user pressed Stop or a new
+ * question started). The device's IANA timezone is attached automatically
+ * unless the caller supplies one.
  */
 export async function* streamAsk(
   req: StreamRequest,
@@ -65,35 +140,56 @@ export async function* streamAsk(
     delete body.user_timezone
   }
 
-  const res = await fetch(`${API_BASE}/ask/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/ask/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (err) {
+    throw StreamError.from(err, { receivedAnyBytes: false })
+  }
 
   if (!res.ok) {
-    let detail = ''
+    let detail: unknown
     try {
-      detail = await res.text()
+      const text = await res.text()
+      try {
+        detail = text ? JSON.parse(text) : undefined
+      } catch {
+        detail = text
+      }
     } catch {
-      // ignore
+      // body unreadable — leave detail undefined
     }
-    throw new Error(`HTTP ${res.status} on /ask/stream: ${detail}`)
+    throw new StreamError(
+      res.status >= 500 ? 'http-5xx' : 'http-4xx',
+      `HTTP ${res.status} on /ask/stream`,
+      { status: res.status, detail },
+    )
   }
   if (!res.body) {
-    throw new Error('Response has no body')
+    throw new StreamError('no-body', 'Response has no body')
   }
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let receivedAnyBytes = false
 
   try {
     while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (err) {
+        throw StreamError.from(err, { receivedAnyBytes })
+      }
+      if (chunk.done) break
+      receivedAnyBytes = true
+      buffer += decoder.decode(chunk.value, { stream: true })
 
       // SSE events are terminated by a blank line (\n\n). There may be
       // multiple events in one read, or a single event may span reads.
@@ -118,6 +214,11 @@ export async function* streamAsk(
  * lines starting with `data: ` carry the payload. Multi-line data fields
  * should be concatenated with `\n`, but our backend only emits single-line
  * JSON payloads so we handle both cases defensively.
+ *
+ * Malformed JSON is silently dropped here. The recovery layer detects the
+ * higher-level "stream ended without an answer" condition and treats it as
+ * transient — that's the right place to escalate, since a single bad chunk
+ * in an otherwise-healthy stream shouldn't break the user's session.
  */
 function parseSseBlock(block: string): StreamEvent | null {
   const dataLines: string[] = []

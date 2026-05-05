@@ -32,26 +32,27 @@ function checkMobile() {
   }
 }
 
-// Drives the app's --vvh CSS var from visualViewport so the layout shrinks
-// when the iOS keyboard opens, keeping the composer above the keyboard.
-function updateViewportHeight() {
-  const vv = window.visualViewport
-  const h = vv ? vv.height : window.innerHeight
-  document.documentElement.style.setProperty('--vvh', `${h}px`)
-}
+// Layout sizing: we now use `100dvh` directly on the root container instead
+// of driving a `--vvh` CSS variable from `window.visualViewport`.
+//
+// `dvh` ("dynamic viewport height") reached Baseline Widely Available in
+// June 2025 — Safari 15.4+, Chrome 108+, Firefox 101+. Modern Safari
+// honours dvh by shrinking its reported height when the keyboard opens,
+// which is what the JS observer used to do manually. Dropping the JS
+// observer also avoids the iOS 26 visualViewport regression where
+// `visualViewport.height` doesn't fully revert after the keyboard
+// dismisses, leaving a persistent dead-space gap above the composer.
+//
+// If a future iOS version regresses dvh handling, restore the observer
+// behind a feature check rather than reverting wholesale.
 
 onMounted(() => {
   checkMobile()
-  updateViewportHeight()
   window.addEventListener('resize', checkMobile)
-  window.visualViewport?.addEventListener('resize', updateViewportHeight)
-  window.visualViewport?.addEventListener('scroll', updateViewportHeight)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
-  window.visualViewport?.removeEventListener('resize', updateViewportHeight)
-  window.visualViewport?.removeEventListener('scroll', updateViewportHeight)
   document.removeEventListener('mousemove', onDrag)
   document.removeEventListener('mouseup', stopDrag)
 })
@@ -97,7 +98,7 @@ function stopDrag() {
   <div
     class="flex w-screen overflow-hidden"
     :class="{ 'select-none': isDragging }"
-    :style="{ height: 'var(--vvh, 100dvh)' }"
+    style="height: 100dvh; min-height: 100dvh"
   >
     <!-- Mobile overlay backdrop -->
     <div

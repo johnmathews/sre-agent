@@ -3,6 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <!-- PWA shell. The app's primary form factor is an installed iOS PWA on
+         iPhone in portrait. Without these tags, iOS launches the home-screen
+         bookmark inside Safari chrome — `env(safe-area-inset-top)` then
+         resolves to 0 and the safe-area helpers in style.css fall through to
+         their floor values, leaving the title overlapping the system status
+         bar. The combination below is what makes iOS treat us as a real
+         standalone PWA and populate the inset variables from the device. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="SRE" />
+    <!-- black-translucent is the only value that lets the page extend under
+         the status bar (the others reserve a strip and `safe-area-inset-top`
+         resolves to 0 — defeating our entire safe-area handling). On modern
+         iOS the status bar icons adapt to the visible content underneath,
+         so they remain readable in both light and dark mode in practice.
+         Verify on a real iPhone PWA in both themes if you change the
+         header background — if icons become unreadable, the right fix is
+         to adjust the page background behind the inset, not to change the
+         status-bar style (which would break safe-area entirely). -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon-180.png" />
+
+    <!-- Match the manifest theme_color so iOS / Android pick consistent
+         chrome tinting. Two values — light vs dark — let the OS pick. -->
+    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+
     <title>SRE Agent</title>
   </head>
   <body>

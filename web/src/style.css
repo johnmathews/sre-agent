@@ -23,6 +23,16 @@ body {
   color-scheme: dark;
 }
 
+/* Safe-area inset variables.
+ *
+ * In a real iOS PWA, `env(safe-area-inset-*)` is populated by the device.
+ * Headless engines (and Playwright WebKit on Linux) report 0 because no
+ * device chrome exists. The CSS rules below all use the pattern
+ * `var(--safe-area-inset-*, env(safe-area-inset-*))` — production CSS
+ * resolves to `env()` because the variables are unset; tests inject the
+ * variables via `tests/e2e/helpers/pwa.ts` to simulate notched /
+ * home-indicator insets. */
+
 /* iOS Safari auto-zooms when a focused input renders below 16px. Force >=16px
    on all form controls so we never trigger that zoom. */
 input,
@@ -36,25 +46,29 @@ select {
    safe-area-inset-right is 0 but the corner radius (~47pt) still clips content
    placed within ~12px of the edge. */
 .composer-area {
-  padding-inline-start: max(1rem, env(safe-area-inset-left));
-  padding-inline-end: max(1rem, env(safe-area-inset-right));
+  padding-inline-start: max(1rem, var(--safe-area-inset-left, env(safe-area-inset-left)));
+  padding-inline-end: max(1rem, var(--safe-area-inset-right, env(safe-area-inset-right)));
   padding-block-start: 0.5rem;
-  padding-block-end: max(0.75rem, env(safe-area-inset-bottom));
+  padding-block-end: max(0.75rem, var(--safe-area-inset-bottom, env(safe-area-inset-bottom)));
 }
 @media (min-width: 640px) {
   .composer-area {
-    padding-inline-start: max(1.5rem, env(safe-area-inset-left));
-    padding-inline-end: max(1.5rem, env(safe-area-inset-right));
+    padding-inline-start: max(1.5rem, var(--safe-area-inset-left, env(safe-area-inset-left)));
+    padding-inline-end: max(1.5rem, var(--safe-area-inset-right, env(safe-area-inset-right)));
     padding-block-start: 0.75rem;
-    padding-block-end: max(0.75rem, env(safe-area-inset-bottom));
+    padding-block-end: max(0.75rem, var(--safe-area-inset-bottom, env(safe-area-inset-bottom)));
   }
 }
 
-/* Mobile header — clear the iOS status bar when viewport-fit=cover is on. */
+/* Mobile header — clear the iOS status bar when viewport-fit=cover is on
+   AND the page is in standalone PWA mode (apple-mobile-web-app-capable=yes
+   in index.html). Without the PWA meta tags iOS launches the bookmark in
+   Safari chrome and reports inset-top as 0 — the floor of 0.5rem then
+   leaves the title under the system status bar. */
 .app-header-mobile {
-  padding-inline-start: max(1rem, env(safe-area-inset-left));
-  padding-inline-end: max(1rem, env(safe-area-inset-right));
-  padding-block-start: max(0.5rem, env(safe-area-inset-top));
+  padding-inline-start: max(1rem, var(--safe-area-inset-left, env(safe-area-inset-left)));
+  padding-inline-end: max(1rem, var(--safe-area-inset-right, env(safe-area-inset-right)));
+  padding-block-start: max(0.5rem, var(--safe-area-inset-top, env(safe-area-inset-top)));
   padding-block-end: 0.5rem;
 }
 
@@ -62,23 +76,34 @@ select {
    the curved screen edges on iPhone (esp. landscape, where safe-area-inset-left/
    right become non-zero). */
 .chat-scroll-area {
-  padding-inline-start: max(1rem, env(safe-area-inset-left));
-  padding-inline-end: max(1rem, env(safe-area-inset-right));
+  padding-inline-start: max(1rem, var(--safe-area-inset-left, env(safe-area-inset-left)));
+  padding-inline-end: max(1rem, var(--safe-area-inset-right, env(safe-area-inset-right)));
   padding-block-start: 0.75rem;
   padding-block-end: 0.75rem;
 }
 @media (min-width: 640px) {
   .chat-scroll-area {
-    padding-inline-start: max(1.5rem, env(safe-area-inset-left));
-    padding-inline-end: max(1.5rem, env(safe-area-inset-right));
+    padding-inline-start: max(1.5rem, var(--safe-area-inset-left, env(safe-area-inset-left)));
+    padding-inline-end: max(1.5rem, var(--safe-area-inset-right, env(safe-area-inset-right)));
     padding-block-start: 1rem;
     padding-block-end: 1rem;
   }
 }
 
-/* Markdown content styling — applied to any element with .markdown */
+/* Markdown content styling — applied to any element with .markdown.
+ * `min-width: 0` is critical: the .markdown div lives inside a flex
+ * chain (chat-scroll-area > flex-col > bubble > markdown), and flex
+ * children default to `min-width: auto` which equals their intrinsic
+ * content width. A wide table (or long URL in a code block) then
+ * forces the bubble to grow past `max-w-[85%]`, busting through the
+ * bubble's background — exactly the bug the user saw on desktop with
+ * the Grafana 404 table. With `min-width: 0` the bubble respects its
+ * width budget and overflow ends up *inside* the markdown container,
+ * where `.md-table-wrap` and `.markdown pre` then handle it cleanly
+ * with their own `overflow-x: auto`. */
 .markdown {
   line-height: 1.55;
+  min-width: 0;
 }
 .markdown > :first-child {
   margin-top: 0;
@@ -99,13 +124,35 @@ select {
 .markdown h1 { font-size: 1.5rem; }
 .markdown h2 { font-size: 1.25rem; }
 .markdown h3 { font-size: 1.1rem; }
-.markdown ul,
+/* Restore list markers. Tailwind v4's preflight resets list-style to
+   none on ul/ol, which silently strips bullets/numbers from the
+   markdown LLM output (visible on desktop AND mobile — see
+   .engineering-team/evaluation-report.md). The padding-left is what
+   gives the markers room. */
+.markdown ul {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+  list-style: disc;
+}
 .markdown ol {
   margin: 0.5rem 0;
   padding-left: 1.5rem;
+  list-style: decimal;
+}
+.markdown ul ul {
+  list-style: circle;
+}
+.markdown ul ul ul {
+  list-style: square;
 }
 .markdown li {
   margin: 0.2rem 0;
+}
+.markdown li::marker {
+  color: rgb(0 0 0 / 0.55);
+}
+.dark .markdown li::marker {
+  color: rgb(255 255 255 / 0.55);
 }
 .markdown code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -132,14 +179,37 @@ select {
   border-left: 3px solid rgb(0 0 0 / 0.15);
   color: rgb(0 0 0 / 0.7);
 }
+/* Table wrapper produced by `wrapTables` in src/lib/markdown.ts.
+ * Provides horizontal scroll inside the bubble for tables wider than
+ * the available width, instead of letting the table escape the bubble. */
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0.5rem 0;
+  /* tabindex="0" makes the region keyboard-focusable for a11y; show a
+     visible focus ring so users know they can scroll with the keyboard. */
+  border-radius: 0.25rem;
+}
+.md-table-wrap:focus-visible {
+  outline: 2px solid rgb(59 130 246 / 0.6);
+  outline-offset: 2px;
+}
 .markdown table {
   border-collapse: collapse;
-  margin: 0.5rem 0;
+  margin: 0;
+  /* `width: max-content` lets the table take its natural width inside the
+     scroll wrap — this is what makes long URL columns scroll horizontally
+     instead of squeezing every other column into single-character columns. */
+  width: max-content;
+  max-width: none;
 }
 .markdown th,
 .markdown td {
   padding: 0.35rem 0.6rem;
   border: 1px solid rgb(0 0 0 / 0.15);
+  text-align: left;
+  vertical-align: top;
 }
 
 .dark .markdown code,
@@ -153,4 +223,68 @@ select {
 .dark .markdown th,
 .dark .markdown td {
   border-color: rgb(255 255 255 / 0.15);
+}
+
+/* Narrow-viewport table reflow — small tables (1-2 cols) become stacked
+ * key/value pairs because a 2-col table at 350px viewport produces 1-2
+ * word per line, which is unreadable. Wider tables (3+ cols) keep their
+ * tabular shape and rely on the .md-table-wrap horizontal scroll instead.
+ * The data-label="..." attribute is injected by `wrapTables` from each
+ * cell's matching <th> text. */
+@media (max-width: 480px) {
+  .md-table-wrap[data-cols="1"] table,
+  .md-table-wrap[data-cols="1"] thead,
+  .md-table-wrap[data-cols="1"] tbody,
+  .md-table-wrap[data-cols="1"] tr,
+  .md-table-wrap[data-cols="1"] th,
+  .md-table-wrap[data-cols="1"] td,
+  .md-table-wrap[data-cols="2"] table,
+  .md-table-wrap[data-cols="2"] thead,
+  .md-table-wrap[data-cols="2"] tbody,
+  .md-table-wrap[data-cols="2"] tr,
+  .md-table-wrap[data-cols="2"] th,
+  .md-table-wrap[data-cols="2"] td {
+    display: block;
+    width: auto;
+    box-sizing: border-box;
+  }
+  /* Hide thead visually but keep it in the accessibility tree. */
+  .md-table-wrap[data-cols="1"] thead,
+  .md-table-wrap[data-cols="2"] thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .md-table-wrap[data-cols="1"] tr,
+  .md-table-wrap[data-cols="2"] tr {
+    border: 1px solid rgb(0 0 0 / 0.15);
+    border-radius: 0.25rem;
+    margin-bottom: 0.5rem;
+    padding: 0.25rem 0.5rem;
+  }
+  .md-table-wrap[data-cols="1"] td,
+  .md-table-wrap[data-cols="2"] td {
+    border: none;
+    padding: 0.25rem 0;
+  }
+  .md-table-wrap[data-cols="1"] td::before,
+  .md-table-wrap[data-cols="2"] td::before {
+    content: attr(data-label);
+    display: block;
+    font-weight: 600;
+    font-size: 0.8em;
+    color: rgb(0 0 0 / 0.55);
+    margin-bottom: 0.1rem;
+  }
+  .dark .md-table-wrap[data-cols="1"] tr,
+  .dark .md-table-wrap[data-cols="2"] tr {
+    border-color: rgb(255 255 255 / 0.18);
+  }
+  .dark .md-table-wrap[data-cols="1"] td::before,
+  .dark .md-table-wrap[data-cols="2"] td::before {
+    color: rgb(255 255 255 / 0.55);
+  }
 }

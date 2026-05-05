@@ -95,18 +95,22 @@ test.describe('iOS viewport / safe-area handling', () => {
     expect(padding.right).toBeGreaterThanOrEqual(16)
   })
 
-  test('--vvh CSS variable is set from visualViewport', async ({ page }) => {
+  test('root container uses 100dvh for keyboard-aware sizing', async ({
+    page,
+  }) => {
     await mockBackend(page)
     await page.goto('/')
 
-    const vvh = await page.evaluate(() =>
-      document.documentElement.style.getPropertyValue('--vvh'),
+    // We replaced the JS visualViewport observer with `100dvh`. Assert the
+    // computed height resolves to a px value in the dynamic-viewport range.
+    // `dvh` shrinks when the iOS keyboard opens; without the keyboard it
+    // should equal the viewport height (allow ~50px of browser-chrome slack).
+    const root = page.locator('.flex.w-screen.overflow-hidden').first()
+    const height = await root.evaluate(
+      (el) => parseFloat(getComputedStyle(el).height),
     )
-    // Should be a px value matching the viewport height.
-    expect(vvh).toMatch(/^\d+px$/)
-    const value = parseFloat(vvh)
-    expect(value).toBeGreaterThan(0)
-    expect(value).toBeLessThanOrEqual(844)
+    expect(height).toBeGreaterThan(500)
+    expect(height).toBeLessThanOrEqual(844)
   })
 
   test('Send button is positioned inward from the right viewport edge', async ({

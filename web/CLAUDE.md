@@ -113,7 +113,16 @@ be careful when touching these:
    Shift+Enter inserts. Cmd/Ctrl+Enter always submits. `enterkeyhint`
    is `"send"`. Don't UA-sniff — the pointer-quality media query
    correctly puts iPad with a hardware keyboard on the desktop path.
-7. **Markdown tables** are wrapped in `<div class="md-table-wrap">`
+7. **View mode** is a singleton composable
+   (`src/composables/useViewMode.ts`) with `viewMode` (user preference,
+   localStorage-persisted) and `effectiveViewMode` (clamped to
+   `conversation` below `lg:` 1024px so a desktop-stored `document`
+   choice doesn't break the phone layout). The toggle button is only
+   rendered at `lg:` and lives at the top of `ChatWindow.vue`.
+   `ChatMessage.vue` branches on `effectiveViewMode`. `ErrorBubble`
+   renders identically in both modes — errors should always look like
+   errors regardless of layout preference.
+8. **Markdown tables** are wrapped in `<div class="md-table-wrap">`
    by `src/lib/markdown.ts` — `overflow-x: auto` on the wrap keeps
    wide tables inside the bubble. The flex chain has `min-width: 0`
    on `.markdown` so children can clip; **do not remove that rule**

@@ -107,6 +107,42 @@ Specs scoped via `testIgnore` in `playwright.config.ts`:
 - Everything else (chat-stream, error-resilience, table-rendering,
   pwa-shell, user-timezone) runs on every project.
 
+## Composer height
+
+The textarea's empty-state height is viewport-conditional via Tailwind
+classes on `ChatWindow.vue`:
+
+- `min-h-10` (~2.5rem ≈ one line + padding) below `md:`
+- `md:min-h-24` (~6rem ≈ three lines + padding) at `md:` (≥768px) and up
+
+Mobile keeps the compact height to preserve vertical space above the
+on-screen keyboard. Desktop / tablet gets a more inviting empty state
+that still auto-grows to `max-h-[50vh]` on input.
+
+## View modes
+
+Two layouts are available, selected by a top-right toggle visible only
+at `lg:` (≥1024px):
+
+- **Conversation** (default) — chat-bubble layout. Right-aligned blue
+  bubble for the user, left-aligned grey bubble for the agent.
+  `max-w-[85%]` per bubble. Renders below `lg:` regardless of the
+  stored preference.
+- **Document** — full-width role-tinted blocks up to `max-w-5xl`. Tiny
+  "You" / "Agent" label above each block. Better for table-heavy and
+  prose-heavy responses where the bubble's `max-w-[85%]` wastes
+  horizontal real estate.
+
+Logic lives in `src/composables/useViewMode.ts`. `effectiveViewMode` is
+what components should bind to — it clamps `document` back to
+`conversation` below `lg:` so a user who enables document mode on
+desktop doesn't get an unreadable layout when they later open the PWA
+on their phone.
+
+`ErrorBubble.vue` renders identically in both modes. Errors are a
+distinct visual language (red border, alert icon, retry) and should
+not pretend to be either chat bubbles or document blocks.
+
 ## Composer key handling
 
 The textarea uses Slack-style platform-aware key handling

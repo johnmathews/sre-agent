@@ -2,6 +2,7 @@
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useConversationsStore } from '../stores/conversations'
+import { useViewMode } from '../composables/useViewMode'
 import ChatMessage from './ChatMessage.vue'
 import ToolProgress from './ToolProgress.vue'
 
@@ -15,6 +16,7 @@ const emit = defineEmits<{
 
 const chat = useChatStore()
 const conversations = useConversationsStore()
+const { viewMode, effectiveViewMode, set: setViewMode } = useViewMode()
 
 const input = ref('')
 const scrollContainer = ref<HTMLDivElement | null>(null)
@@ -148,6 +150,57 @@ function handleKeydown(e: KeyboardEvent) {
       <span class="ml-2 text-sm font-medium text-gray-600 dark:text-gray-300">SRE Agent</span>
     </div>
 
+    <!-- View-mode toggle (lg+ only). Switches between bubble-style
+         conversation layout and full-width document layout. Hidden on
+         mobile / tablet portrait — those viewports have no horizontal
+         budget for document mode to pay off, and the bubble layout
+         already feels right at small widths. -->
+    <div
+      class="hidden lg:flex items-center justify-end gap-1 border-b border-gray-200 bg-white px-6 py-1.5 dark:border-gray-800 dark:bg-gray-950"
+    >
+      <div
+        class="inline-flex rounded-md border border-gray-200 bg-gray-50 p-0.5 dark:border-gray-700 dark:bg-gray-900"
+        role="group"
+        aria-label="View mode"
+      >
+        <button
+          type="button"
+          class="cursor-pointer rounded px-2 py-1 transition-colors"
+          :class="
+            viewMode === 'conversation'
+              ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-gray-100'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+          "
+          :aria-pressed="viewMode === 'conversation'"
+          aria-label="Conversation view (chat bubbles)"
+          title="Conversation view"
+          @click.stop="setViewMode('conversation')"
+        >
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.157 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.208 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z"/>
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="cursor-pointer rounded px-2 py-1 transition-colors"
+          :class="
+            viewMode === 'document'
+              ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-gray-100'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+          "
+          :aria-pressed="viewMode === 'document'"
+          aria-label="Document view (full-width blocks)"
+          title="Document view"
+          @click.stop="setViewMode('document')"
+        >
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 13.5h6M9 17.25h6"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
     <!-- Scrollable message area -->
     <div
       ref="scrollContainer"
@@ -209,7 +262,11 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
         </div>
       </div>
-      <div v-else class="mx-auto flex max-w-3xl min-w-0 flex-col gap-4">
+      <div
+        v-else
+        class="mx-auto flex min-w-0 flex-col gap-4"
+        :class="effectiveViewMode === 'document' ? 'max-w-5xl' : 'max-w-3xl'"
+      >
         <ChatMessage
           v-for="(msg, i) in chat.messages"
           :key="i"
@@ -234,8 +291,7 @@ function handleKeydown(e: KeyboardEvent) {
           rows="1"
           enterkeyhint="send"
           placeholder="Ask about your infrastructure…"
-          class="flex-1 resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
-          style="min-height: 2.5rem; max-height: 50vh; overflow-y: auto"
+          class="max-h-[50vh] min-h-10 flex-1 resize-y overflow-y-auto rounded-lg border border-gray-300 bg-white px-3 py-2 text-base text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50 md:min-h-24 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
           :disabled="chat.isStreaming"
           @input="autoResize"
           @keydown="handleKeydown"

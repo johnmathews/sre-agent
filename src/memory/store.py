@@ -454,9 +454,7 @@ def _extract_report_metrics(report_data_json: str) -> dict[str, int | float]:
     slo_failures = 0
     slo = data.get("slo_status")
     if isinstance(slo, dict):
-        # Count SLO metrics that fail their targets
-        if slo.get("p95_latency_seconds") is not None and slo["p95_latency_seconds"] > 15:
-            slo_failures += 1
+        # p95 latency is tracked as an SLI but no longer has a fixed target — see readme "Self-Observability".
         if slo.get("tool_success_rate") is not None and slo["tool_success_rate"] < 0.99:
             slo_failures += 1
         if slo.get("llm_error_rate") is not None and slo["llm_error_rate"] > 0.01:

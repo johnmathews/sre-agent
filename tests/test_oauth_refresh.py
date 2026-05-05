@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.agent.oauth_refresh import ensure_valid_token
+from src.agent.oauth_refresh import ensure_valid_token, get_token_health
 
 
 def _make_creds(expires_at: int, refresh_token: str = "sk-ant-ort01-fake") -> dict[str, object]:
@@ -249,3 +249,68 @@ async def test_concurrent_refresh_serialized(tmp_path: Path) -> None:
     # The lock serializes access: the first call refreshes, the second sees
     # the updated token and skips the HTTP call.
     assert call_count == 1, f"Expected 1 refresh call but got {call_count}"
+
+
+# ---------------------------------------------------------------------------
+# get_token_health: status reflects "does a human need to act?", not expiry timing.
+# Refresh-token-present means the system self-heals on the next LLM call.
+# ---------------------------------------------------------------------------
+
+
+class TestGetTokenHealth:
+    def test_healthy_when_token_valid_with_refresh(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        far_future_ms = int((time.time() + 3600) * 1000)  # 1h ahead
+        creds_path.write_text(json.dumps(_make_creds(far_future_ms)))
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "healthy"
+
+    def test_healthy_when_near_expiry_with_refresh(self, tmp_path: Path) -> None:
+        # Inside the previous "< 1h remaining" window — must no longer be degraded.
+        creds_path = tmp_path / ".credentials.json"
+        soon_ms = int((time.time() + 600) * 1000)  # 10 min ahead
+        creds_path.write_text(json.dumps(_make_creds(soon_ms)))
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "healthy"
+
+    def test_healthy_when_expired_with_refresh(self, tmp_path: Path) -> None:
+        # Self-heals on next call; not a real degradation.
+        creds_path = tmp_path / ".credentials.json"
+        past_ms = int((time.time() - 600) * 1000)  # expired 10 min ago
+        creds_path.write_text(json.dumps(_make_creds(past_ms)))
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, detail = get_token_health()
+        assert status == "healthy"
+        assert detail is not None
+        assert "refresh" in detail.lower()
+
+    def test_degraded_when_valid_but_no_refresh_token(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        far_future_ms = int((time.time() + 3600) * 1000)
+        creds_path.write_text(json.dumps(_make_creds(far_future_ms, refresh_token="")))
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "degraded"
+
+    def test_unhealthy_when_expired_and_no_refresh_token(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        past_ms = int((time.time() - 600) * 1000)
+        creds_path.write_text(json.dumps(_make_creds(past_ms, refresh_token="")))
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "unhealthy"
+
+    def test_healthy_when_no_credentials_file(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / "missing.json"
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "healthy"
+
+    def test_unhealthy_when_credentials_unreadable(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text("{not valid json")
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            status, _ = get_token_health()
+        assert status == "unhealthy"

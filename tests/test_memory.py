@@ -414,7 +414,8 @@ class TestExtractReportMetrics:
         data = {
             "alerts": {"active_alerts": 3},
             "slo_status": {
-                "p95_latency_seconds": 20.0,  # > 15 = fail
+                # p95 latency is tracked but no longer counts toward slo_failures
+                "p95_latency_seconds": 20.0,
                 "tool_success_rate": 0.98,  # < 0.99 = fail
                 "llm_error_rate": 0.005,  # < 0.01 = pass
                 "availability": 0.999,  # > 0.995 = pass
@@ -424,7 +425,7 @@ class TestExtractReportMetrics:
         }
         metrics = _extract_report_metrics(json.dumps(data))
         assert metrics["active_alerts"] == 3
-        assert metrics["slo_failures"] == 2  # latency + tool_success_rate
+        assert metrics["slo_failures"] == 1  # only tool_success_rate
         assert metrics["total_log_errors"] == 250
         assert metrics["estimated_cost"] == 0.12
 

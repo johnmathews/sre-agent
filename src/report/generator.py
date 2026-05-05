@@ -743,14 +743,25 @@ async def _generate_narrative(
 # ---------------------------------------------------------------------------
 
 
-def _format_slo_row(name: str, target: str, actual: float | None, higher_is_better: bool = True) -> list[str]:
-    """Build a list of cell values for one SLO row: [name, target, actual, status]."""
+def _format_slo_row(
+    name: str,
+    target: str,
+    actual: float | None,
+    higher_is_better: bool = True,
+    actual_unit: str | None = None,
+) -> list[str]:
+    """Build a list of cell values for one SLO row: [name, target, actual, status].
+
+    When *actual_unit* is supplied (e.g. ``"s"``) it drives the formatting of the
+    actual value. Otherwise the unit is inferred from the target string. Pass an
+    explicit unit when the target has no fixed threshold (e.g. ``"—"``).
+    """
     if actual is None:
         return [name, target, "N/A", "-"]
-    # Format actual to match target's unit for readability
-    if "%" in target:
+    unit = actual_unit if actual_unit is not None else ("%" if "%" in target else "s" if "s" in target else "")
+    if unit == "%":
         actual_str = f"{actual * 100:.2f}%"
-    elif "s" in target:
+    elif unit == "s":
         actual_str = f"{actual:.2f}s"
     else:
         actual_str = f"{actual:.4f}" if actual < 1 else f"{actual:.2f}"
@@ -804,7 +815,7 @@ def format_report_markdown(data: ReportData) -> str:
         lines.append("*SLO data unavailable.*")
     else:
         slo_rows = [
-            _format_slo_row("P95 Latency", "< 15s", slo["p95_latency_seconds"], higher_is_better=False),
+            _format_slo_row("P95 Latency", "—", slo["p95_latency_seconds"], actual_unit="s"),
             _format_slo_row("Tool Success Rate", "> 99%", slo["tool_success_rate"]),
             _format_slo_row("LLM Error Rate", "< 1%", slo["llm_error_rate"], higher_is_better=False),
             _format_slo_row("Availability", "> 99.5%", slo["availability"]),
@@ -1135,7 +1146,7 @@ def format_report_html(data: ReportData) -> str:
         slo_body = '<p style="color: #6c757d; font-style: italic;">SLO data unavailable.</p>'
     else:
         slo_rows_raw = [
-            _format_slo_row("P95 Latency", "< 15s", slo["p95_latency_seconds"], higher_is_better=False),
+            _format_slo_row("P95 Latency", "—", slo["p95_latency_seconds"], actual_unit="s"),
             _format_slo_row("Tool Success Rate", "> 99%", slo["tool_success_rate"]),
             _format_slo_row("LLM Error Rate", "< 1%", slo["llm_error_rate"], higher_is_better=False),
             _format_slo_row("Availability", "> 99.5%", slo["availability"]),

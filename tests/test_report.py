@@ -208,6 +208,15 @@ class TestFormatSloRowHumanReadable:
         row = _format_slo_row("P95 Latency", "< 15s", 16.5, higher_is_better=False)
         assert "16.50s" in row
 
+    def test_no_target_with_explicit_unit(self) -> None:
+        # Latency is now tracked without a fixed SLO; the row still renders the
+        # value in seconds and reports a non-PASS/FAIL status.
+        row = _format_slo_row("P95 Latency", "—", 12.3, actual_unit="s")
+        assert "12.30s" in row
+        assert "—" in row
+        assert "PASS" not in row
+        assert "FAIL" not in row
+
 
 class TestFormatLokiWithDelta:
     def test_week_over_week_delta_up(self) -> None:

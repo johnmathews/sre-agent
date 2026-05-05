@@ -167,6 +167,11 @@ async def _do_refresh(
 def get_token_health() -> tuple[str, str | None]:
     """Check OAuth token status for the health endpoint.
 
+    Semantics: "degraded"/"unhealthy" mean a human will need to act. As long as
+    a refresh token is present, expiry timing is self-healing on the next LLM
+    call (see ``ensure_valid_token``), so it stays "healthy" regardless of how
+    close to (or past) expiry the access token is.
+
     Returns:
         (status, detail) — status is "healthy", "degraded", or "unhealthy".
     """
@@ -194,15 +199,12 @@ def get_token_health() -> tuple[str, str | None]:
     refresh_token = oauth.get("refreshToken")
     has_refresh = isinstance(refresh_token, str) and len(refresh_token) > 0
 
+    if has_refresh:
+        if remaining_ms < 0:
+            return ("healthy", f"access token expired {-remaining_hours:.1f}h ago, will refresh on next call")
+        return ("healthy", f"access token valid ({remaining_hours:.1f}h), refresh token present")
+
     if remaining_ms < 0:
-        if has_refresh:
-            return ("degraded", f"access token expired {-remaining_hours:.1f}h ago, refresh token available")
         return ("unhealthy", f"access token expired {-remaining_hours:.1f}h ago, no refresh token")
 
-    if remaining_hours < 1:
-        return ("degraded", f"access token expires in {remaining_hours * 60:.0f}m")
-
-    if not has_refresh:
-        return ("degraded", f"access token valid ({remaining_hours:.1f}h), but no refresh token")
-
-    return ("healthy", f"access token valid ({remaining_hours:.1f}h), refresh token present")
+    return ("degraded", f"access token valid ({remaining_hours:.1f}h), but no refresh token")

@@ -506,10 +506,14 @@ Grafana dashboard (`dashboards/sre-assistant-sli.json`).
 
 | SLI                          | Target SLO  | How It's Measured                     |
 | ---------------------------- | ----------- | ------------------------------------- |
-| Agent response latency (p95) | < 15s       | `sre_assistant_request_duration_seconds` histogram |
+| Agent response latency (p95) | — (tracked, no target) | `sre_assistant_request_duration_seconds` histogram |
 | Tool call success rate       | > 99%       | `sre_assistant_tool_calls_total` by status |
 | LLM API error rate           | < 1%        | `sre_assistant_llm_calls_total` by status |
 | End-to-end availability      | > 99.5%     | `sre_assistant_component_healthy` gauge |
+
+Latency is recorded as an SLI but not bound to an SLO: scope and answer accuracy are prioritised over speed, and most
+latency reductions trade off against quality. The histogram, p95 panel, and per-query latency breakdown remain so
+catastrophic regressions stay visible.
 
 Per-query cost tracking: token usage, estimated cost, tool call count — all exported to Prometheus and aggregated
 in the Grafana dashboard.

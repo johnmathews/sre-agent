@@ -123,7 +123,8 @@ This is a **public repository**. Never commit secrets, API keys, tokens, or inte
 
 - **Never silently fail.** Every degradation is visible to the user and logged. Each tool has explicit failure handling
   with graceful fallback.
-- **Self-observability.** The assistant tracks its own SLIs: response latency (p95 < 15s), tool call success rate (>
-  99%), RAG relevance (> 80% top-3), availability (> 99.5%), LLM error rate (< 1%).
+- **Self-observability.** The assistant tracks its own SLIs: response latency p95 (recorded, no target — scope and
+  accuracy take priority over speed), tool call success rate (> 99%), RAG relevance (> 80% top-3), availability
+  (> 99.5%), LLM error rate (< 1%).
 - **Cost awareness.** Every query tracks token usage, estimated cost, tool call count, and latency breakdown.
 - **Advisory only.** The assistant advises but never takes automated remediation actions.

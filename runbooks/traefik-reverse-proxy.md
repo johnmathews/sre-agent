@@ -2,9 +2,8 @@
 
 ## Purpose
 
-Traefik handles ingress for public-facing services (Immich, Jellyfin) that are exposed through the Cloudflare Tunnel. It
-provides rate limiting on authentication and API routes since these services bypass Cloudflare Zero Trust access
-policies.
+Traefik handles ingress for the public-facing services exposed through the Cloudflare Tunnel. It applies rate limiting
+on authentication and high-traffic public routes, since these services bypass Cloudflare Zero Trust access policies.
 
 ## Architecture
 
@@ -14,18 +13,32 @@ Internet -> Cloudflare Edge -> Cloudflare Tunnel -> cloudflared LXC (192.168.2.1
 ```
 
 - Only port 443 is exposed to the public internet (via Cloudflare proxy)
-- Traefik applies rate limiting to auth/API routes for Immich and Jellyfin
 - Traefik runs as a Docker container on a dedicated LXC (192.168.2.108)
-- Configuration is file-based (dynamic config in `/srv/apps/traefik/`)
+- Configuration is file-based (dynamic config in `/srv/apps/traefik/`); the source of truth for the routers/services
+  table below is `proxmox-setup/roles/traefik_lxc/templates/routers.yml.j2` in the home-server ansible repo
 - Dashboard: https://traefik.itsa-pizza.com/dashboard/
 - API overview: https://traefik.itsa-pizza.com/api/overview
 
 ### Services routed through Traefik
 
-| Service  | Backend Address           | Rate Limited |
-| -------- | ------------------------- | ------------ |
-| Immich   | http://192.168.2.113      | Auth routes  |
-| Jellyfin | http://192.168.2.105:8096 | Auth routes  |
+Public hosts use `<sub>.itsa-pizza.com`. Rate-limit middlewares: `immich-login-rl` and `jelly-auth-rl` cap login
+attempts; `public-rl` / `music-rl` allow normal browsing bursts on public services; `sre-auth` is HTTP basic auth.
+
+| Router(s)                          | Backend                  | Middlewares          |
+| ---------------------------------- | ------------------------ | -------------------- |
+| `immich`, `immich-auth`            | http://192.168.2.113:2283 | immich-login-rl on auth paths |
+| `immich-share`                     | http://192.168.2.113:3000 | (no rate limit)      |
+| `jelly`, `jelly-auth`              | http://192.168.2.110:8096 | jelly-login-rl, jelly-auth-rl on `/Users/AuthenticateByName` |
+| `navidrome`, `navidrome-auth`      | http://192.168.2.109:4533 | music-rl, navidrome-auth-rl on `/auth` |
+| `music`                            | http://192.168.2.109:9180 | public-rl            |
+| `timer`                            | http://192.168.2.106:8082 | public-rl            |
+| `docs`                             | http://192.168.2.106:3003 | public-rl            |
+| `homepage`                         | http://192.168.2.106:3002 | public-rl            |
+| `uptime`                           | http://192.168.2.106:3001 | public-rl            |
+| `speed`                            | http://192.168.2.100:8080 | public-rl            |
+| `sre`                              | http://192.168.2.106:8501 | public-rl, sre-auth (basic auth) |
+| `stats` (Grafana public dashboards) | http://192.168.2.106:3000 | public-rl, restricted to `/public-dashboards`, `/public/`, `/api/public/` |
+| `traefik-dash`, `traefik-api-local`, `traefik-ip` | api@internal | local-only (RFC1918 only) |
 
 ## Key Commands
 
@@ -192,6 +205,7 @@ Plus a `/var/log/traefik` bind mount and logrotate.
 ## Related Services
 
 - Cloudflare Tunnel (upstream traffic source — see cloudflared-tunnel runbook)
-- Immich, Jellyfin (backend services)
+- Backend services routed via Traefik: Immich (192.168.2.113), Jellyfin (jellyfin_lxc 192.168.2.110), Navidrome
+  (192.168.2.109), and the apps_lxc bundle on 192.168.2.106 (timer, docs, homepage, uptime, sre, grafana public)
 - Cloudflare Zero Trust (access policies for other services)
 - Loki (access logs from Traefik container)

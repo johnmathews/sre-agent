@@ -34,8 +34,47 @@ Internet -> Cloudflare Edge -> Cloudflare Tunnel -> cloudflared LXC (192.168.2.1
 ```sh
 ssh traefik  # root@192.168.2.108
 docker ps | grep traefik
-docker logs traefik --tail 50
+sudo journalctl CONTAINER_NAME=traefik --no-pager | tail -50
 ```
+
+**Do not use `docker logs traefik` for anything older than the last few minutes.** The container uses Docker's `journald`
+log driver, and `docker logs` only returns whatever Docker still has buffered — typically a small fraction of the real
+stream. Always use `journalctl` (or Loki) for historical traefik logs.
+
+### Log retrieval
+
+```sh
+# Time-windowed (host-local timezone)
+ssh traefik 'sudo journalctl CONTAINER_NAME=traefik \
+             --since "2026-05-06 10:08:00" --until "2026-05-06 10:12:00" --no-pager'
+
+# By full container ID — robust if the container was recreated mid-window
+ssh traefik 'CID=$(docker inspect traefik --format "{{.Id}}"); \
+             sudo journalctl CONTAINER_ID_FULL=$CID --since "1 hour ago" --no-pager'
+
+# Internal/error lines only (drop access-log lines)
+ssh traefik 'sudo journalctl CONTAINER_NAME=traefik --since "today" --no-pager \
+             | grep -vE "(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH) /"'
+```
+
+Or via Loki — same data, faster, no SSH:
+
+```logql
+# All requests to one public host
+{hostname="traefik", service_name="traefik"} |= "journal-insights"
+
+# Non-2xx responses
+{hostname="traefik", service_name="traefik"} |~ "\" [45][0-9]{2} "
+```
+
+Access-log line format:
+`<client-ip> - - [<ts>] "<METHOD> <path> HTTP/<v>" <status> <bytes> "<referer>" "<UA>" <id> "<router>" "<origin-url>" <duration>`
+
+Useful fields: `<router>` identifies which traefik router matched (e.g. `journal-insights@docker`), `<origin-url>` is the
+upstream traefik proxied to, `<duration>` is `<n>ms` or `<n>s`.
+
+**Timezones**: `journalctl --since/--until` accepts host-local time (CEST on this LXC). The timestamp inside each
+access-log line is UTC. Be explicit about which one you're correlating with.
 
 ### View active routers and services
 
@@ -102,6 +141,46 @@ rate(node_cpu_seconds_total{instance=~".*108.*", mode!="idle"}[5m])
 1. Traefik handles TLS termination for the Cloudflare tunnel
 2. Check certificate status in Traefik dashboard
 3. If certs expired, check ACME/Let's Encrypt resolver logs: `docker logs traefik | grep -i acme`
+
+### Traefik silently stops logging while still serving traffic
+
+**Symptom**: container is `Up`, requests are being routed (downstream apps log them, the dashboard works), but
+`journalctl CONTAINER_NAME=traefik` has no entries past some point. Loki shows the same gap. Confirmed seen on
+2026-05-06: traefik stopped emitting access logs at 09:30 CEST while continuing to serve requests.
+
+**Diagnostic checklist**:
+
+1. Confirm the container is alive and forwarding traffic — `docker ps`, hit a known route in a browser, check
+   `traefik_service_requests_total` in Prometheus is still incrementing.
+2. Compare last log line vs. container start time:
+   ```sh
+   ssh traefik 'docker inspect traefik --format "Started: {{.State.StartedAt}}"; \
+                sudo journalctl CONTAINER_NAME=traefik --no-pager | tail -1'
+   ```
+3. Rule out journald rate-limit or a full disk:
+   ```sh
+   ssh traefik 'sudo journalctl --disk-usage; \
+                sudo journalctl --since "1 hour ago" --no-pager 2>&1 \
+                | grep -iE "Suppressed|rate-limit|kept"'
+   ```
+4. Check for a journald restart that could have wedged a long-lived writer:
+   ```sh
+   ssh traefik 'sudo journalctl -u systemd-journald --since "yesterday" --no-pager | tail'
+   ```
+
+**Fix**: `ssh traefik 'docker restart traefik'` reopens the stdout pipe to the journald driver. **Caveat**: this drops
+in-flight long-lived streams (the config sets `writeTimeout: 0` for audio/video). Schedule rather than snipe.
+
+**Permanent mitigation** (not yet applied): switch traefik's `accessLog` block to a file path with a bind-mounted
+directory, decoupling access logs from the journald driver:
+
+```yaml
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100
+```
+
+Plus a `/var/log/traefik` bind mount and logrotate.
 
 ### Routing misconfiguration
 

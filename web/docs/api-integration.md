@@ -50,6 +50,19 @@ server holds the connection open until it finishes or errors.
 | `answer`     | final answer text (may include `session_id`) | terminal: appended to messages |
 | `error`      | error message                        | terminal: appended as error bubble |
 
+### Error event fields
+
+An `error` event may carry, in addition to `content`:
+
+- `reason` — machine-readable failure code. Known values: `llm_auth_failed`
+  (LLM credential rejected — operator must re-authenticate), `agent_no_answer`
+  (generic; retry is usually safe). Unknown/absent ⇒ frontend shows generic copy.
+- `detail` — raw underlying cause, shown in the ErrorBubble "Details" disclosure.
+
+When `reason` is present, `content` is the operator-facing message and is shown
+as the bubble explanation. When absent (older backend), `content` is treated as
+the raw cause and shown behind Details, preserving prior behavior.
+
 ### Why `fetch` + `ReadableStream` instead of `EventSource`?
 
 `EventSource` (the browser's built-in SSE client) is **GET-only**. The backend

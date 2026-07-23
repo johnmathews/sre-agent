@@ -33,6 +33,10 @@ export interface StreamEvent {
   type: StreamEventType
   content: string
   session_id?: string
+  /** Machine-readable failure code — only on `error` events. */
+  reason?: string
+  /** Raw underlying cause — only on `error` events; shown in Details. */
+  detail?: string
 }
 
 export interface StreamRequest {

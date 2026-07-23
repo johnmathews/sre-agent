@@ -18,6 +18,10 @@ export interface ChatMessageError {
   status?: number
   /** Raw upstream message — shown inside the "Details" disclosure. */
   causeMessage?: string
+  /** Machine-readable failure code from a structured SSE error event. */
+  reason?: string
+  /** Operator-facing message from the backend (structured error events). */
+  backendMessage?: string
   /** The user's question — used by the inline Retry button. */
   originalQuestion: string
 }
@@ -217,7 +221,8 @@ export const useChatStore = defineStore('chat', () => {
     const controller = new AbortController()
     s.abortController = controller
     let answer: string | null = null
-    let sseError: { content: string } | null = null
+    let sseError: { content: string; reason?: string; detail?: string } | null =
+      null
 
     try {
       for await (const event of streamWithRecovery(
@@ -250,7 +255,11 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
         } else if (event.type === 'error') {
-          sseError = { content: event.content || 'Backend reported an error' }
+          sseError = {
+            content: event.content || 'Backend reported an error',
+            reason: event.reason,
+            detail: event.detail,
+          }
         }
         triggerRef(sessions)
       }
@@ -293,7 +302,9 @@ export const useChatStore = defineStore('chat', () => {
         kind: 'error',
         error: {
           category: 'sse-error-event',
-          causeMessage: sseError.content,
+          reason: sseError.reason,
+          backendMessage: sseError.reason ? sseError.content : undefined,
+          causeMessage: sseError.reason ? sseError.detail : sseError.content,
           originalQuestion: q,
         },
       })

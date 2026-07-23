@@ -230,6 +230,38 @@ test.describe('error resilience and recovery', () => {
     await expect(page.getByText('duplicate question')).toHaveCount(2)
   })
 
+  test('structured auth error renders reason-specific copy', async ({
+    page,
+  }) => {
+    await mockBackend(page, {
+      streamBody: buildSseBody([
+        { type: 'status', content: 'Thinking...' },
+        {
+          type: 'error',
+          content:
+            "The agent can't authenticate to the LLM provider — its credential was rejected. An operator needs to renew it on the host and restart the agent.",
+          reason: 'llm_auth_failed',
+          detail: 'refresh token rejected by Anthropic (invalid_grant)',
+        },
+      ]),
+    })
+    await page.goto('/')
+    await send(page)
+
+    const alert = page.getByRole('alert')
+    await expect(alert).toBeVisible()
+    // Reason-specific heading.
+    await expect(alert).toContainText("Agent can't reach the LLM")
+    // Operator-facing message shown directly, NOT the canned generic text.
+    await expect(alert).toContainText('renew it on the host')
+    await expect(alert).not.toContainText('often a tool error')
+    // Raw cause + reason live behind the Details disclosure.
+    await expect(alert.getByText('invalid_grant')).not.toBeVisible()
+    await alert.getByRole('button', { name: 'Details' }).click()
+    await expect(alert.getByText('invalid_grant')).toBeVisible()
+    await expect(alert).toContainText('llm_auth_failed')
+  })
+
   test('successful happy path still works', async ({ page }) => {
     // Sanity: error-resilience plumbing didn't break the basic flow.
     await mockBackend(page)

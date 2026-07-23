@@ -29,6 +29,8 @@ const heading = computed(() => {
     case 'http-5xx':
       return `Agent unavailable (HTTP ${props.error.status ?? '5xx'})`
     case 'sse-error-event':
+      if (props.error.reason === 'llm_auth_failed')
+        return "Agent can't reach the LLM"
       return 'Agent reported an error'
     case 'no-body':
       return 'Empty response from agent'
@@ -54,7 +56,10 @@ const explanation = computed(() => {
     case 'http-5xx':
       return 'The agent backend hit an internal error. Usually transient — retry in a moment.'
     case 'sse-error-event':
-      return 'The agent processed your question but failed to produce an answer (often a tool error or LLM provider issue). Retrying is safe.'
+      return (
+        props.error.backendMessage ??
+        'The agent processed your question but failed to produce an answer (often a tool error or LLM provider issue). Retrying is safe.'
+      )
     case 'no-body':
       return 'The server returned a 200 OK with no body — likely a proxy misconfiguration.'
     case 'aborted':
@@ -120,6 +125,9 @@ const showRetry = computed(() => props.error.category !== 'aborted')
             class="mt-3 rounded border border-red-200 bg-red-100/60 p-2 font-mono text-xs text-red-900 dark:border-red-800/60 dark:bg-red-950/60 dark:text-red-100"
           >
             <div><span class="font-semibold">Category:</span> {{ error.category }}</div>
+            <div v-if="error.reason">
+              <span class="font-semibold">Reason:</span> {{ error.reason }}
+            </div>
             <div v-if="error.status">
               <span class="font-semibold">Status:</span> {{ error.status }}
             </div>

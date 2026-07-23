@@ -69,6 +69,8 @@ export interface SseEvent {
   type: string
   content: string
   session_id?: string
+  reason?: string
+  detail?: string
 }
 
 /** Build an SSE body from a list of events. */

@@ -214,7 +214,7 @@ Get ZFS pool health and dataset space usage from TrueNAS.
 List NFS and SMB shares configured on TrueNAS.
 
 - **Input:** `share_type` (optional: "nfs" or "smb")
-- **Example questions:** "What NFS shares exist?", "Is the paperless share enabled?", "Which SMB shares are configured?"
+- **Example questions:** "What NFS shares exist?", "Is the document-store share enabled?", "Which SMB shares are configured?"
 - **Returns:** Share path, enabled/disabled status, read-only flag, allowed networks/hosts, comments
 
 ### truenas_snapshots

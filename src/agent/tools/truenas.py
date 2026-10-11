@@ -649,7 +649,7 @@ TOOL_DESCRIPTION_POOL_STATUS = HOMELAB_CONTEXT + (
 TOOL_DESCRIPTION_LIST_SHARES = HOMELAB_CONTEXT + (
     "List NFS and SMB shares configured on TrueNAS, and optionally show active SMB sessions. "
     "Use this to answer questions like 'what NFS shares exist?', "
-    "'is the paperless share enabled?', 'which SMB shares are configured?', "
+    "'is the document-store share enabled?', 'which SMB shares are configured?', "
     "'who is connected to the NAS?', 'which shares have active sessions?', "
     "or 'show all NAS shares'.\n\n"
     "Returns share path, enabled/disabled status, read-only flag, "

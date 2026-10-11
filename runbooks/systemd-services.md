@@ -112,7 +112,7 @@ Use these to connect to any host by name (configured in `~/.ssh/config`):
 | `jelly`       | 192.168.2.110 | root          | `jellyt`        |
 | `immich`      | 192.168.2.113 | root          | `immicht`       |
 | `tube`        | 192.168.2.116 | root          | `tubet`         |
-| `paperless`   | 192.168.2.117 | root          | `paperlesst`    |
+| `documents`   | 192.168.2.117 | root          | `documentst`    |
 | `pbs`         | 192.168.2.200 | root          | `pbst`          |
 | `key`         | 192.168.2.201 | john          | `keyt`          |
 | `router`      | 192.168.2.1   | admin         | —               |

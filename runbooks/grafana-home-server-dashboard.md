@@ -239,7 +239,7 @@ container?", "top 5 containers by CPU?"
 max by (hostname) (machine_memory_bytes{job="cadvisor", hostname=~"$hostname"})
 ```
 
-**Agent capability:** Answer "which container uses the most memory?", "how much memory is the Paperless container
+**Agent capability:** Answer "which container uses the most memory?", "how much memory is the library-webserver container
 using?", "total Docker memory footprint?"
 
 ---

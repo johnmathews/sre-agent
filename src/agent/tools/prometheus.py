@@ -388,7 +388,7 @@ TOOL_DESCRIPTION_INSTANT = HOMELAB_CONTEXT + (
     "- The `hostname` label identifies each host "
     "(e.g. hostname='jellyfin', hostname='proxmox', hostname='immich')\n"
     "- Managed hosts (node_exporter + cadvisor): proxmox, truenas, media, infra, "
-    "jellyfin, immich, prometheus, tube-archivist, paperless, open-webui\n"
+    "jellyfin, immich, prometheus, tube-archivist, documents, open-webui\n"
     "- Network/services (dedicated exporters): mikrotik, home-assistant, unbound, "
     "key-server, traefik, cloudflared\n"
     "- Exporters: node_exporter (node_*), cadvisor (container_*), pve_exporter (pve_*), "

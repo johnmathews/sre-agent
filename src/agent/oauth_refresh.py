@@ -2,7 +2,8 @@
 
 The Claude CLI's OAuth access tokens expire every ~8 hours.  In headless
 environments (Docker) the CLI does not auto-refresh them, so the app must
-handle refresh before each SDK query.
+handle refresh: before each SDK query, and on a timer (:func:`keep_fresh`) so
+a dead refresh token is noticed even when nobody is asking questions.
 
 Flow:
   1. Read ``$CLAUDE_CONFIG_DIR/.credentials.json``
@@ -77,6 +78,32 @@ async def ensure_valid_token() -> None:
             await _refresh_if_needed()
     except Exception:
         logger.warning("OAuth token refresh failed", exc_info=True)
+
+
+async def keep_fresh(interval_s: float) -> None:
+    """Run :func:`ensure_valid_token` every ``interval_s`` seconds, forever.
+
+    Refresh used to run only before an SDK query, so a refresh token that died
+    while the agent sat unused stayed invisible: ``get_token_health`` reads
+    "expired access token + refresh token present" as healthy, and is right to,
+    until something actually spends the token. On 2026-10-24 that something was
+    a user's question, after two idle months. On a timer the token is spent at
+    least once per access-token lifetime (~8h), so a rejection flips health to
+    unhealthy, and with it the credentials gauge and the alert, without a
+    question being asked. It also keeps the refresh token in use, in case
+    idleness is what kills it.
+
+    Started from the FastAPI lifespan. It must share that process because the
+    rejection flag is process memory. Each iteration is guarded: a loop that
+    died on one bad read would silence the alarm for good.
+    """
+    while True:
+        try:
+            if _credentials_path().exists():
+                await ensure_valid_token()
+        except Exception:
+            logger.warning("Scheduled OAuth credential check failed", exc_info=True)
+        await asyncio.sleep(interval_s)
 
 
 async def _refresh_if_needed() -> None:
@@ -202,9 +229,9 @@ def get_token_health() -> tuple[str, str | None]:
     """Check OAuth token status for the health endpoint.
 
     Semantics: "degraded"/"unhealthy" mean a human will need to act. As long as
-    a refresh token is present, expiry timing is self-healing on the next LLM
-    call (see ``ensure_valid_token``), so it stays "healthy" regardless of how
-    close to (or past) expiry the access token is.
+    a refresh token is present, expiry timing is self-healing on the next
+    refresh (see ``ensure_valid_token`` and ``keep_fresh``), so it stays
+    "healthy" regardless of how close to (or past) expiry the access token is.
 
     Returns:
         (status, detail) — status is "healthy", "degraded", or "unhealthy".
@@ -252,3 +279,20 @@ def get_token_health() -> tuple[str, str | None]:
         return ("unhealthy", f"access token expired {-remaining_hours:.1f}h ago, no refresh token")
 
     return ("degraded", f"access token valid ({remaining_hours:.1f}h), but no refresh token")
+
+
+def credentials_healthy() -> float:
+    """Value of ``sre_assistant_claude_credentials_healthy``, read on every scrape.
+
+    1.0 while :func:`get_token_health` says ``healthy``, 0.0 when a human must
+    act (``degraded`` or ``unhealthy``). Backed by the same check as the
+    ``oauth_token`` component of ``/health``, so the alert and the health
+    endpoint cannot disagree. A read that raises reports 0.0, so a broken check
+    pages rather than going quiet.
+    """
+    try:
+        status, _ = get_token_health()
+    except Exception:
+        logger.warning("Credential health read failed during scrape", exc_info=True)
+        return 0.0
+    return 1.0 if status == "healthy" else 0.0

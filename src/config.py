@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Anthropic API (optional — only needed when LLM_PROVIDER=anthropic)
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-4-6"
+    # How often the background task spends the OAuth refresh token when due,
+    # so a dead login is caught without waiting for a question. 0 disables it.
+    claude_credentials_check_interval_s: float = 900.0
 
     prometheus_url: str
     grafana_url: str

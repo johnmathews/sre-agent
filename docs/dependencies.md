@@ -116,7 +116,8 @@ from `$CLAUDE_CONFIG_DIR/.credentials.json`. Two critical details:
    options set `env={"ANTHROPIC_API_KEY": ""}` so the CLI falls through to OAuth credentials (item 5).
 
 2. **OAuth access tokens expire every ~8 hours.** The CLI does not auto-refresh them in headless/Docker environments.
-   `src/agent/oauth_refresh.py` checks `expiresAt` before each query and refreshes via
+   `src/agent/oauth_refresh.py` checks `expiresAt` before each query, and on a background timer
+   (`keep_fresh`, every `CLAUDE_CREDENTIALS_CHECK_INTERVAL_S`, default 900 s), and refreshes via
    `POST https://api.anthropic.com/v1/oauth/token` using the stored refresh token. The `.claude` directory must be
    mounted read-write in Docker so the refreshed token can be saved.
 
@@ -125,9 +126,14 @@ authentication — actual auth comes from the mounted credentials directory.
 
 #### When the refresh token itself dies
 
-The access token self-heals on every call, but the **refresh token** can be permanently revoked (re-login elsewhere,
-logout, or a server-side rotation), in which case the refresh endpoint returns `400 invalid_grant`. This is *not*
-self-healing — a human must re-authenticate. Recovery:
+The access token self-heals on every refresh, but the **refresh token** can die: revoked (re-login elsewhere,
+logout, a server-side rotation) or expired (`"Refresh token expired"`). Either way the refresh endpoint returns
+`400 invalid_grant`. This is *not* self-healing — a human must re-authenticate.
+
+Expiry is what happened on 2026-10-24. Refresh then ran only before a query, the agent had no questions for two
+months, and the refresh token aged out unspent while `/health` read "access token expired, will refresh on next call"
+as healthy. The first signal was a user's failed question. The `keep_fresh` timer exists so the token is spent at
+least once per access-token lifetime: a dead one is now found within ~8h, by the timer, not by a user. Recovery:
 
 ```bash
 ssh <host>           # the Docker host with the mounted ~/.claude
@@ -135,28 +141,24 @@ claude login         # interactive OAuth — rewrites ~/.credentials.json (NOT `
 docker compose restart sre-agent
 ```
 
-Two signals surface this so it is never silent:
+Three signals surface this, all backed by the same `oauth_refresh.py::get_token_health` check:
 
 - **`/health`** — the `oauth_token` component flips from `healthy` to `unhealthy` with detail
   `"refresh token rejected by Anthropic (invalid_grant) — re-authenticate ..."`. The flag is keyed to the rejected
-  token's hash, so it clears automatically once `claude login` writes a fresh token (see
-  `oauth_refresh.py::get_token_health`).
-- **`/metrics`** — `sre_assistant_oauth_refresh_total{status="error"}` increments on every failed refresh. Recommended
-  Prometheus alert (provision in the homelab Prometheus / Grafana unified alerting, not in this repo):
+  token's hash, so it clears automatically once `claude login` writes a fresh token.
+- **`sre_assistant_claude_credentials_healthy`** — 1 while the login is usable, 0 when a human must act
+  (`degraded` or `unhealthy`). It is computed on every scrape, unlike `sre_assistant_component_healthy`, which only
+  updates when `/health` is called. Exported only when `LLM_PROVIDER=anthropic`; absent otherwise.
+- **The webapp** — a failed question returns the `llm_auth_failed` error (see `code-flow.md` → Structured error
+  events), counted by `sre_assistant_agent_errors_total{reason="llm_auth_failed"}`.
 
-  ```yaml
-  - alert: SreAgentOAuthRefreshFailing
-    expr: increase(sre_assistant_oauth_refresh_total{status="error"}[15m]) > 0
-    for: 15m
-    labels:
-      severity: warning
-    annotations:
-      summary: "SRE agent OAuth token refresh is failing"
-      description: >-
-        The SRE agent cannot refresh its Anthropic OAuth token. If the refresh
-        token was revoked, re-authenticate on the host with `claude login` and
-        restart the container. See docs/dependencies.md → "When the refresh token itself dies".
-  ```
+The alert is the Grafana rule **"SRE agent: Claude login needs renewing"**: gauge `< 1` for 5 minutes, and a missing
+series also fires. It sends a Pushover notification carrying the recovery commands above. The rule, and the Logins row on the Home
+Server dashboard, live in Grafana and are documented in the home-server repo
+(`documentation/grafana-alerting.md`), not here.
+
+Do not alert on `sre_assistant_oauth_token_remaining_seconds < 0`. The access token lapses every ~8h by design and
+the next refresh fixes it, so that alert would fire routinely and say nothing about whether a human is needed.
 
 ### Prometheus
 

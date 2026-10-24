@@ -422,3 +422,134 @@ class TestRejectedRefreshToken:
         with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
             status, _ = get_token_health()
         assert status == "healthy"
+
+
+class TestCredentialsHealthy:
+    def test_one_while_healthy(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() + 3600) * 1000))))
+
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            assert oauth_refresh.credentials_healthy() == 1.0
+
+    def test_one_while_access_token_expired_but_refreshable(self, tmp_path: Path) -> None:
+        # Routine: the access token lapses every ~8h and the next refresh fixes it.
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() - 60) * 1000))))
+
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            assert oauth_refresh.credentials_healthy() == 1.0
+
+    @pytest.mark.asyncio
+    async def test_zero_after_refresh_token_rejected(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() - 60) * 1000))))
+
+        await _attempt_refresh(creds_path, status_code=400, body={"error": "invalid_grant"})
+
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            assert oauth_refresh.credentials_healthy() == 0.0
+
+    def test_zero_when_degraded(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() + 3600) * 1000), refresh_token="")))
+
+        with patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path):
+            assert oauth_refresh.credentials_healthy() == 0.0
+
+    def test_zero_when_health_check_raises(self) -> None:
+        with patch("src.agent.oauth_refresh.get_token_health", side_effect=RuntimeError("boom")):
+            assert oauth_refresh.credentials_healthy() == 0.0
+
+
+class _StopLoop(BaseException):
+    """Raised from a patched sleep to end keep_fresh's infinite loop."""
+
+
+def _sleep_then_stop(after: int) -> AsyncMock:
+    """A replacement for asyncio.sleep that lets ``after`` iterations run, then stops."""
+    calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= after:
+            raise _StopLoop
+
+    return AsyncMock(side_effect=fake_sleep)
+
+
+class TestKeepFresh:
+    @pytest.mark.asyncio
+    async def test_idle_dead_refresh_token_turns_gauge_red_without_a_question(self, tmp_path: Path) -> None:
+        # The 2026-10-24 failure: access token long expired, refresh token dead,
+        # nobody asking questions. The timer alone must surface it.
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() - 61 * 86400) * 1000))))
+        body = {"error": "invalid_grant", "error_description": "Refresh token expired"}
+        mock_response = type(
+            "R",
+            (),
+            {"status_code": 400, "json": lambda self: body, "text": json.dumps(body)},
+        )()
+        mock_cm, mock_client = _mock_async_client(mock_response)
+
+        with (
+            patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),
+            patch("src.agent.oauth_refresh.httpx.AsyncClient", return_value=mock_cm),
+            patch("src.agent.oauth_refresh.asyncio.sleep", _sleep_then_stop(after=1)),
+        ):
+            assert oauth_refresh.credentials_healthy() == 1.0
+            with pytest.raises(_StopLoop):
+                await oauth_refresh.keep_fresh(900.0)
+            assert oauth_refresh.credentials_healthy() == 0.0
+
+        mock_client.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runs_every_interval(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() + 3600) * 1000))))
+        sleep = _sleep_then_stop(after=3)
+
+        with (
+            patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),
+            patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock) as mock_ensure,
+            patch("src.agent.oauth_refresh.asyncio.sleep", sleep),
+            pytest.raises(_StopLoop),
+        ):
+            await oauth_refresh.keep_fresh(900.0)
+
+        assert mock_ensure.await_count == 3
+        sleep.assert_awaited_with(900.0)
+
+    @pytest.mark.asyncio
+    async def test_survives_a_failing_iteration(self, tmp_path: Path) -> None:
+        creds_path = tmp_path / ".credentials.json"
+        creds_path.write_text(json.dumps(_make_creds(int((time.time() + 3600) * 1000))))
+
+        with (
+            patch("src.agent.oauth_refresh._credentials_path", return_value=creds_path),
+            patch(
+                "src.agent.oauth_refresh.ensure_valid_token",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("boom"), None],
+            ) as mock_ensure,
+            patch("src.agent.oauth_refresh.asyncio.sleep", _sleep_then_stop(after=2)),
+            pytest.raises(_StopLoop),
+        ):
+            await oauth_refresh.keep_fresh(900.0)
+
+        assert mock_ensure.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_credentials_file(self, tmp_path: Path) -> None:
+        with (
+            patch("src.agent.oauth_refresh._credentials_path", return_value=tmp_path / "missing.json"),
+            patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock) as mock_ensure,
+            patch("src.agent.oauth_refresh.asyncio.sleep", _sleep_then_stop(after=1)),
+            pytest.raises(_StopLoop),
+        ):
+            await oauth_refresh.keep_fresh(900.0)
+
+        mock_ensure.assert_not_awaited()

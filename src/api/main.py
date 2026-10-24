@@ -208,9 +208,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         tool_count = len(await mcp_server.list_tools())
         logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
 
+        credentials_check: asyncio.Task[None] | None = None
+        if settings.llm_provider == "anthropic":
+            from src.agent.oauth_refresh import credentials_healthy, keep_fresh
+            from src.observability.metrics import observe_claude_credentials
+
+            observe_claude_credentials(credentials_healthy)
+            if settings.claude_credentials_check_interval_s > 0:
+                credentials_check = asyncio.create_task(keep_fresh(settings.claude_credentials_check_interval_s))
+
         start_scheduler()
         yield
         stop_scheduler()
+        if credentials_check is not None:
+            credentials_check.cancel()
         logger.info("Shutting down SRE assistant")
 
 

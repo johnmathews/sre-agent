@@ -4,6 +4,8 @@ All metrics are module-level singletons registered with the default
 prometheus_client registry.  Import them wherever instrumentation is needed.
 """
 
+from collections.abc import Callable
+
 from prometheus_client import Counter, Gauge, Histogram, Info
 
 # ---------------------------------------------------------------------------
@@ -126,6 +128,30 @@ OAUTH_REFRESH_TOTAL = Counter(
     "Total OAuth token refresh attempts",
     labelnames=["status"],
 )
+
+# Registered on demand by observe_claude_credentials(), not at import: an
+# unlabelled Gauge exports 0 from the moment it exists, which on the OpenAI path
+# would read as "login needs renewing" for a login that is not in use.
+_claude_credentials_gauge: Gauge | None = None
+
+
+def observe_claude_credentials(read_healthy: Callable[[], float]) -> None:
+    """Export ``sre_assistant_claude_credentials_healthy``, read on every scrape.
+
+    1 while the Claude OAuth login is usable, 0 when a human must re-authenticate
+    on the host. Called from the FastAPI lifespan only when
+    ``LLM_PROVIDER=anthropic``, so the series is absent otherwise. Grafana's
+    "SRE agent: Claude login needs renewing" rule reads it.
+    """
+    global _claude_credentials_gauge  # noqa: PLW0603
+
+    if _claude_credentials_gauge is None:
+        _claude_credentials_gauge = Gauge(
+            "sre_assistant_claude_credentials_healthy",
+            "1 while the Claude OAuth login is usable, 0 when a human must re-authenticate",
+        )
+    _claude_credentials_gauge.set_function(read_healthy)
+
 
 AGENT_ERRORS_TOTAL = Counter(
     "sre_assistant_agent_errors_total",

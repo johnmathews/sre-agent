@@ -34,6 +34,10 @@ src/api/main.py::ask()
       -> query(prompt=full_prompt, options=options)  # claude-agent-sdk
 ```
 
+The same `ensure_valid_token()` also runs from a background task, `oauth_refresh.keep_fresh()`, which the FastAPI
+lifespan starts when `LLM_PROVIDER=anthropic`. It runs every `CLAUDE_CREDENTIALS_CHECK_INTERVAL_S` (default 900 s),
+whether or not anyone is asking questions.
+
 The SDK path uses MCP tools (`src/agent/mcp_tools.py`) that wrap the same LangChain tool functions. The system prompt
 is built fresh each call with current timestamps and `mcp__sre__` tool name prefixes. Conversation history is injected
 into the prompt (context stuffing) since each `query()` call is stateless.

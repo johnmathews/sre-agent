@@ -67,6 +67,7 @@ def mock_settings() -> Generator[Any]:
             "openai_base_url": "",
             "anthropic_api_key": "",
             "anthropic_model": "claude-sonnet-4-20250514",
+            "claude_credentials_check_interval_s": 900.0,
             "extra_docs_dirs": "",
             "prometheus_url": "http://prometheus.test:9090",
             "grafana_url": "http://grafana.test:3000",

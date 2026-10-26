@@ -487,7 +487,7 @@ src/memory/
 
 A daily job inside `sre-agent` that reviews pending third-party image updates, emails a recommendation and, on
 approval, deploys and verifies them. Optional: it runs only when the config path, DB path, WUD credentials and public
-base URL are set (and `UPGRADE_ADVISOR_CRON` for the schedule). Code: `src/upgrades/`, approval endpoint
+base URL are set (and `UPGRADE_ADVISOR_CRON` for the schedule). Approvals additionally need `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`; without them the approval endpoint denies every request. Code: `src/upgrades/`, approval endpoint
 `src/api/upgrades.py`, schedule in `src/report/scheduler.py`.
 
 ### What runs when

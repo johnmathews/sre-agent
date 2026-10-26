@@ -89,7 +89,8 @@ The project is built incrementally. Each phase produces a working, demonstrable 
    reliability
 5. **Evaluation Framework** — Automated test cases scoring tool selection, retrieval relevance, answer quality
 6. **Weekly Reliability Report** — Scheduled summarization of alerts, changes, SLO status
-7. **Upgrade Advisor** — Daily review of pending third-party image updates (found by What's Up Docker), emailed
+7. **Agent Memory Store** — Persistent SQLite memory for reports, incidents and metric baselines
+8. **Upgrade Advisor** — Daily review of pending third-party image updates (found by What's Up Docker), emailed
    verdicts, one single-use approval link, guarded deploys through WUD and post-deploy verification
 
 ## Eval Quality

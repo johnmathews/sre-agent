@@ -16,7 +16,7 @@ the current behaviour is in `docs/architecture.md` ("Upgrade Advisor"). Decision
   `extra=forbid`. `auto_deploy: true` is rejected until the auto path exists.
 - **Prompt and text safety (R11, R17, R18).** Remote text is fenced as untrusted with a nonce and escaped in email
   and pages. An ambiguous or unparseable model answer fails closed to `needs_you`; the candidate-not-newer and
-  unknown-running-version cases and the model-less path for an unreleased build follow the same fail-closed idea.
+  unknown-running-version cases follow the same fail-closed idea. `review()` itself fails closed to `needs_you` if it is ever called without a candidate release; the daily job holds unreleased builds earlier, at the gate.
   Parse failures log lengths only, never content.
 - **Store hardening (R12).** Batch membership has one source (`verdicts.batch_id`), the token is generated and
   hashed in `create_batch`, consumption is one atomic UPDATE, `check_batch` gives a non-mutating GET.

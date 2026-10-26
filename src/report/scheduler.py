@@ -13,9 +13,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from src.config import get_settings
-from src.observability.metrics import REPORT_DURATION, REPORTS_TOTAL
+from src.observability.metrics import REPORT_DURATION, REPORTS_TOTAL, UPGRADE_RUNS_TOTAL
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
+from src.upgrades.config import is_advisor_configured
+from src.upgrades.job import run_advisor
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +53,48 @@ async def _scheduled_report_job() -> None:
         logger.exception("Scheduled report generation failed")
 
 
+async def _scheduled_advisor_job() -> None:
+    """Run the Upgrade Advisor; an unexpected exception is logged and counted, never raised into the scheduler."""
+    try:
+        await run_advisor()
+    except Exception:
+        UPGRADE_RUNS_TOTAL.labels(status="error").inc()
+        logger.exception("Scheduled upgrade advisor run failed")
+
+
 def start_scheduler() -> None:
-    """Start the APScheduler if a cron expression is configured."""
+    """Start the APScheduler if the report and/or advisor cron expression is configured."""
     global _scheduler  # noqa: PLW0603
 
     settings = get_settings()
-    if not settings.report_schedule_cron:
-        logger.info("Report scheduler disabled (REPORT_SCHEDULE_CRON not set)")
+    advisor_cron = settings.upgrade_advisor_cron
+    advisor_enabled = bool(advisor_cron) and is_advisor_configured()
+    if advisor_cron and not advisor_enabled:
+        logger.warning("UPGRADE_ADVISOR_CRON is set but the advisor is not fully configured; job not scheduled")
+    if not settings.report_schedule_cron and not advisor_enabled:
+        logger.info("Scheduler disabled (REPORT_SCHEDULE_CRON and UPGRADE_ADVISOR_CRON not usable)")
         return
 
-    trigger = CronTrigger.from_crontab(settings.report_schedule_cron)
     _scheduler = AsyncIOScheduler()
-    _scheduler.add_job(
-        _scheduled_report_job,
-        trigger=trigger,
-        id="weekly_report",
-        name="Weekly Reliability Report",
-        replace_existing=True,
-    )
+    if settings.report_schedule_cron:
+        _scheduler.add_job(
+            _scheduled_report_job,
+            trigger=CronTrigger.from_crontab(settings.report_schedule_cron),
+            id="weekly_report",
+            name="Weekly Reliability Report",
+            replace_existing=True,
+        )
+        logger.info("Report job scheduled with cron: %s", settings.report_schedule_cron)
+    if advisor_enabled:
+        _scheduler.add_job(
+            _scheduled_advisor_job,
+            trigger=CronTrigger.from_crontab(advisor_cron, timezone=settings.user_timezone),
+            id="upgrade_advisor",
+            name="Upgrade Advisor",
+            replace_existing=True,
+        )
+        logger.info("Upgrade advisor job scheduled with cron: %s", advisor_cron)
     _scheduler.start()
-    logger.info("Report scheduler started with cron: %s", settings.report_schedule_cron)
 
 
 def stop_scheduler() -> None:

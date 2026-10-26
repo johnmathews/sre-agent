@@ -148,6 +148,7 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.releases.get_settings",
         "src.upgrades.review.get_settings",
         "src.upgrades.verify.get_settings",
+        "src.upgrades.job.get_settings",
     ]
     with ExitStack() as stack:
         for site in patch_sites:

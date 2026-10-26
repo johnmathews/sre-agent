@@ -1,0 +1,100 @@
+"""Tests for the Upgrade Advisor email rendering and the scheduler hook."""
+
+from datetime import UTC, datetime
+from typing import Any
+
+import src.report.scheduler as sched_mod
+from src.upgrades.email import render, render_abort
+from src.upgrades.job import ItemResult, RunSummary
+from src.upgrades.models import DeployRecord
+from src.upgrades.review import Review
+
+NOW = datetime(2026, 10, 26, 6, 0, tzinfo=UTC)
+
+
+def _deploy(did: int, outcome: str, detail: str) -> DeployRecord:
+    return DeployRecord.model_validate(
+        {"id": did, "verdict_id": did, "started_at": NOW, "outcome": outcome, "running_digest": None, "detail": detail}
+    )
+
+
+def _summary() -> RunSummary:
+    return RunSummary(
+        items=[
+            ItemResult(
+                container="alpha", verdict="upgrade", review=Review(verdict="upgrade", summary="Safe <b>bump</b>")
+            ),
+            ItemResult(container="beta", verdict="needs_you", review=Review(verdict="needs_you", summary="Major")),
+            ItemResult(container="gamma", verdict="hold", hold_reason="unreleased build"),
+            ItemResult(container="delta", error="WudError"),
+        ],
+        approve_url="https://example.com/upgrades/batches/b1?token=T%2Bx",
+        outcomes=[_deploy(1, "ok", "digest matches; warning: loki skipped <x>"), _deploy(2, "failed", "readiness")],
+        outcome_containers={1: "alpha", 2: "beta"},
+    )
+
+
+def test_email_subject_counts_and_lists_hold_reasons() -> None:
+    subject, markdown, html_body = render(_summary())
+    assert subject == "Upgrades: 1 recommended, 1 need you"
+    assert "gamma" in markdown
+    assert "unreleased build" in markdown
+    assert "WudError" in markdown
+    assert "https://example.com/upgrades/batches/b1?token=T%2Bx" in markdown
+    assert "unreleased build" in html_body
+    assert "Held" in html_body
+
+
+def test_email_escapes_html_and_flags_warnings() -> None:
+    _, markdown, html_body = render(_summary())
+    assert "<b>bump</b>" not in html_body
+    assert "&lt;b&gt;bump&lt;/b&gt;" in html_body
+    assert "&lt;x&gt;" in html_body
+    assert "alpha: verified with warnings" in markdown
+    assert "Warning: loki skipped <x>" in markdown
+    assert "beta: failed" in markdown
+
+
+def test_abort_email_names_only_the_exception_class() -> None:
+    subject, markdown, html_body = render_abort("ValidationError")
+    assert subject == "Upgrade advisor could not run: ValidationError"
+    assert "ValidationError" in markdown
+    assert "ValidationError" in html_body
+
+
+async def test_scheduler_registers_advisor_job_only_when_configured(mock_settings: Any) -> None:
+    mock_settings.report_schedule_cron = ""
+    mock_settings.upgrade_advisor_cron = "0 6 * * *"
+    sched_mod.stop_scheduler()
+    sched_mod.start_scheduler()
+    assert sched_mod._scheduler is None  # cron set but advisor not configured
+
+    mock_settings.upgrade_advisor_config_path = "/etc/allow.yml"
+    mock_settings.upgrade_advisor_db_path = "/data/advisor.db"
+    mock_settings.upgrade_advisor_wud_username = "u"
+    mock_settings.upgrade_advisor_wud_password = "p"
+    mock_settings.upgrade_advisor_public_base_url = "https://example.com"
+    sched_mod.start_scheduler()
+    try:
+        assert sched_mod._scheduler is not None
+        assert sched_mod._scheduler.get_job("upgrade_advisor") is not None
+        assert sched_mod._scheduler.get_job("weekly_report") is None
+    finally:
+        sched_mod.stop_scheduler()
+
+    mock_settings.upgrade_advisor_cron = ""
+    mock_settings.report_schedule_cron = "0 8 * * 1"
+    sched_mod.start_scheduler()
+    try:
+        assert sched_mod._scheduler is not None
+        assert sched_mod._scheduler.get_job("upgrade_advisor") is None
+        assert sched_mod._scheduler.get_job("weekly_report") is not None
+    finally:
+        sched_mod.stop_scheduler()
+
+
+async def test_scheduled_advisor_job_swallows_and_counts_errors() -> None:
+    from unittest.mock import AsyncMock, patch
+
+    with patch("src.report.scheduler.run_advisor", AsyncMock(side_effect=RuntimeError("boom"))):
+        await sched_mod._scheduled_advisor_job()  # must not raise

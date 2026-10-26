@@ -19,11 +19,11 @@ def _use_mock_settings(mock_settings: Any) -> None:
     mock_settings.upgrade_advisor_wud_password = "s3cret"
 
 
-def _container(name: str = "prometheus") -> AdvisedContainer:
+def _container(name: str = "prometheus", wud_url: str = WUD_URL) -> AdvisedContainer:
     return AdvisedContainer(
         name=name,
         host="prometheus",
-        wud_url=WUD_URL,
+        wud_url=wud_url,
         registry="registry-1.docker.io",
         repository="prom/prometheus",
         tag="v3",
@@ -143,3 +143,58 @@ class TestTriggerDeploy:
         )
         with pytest.raises(WudError, match="prometheus"):
             await trigger_deploy(_container(), "abc123")
+
+
+@pytest.mark.integration
+class TestRobustness:
+    @respx.mock
+    async def test_wud_id_is_path_quoted(self) -> None:
+        route = respx.post(url__regex=r".*/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        await trigger_deploy(_container(), "a/b?c")
+        assert route.calls[0].request.url.raw_path == b"/api/containers/a%2Fb%3Fc/triggers/dockercompose/deploy"
+
+    @respx.mock
+    async def test_record_without_id_raises_wud_error(self) -> None:
+        record = _record("prometheus")
+        del record["id"]
+        respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
+        with pytest.raises(WudError, match="malformed"):
+            await get_container(_container())
+
+    @respx.mock
+    async def test_malformed_field_raises_wud_error(self) -> None:
+        record = _record("prometheus", image={"digest": {"value": 5}})
+        respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
+        with pytest.raises(WudError, match="malformed"):
+            await get_container(_container())
+
+    async def test_invalid_url_raises_wud_error(self) -> None:
+        with pytest.raises(WudError):
+            await get_container(_container(wud_url="not a url"))
+        with pytest.raises(WudError):
+            await trigger_deploy(_container(wud_url="not a url"), "abc")
+
+    @respx.mock
+    async def test_trailing_slash_wud_url(self) -> None:
+        route = respx.get(f"{WUD_URL}/api/containers").mock(
+            return_value=httpx.Response(200, json=[_record("prometheus")])
+        )
+        await get_container(_container(wud_url=WUD_URL + "/"))
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_password_never_in_error_or_logs(self, caplog: pytest.LogCaptureFixture) -> None:
+        respx.get(f"{WUD_URL}/api/containers").mock(side_effect=httpx.ConnectError("refused"))
+        respx.post(f"{WUD_URL}/api/containers/abc/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(500, json={"message": "boom"})
+        )
+        with caplog.at_level("DEBUG"):
+            with pytest.raises(WudError) as e1:
+                await get_container(_container())
+            with pytest.raises(WudError) as e2:
+                await trigger_deploy(_container(), "abc")
+        assert "s3cret" not in str(e1.value) + str(e2.value)
+        assert "s3cret" not in caplog.text
+        assert "failed" in caplog.text

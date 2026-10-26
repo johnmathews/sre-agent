@@ -2,10 +2,10 @@
 
 import logging
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from src.config import get_settings
 from src.upgrades.config import AdvisedContainer
@@ -51,45 +51,52 @@ def _dig(record: dict[str, Any], *keys: str) -> Any:
     return value
 
 
+def _fail(message: str) -> WudError:
+    """Log ``message`` and build the WudError (the caller raises it, chained)."""
+    logger.error(message)
+    return WudError(message)
+
+
 async def get_container(c: AdvisedContainer) -> WudContainer:
     """Fetch WUD's record for ``c`` (matched on ``name``)."""
     url = f"{c.wud_url.rstrip('/')}/api/containers"
     try:
         async with httpx.AsyncClient(auth=_auth(), timeout=GET_TIMEOUT_SECONDS) as client:
             response = await client.get(url)
-    except httpx.HTTPError as exc:
-        logger.error("WUD request failed for %s: %r", c.name, exc)
-        raise WudError(f"WUD request failed for {_where(c)}: {exc!r}") from exc
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        raise _fail(f"WUD request failed for {_where(c)}: {exc!r}") from exc
     if not response.is_success:
-        raise WudError(f"WUD returned HTTP {response.status_code} listing containers for {_where(c)}")
+        raise _fail(f"WUD returned HTTP {response.status_code} listing containers for {_where(c)}")
     try:
         records = response.json()
     except ValueError as exc:
-        raise WudError(f"WUD returned invalid JSON for {_where(c)}") from exc
+        raise _fail(f"WUD returned invalid JSON for {_where(c)}") from exc
     if not isinstance(records, list):
-        raise WudError(f"WUD returned an unexpected payload for {_where(c)}")
+        raise _fail(f"WUD returned an unexpected payload for {_where(c)}")
     for record in records:
         if isinstance(record, dict) and record.get("name") == c.name:
-            return WudContainer(
-                id=str(record["id"]),
-                name=c.name,
-                running_digest=_dig(record, "image", "digest", "value"),
-                candidate_digest=_dig(record, "result", "digest"),
-                update_available=bool(record.get("updateAvailable", False)),
-                update_kind=_dig(record, "updateKind", "kind"),
-            )
-    raise WudError(f"WUD does not list {_where(c)}")
+            try:
+                return WudContainer(
+                    id=str(record["id"]),
+                    name=c.name,
+                    running_digest=_dig(record, "image", "digest", "value"),
+                    candidate_digest=_dig(record, "result", "digest"),
+                    update_available=bool(record.get("updateAvailable", False)),
+                    update_kind=_dig(record, "updateKind", "kind"),
+                )
+            except (KeyError, ValidationError) as exc:
+                raise _fail(f"WUD returned a malformed record for {_where(c)}: {exc!r}") from exc
+    raise _fail(f"WUD does not list {_where(c)}")
 
 
 async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     """Ask WUD to deploy the pending update; returns once WUD reports the deploy finished."""
-    url = f"{c.wud_url.rstrip('/')}/api/containers/{wud_id}/triggers/dockercompose/deploy"
+    url = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}/triggers/dockercompose/deploy"
     try:
         async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS) as client:
             response = await client.post(url)
-    except httpx.HTTPError as exc:
-        logger.error("WUD deploy request failed for %s: %r", c.name, exc)
-        raise WudError(f"WUD deploy request failed for {_where(c)}: {exc!r}") from exc
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        raise _fail(f"WUD deploy request failed for {_where(c)}: {exc!r}") from exc
     if response.is_success:
         return
     detail = ""
@@ -99,5 +106,4 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
             detail = str(body.get("message") or body.get("error") or "")
     except ValueError:
         pass
-    logger.error("WUD deploy failed for %s: HTTP %s %s", c.name, response.status_code, detail)
-    raise WudError(f"WUD deploy failed for {_where(c)}: HTTP {response.status_code} {detail}".rstrip())
+    raise _fail(f"WUD deploy failed for {_where(c)}: HTTP {response.status_code} {detail}".rstrip())

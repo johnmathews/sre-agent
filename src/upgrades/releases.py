@@ -21,6 +21,7 @@ TIMEOUT_SECONDS = 30.0
 MAX_DIGEST_LOOKUPS = 10
 MAX_ISSUES = 10
 _VERSION_RE = re.compile(r"v?([0-9]{1,9}(?:\.[0-9]{1,9}){0,3})")
+_MAJOR_TAG_RE = re.compile(r"v?([0-9]{1,9})")
 _REPO_ADAPTER: TypeAdapter[str] = TypeAdapter(GithubRepo)
 
 
@@ -127,7 +128,7 @@ def _parse_release(record: Any) -> Release | None:
         return None
 
 
-async def list_releases(github_repo: str, limit: int = 30) -> list[Release]:
+async def list_releases(github_repo: str, limit: int = 100) -> list[Release]:
     """Stable, published releases of ``github_repo`` as GitHub lists them (newest first)."""
     _check_repo(github_repo)
     what = f"releases of {github_repo}"
@@ -140,9 +141,16 @@ async def list_releases(github_repo: str, limit: int = 30) -> list[Release]:
 async def release_for_digest(c: AdvisedContainer, digest: str, releases: list[Release]) -> Release | None:
     """The release whose image tag currently resolves to ``digest`` (newest first, at most 10 registry lookups).
 
+    A major-only watched tag (``1``, ``v3``) first restricts the releases to that major, so a maintained back-branch
+    is not crowded out by newer majors.
+
     ``None`` means every looked-up tag answered and none matched (an unreleased build). If nothing matched and any
     lookup failed, the answer is unknown, so ``RegistryError`` is raised instead of reporting "unreleased".
     """
+    major_tag = _MAJOR_TAG_RE.fullmatch(c.tag)
+    if major_tag is not None:
+        major = int(major_tag.group(1))
+        releases = [r for r in releases if r.version[0] == major]
     newest_first = sorted(releases, key=lambda r: r.published_at, reverse=True)[:MAX_DIGEST_LOOKUPS]
     failed = 0
     for release in newest_first:

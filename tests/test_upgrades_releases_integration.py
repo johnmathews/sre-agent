@@ -31,14 +31,14 @@ def _use_mock_settings(mock_settings: Any) -> None:
     mock_settings.upgrade_advisor_github_token = ""
 
 
-def _container(release_tag_format: str = "{release}") -> AdvisedContainer:
+def _container(release_tag_format: str = "{release}", tag: str = "latest") -> AdvisedContainer:
     return AdvisedContainer(
         name="app",
         host="app",
         wud_url="http://10.0.0.15:3010",
         registry="registry.example.com",
         repository="example/app",
-        tag="latest",
+        tag=tag,
         github_repo="example/app",
         release_tag_format=release_tag_format,
         readiness_url="http://10.0.0.15:9090/-/ready",
@@ -277,3 +277,65 @@ async def test_release_for_digest_version_placeholder_strips_leading_v(monkeypat
         release = Release(tag=tag, version=(1,), published_at=now, body="", url="u")
         assert await release_for_digest(_container("{version}"), DIGEST, [release]) == release
         assert looked_up == [expected]
+
+
+def _major_scope_releases() -> list[Release]:
+    newer = [_release(f"2.{i}.0", 20 + i, (2, i, 0)) for i in range(10)]
+    return [*newer, _release("1.23.16", 5, (1, 23, 16))]
+
+
+async def _lookups(monkeypatch: pytest.MonkeyPatch, match_tag: str) -> list[str]:
+    calls: list[str] = []
+
+    async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
+        calls.append(tag)
+        return {DIGEST} if tag == match_tag else {OTHER}
+
+    monkeypatch.setattr("src.upgrades.releases.tag_digests", fake_digests)
+    return calls
+
+
+async def test_major_only_tag_matches_older_release_of_that_major(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = await _lookups(monkeypatch, "1.23.16")
+    found = await release_for_digest(_container(tag="1"), DIGEST, _major_scope_releases())
+    assert found is not None
+    assert found.tag == "1.23.16"
+    assert calls == ["1.23.16"]
+
+
+async def test_non_major_tag_keeps_newest_ten_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = await _lookups(monkeypatch, "1.23.16")
+    assert await release_for_digest(_container(tag="latest"), DIGEST, _major_scope_releases()) is None
+    assert len(calls) == 10
+    assert all(t.startswith("2.") for t in calls)
+
+
+@pytest.mark.parametrize("tag", ["3", "v3"])
+async def test_major_tag_scopes_to_that_major(monkeypatch: pytest.MonkeyPatch, tag: str) -> None:
+    calls = await _lookups(monkeypatch, "3.1.0")
+    releases = [_release("4.0.0", 9, (4, 0, 0)), _release("3.1.0", 8, (3, 1, 0)), _release("2.9.0", 7, (2, 9, 0))]
+    found = await release_for_digest(_container(tag=tag), DIGEST, releases)
+    assert found is not None
+    assert found.tag == "3.1.0"
+    assert calls == ["3.1.0"]
+
+
+async def test_major_tag_with_no_release_of_that_major_is_unreleased(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = await _lookups(monkeypatch, "x")
+    assert await release_for_digest(_container(tag="1"), DIGEST, [_release("2.0.0", 9, (2, 0, 0))]) is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("tag", ["1.2", "v1.2.3", "main", "1-alpine"])
+async def test_other_tags_are_not_major_scoped(monkeypatch: pytest.MonkeyPatch, tag: str) -> None:
+    calls = await _lookups(monkeypatch, "x")
+    releases = [_release("2.0.0", 9, (2, 0, 0)), _release("1.0.0", 8, (1, 0, 0))]
+    assert await release_for_digest(_container(tag=tag), DIGEST, releases) is None
+    assert len(calls) == 2
+
+
+@respx.mock
+async def test_list_releases_default_fetches_a_full_page() -> None:
+    route = respx.get(RELEASES_URL).mock(return_value=httpx.Response(200, json=[]))
+    await list_releases("example/app")
+    assert route.calls.last.request.url.params["per_page"] == "100"

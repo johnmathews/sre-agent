@@ -11,6 +11,7 @@ import logging
 import sqlite3
 import weakref
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,7 +19,7 @@ from src.config import get_settings
 from src.observability.metrics import UPGRADE_DEPLOYS_TOTAL
 from src.upgrades import store, verify, wud
 from src.upgrades.config import AdvisedContainer, load_allowlist
-from src.upgrades.models import DeployOutcome, DeployRecord, VerdictRecord
+from src.upgrades.models import DeployOutcome, DeployRecord, TriggerState, VerdictRecord
 from src.upgrades.registry import DIGEST_RE
 from src.upgrades.verify import INTERRUPTED_IN_FLIGHT
 
@@ -28,6 +29,7 @@ DEPLOYABLE = frozenset({"upgrade", "needs_you"})
 SUPERSEDED = "superseded by a newer review"
 UPSTREAM_MOVED = "upstream moved since review; re-reviewed next run"
 ALREADY_RUNNING = "already running"
+TRIGGERING = "deploy triggering"
 TRIGGERED = "deploy triggered; verification pending"
 INTERRUPTED = "deploy interrupted (shutdown)"
 
@@ -96,13 +98,25 @@ def _digest(value: object) -> str | None:
     return value if isinstance(value, str) and DIGEST_RE.fullmatch(value) else None
 
 
-async def _attempt(
+@dataclass(frozen=True)
+class _Ready:
+    """Every guard passed: what the trigger needs."""
+
+    container: AdvisedContainer
+    wud_id: str
+    running: str | None  # the pre-deploy digest, recorded so verification can tell "never deployed"
+
+
+_Refusal = tuple[DeployOutcome, str | None, str]
+
+
+async def _check_guards(
     conn: sqlite3.Connection,
     verdict: VerdictRecord,
     containers: dict[str, AdvisedContainer],
     allowlist_error: str | None,
-) -> tuple[DeployOutcome, str | None, str]:
-    """Check the guards and trigger the deploy; returns ``(outcome, running digest, detail)``."""
+) -> _Ready | _Refusal:
+    """``_Ready`` when the deploy may go ahead, else ``(outcome, running digest, detail)`` to record."""
     latest = store.latest_verdict_for_container(conn, verdict.container)
     if latest is None or latest.id != verdict.id:
         return "skipped", None, SUPERSEDED
@@ -120,25 +134,13 @@ async def _attempt(
         return "skipped", running, ALREADY_RUNNING
     if record.candidate_digest != verdict.candidate_digest:
         return "skipped", running, UPSTREAM_MOVED
-    # Upstream can still move between this read and the trigger (WUD deploys whatever it then considers the
-    # candidate). That window is covered after the fact: verification compares the running digest with the reviewed
-    # one and emails at once on a mismatch.
-    try:
-        await wud.trigger_deploy(container, record.id)
-    except wud.WudError:
-        return "failed", running, "WUD deploy trigger failed (WudError)"
-    except asyncio.CancelledError:
-        # Shutdown while WUD was deploying: the deploy may well have completed. Leave it pending so the next advisor
-        # run's verify_pending settles it against the real running digest, then let the cancellation through.
-        _save(conn, verdict, "pending_verify", running, INTERRUPTED_IN_FLIGHT)
-        raise
-    return "pending_verify", running, TRIGGERED
+    return _Ready(container=container, wud_id=record.id, running=running)
 
 
 def _save(
     conn: sqlite3.Connection, verdict: VerdictRecord, outcome: DeployOutcome, running: str | None, detail: str
 ) -> DeployRecord | None:
-    """Persist one outcome. If that fails (e.g. after WUD already deployed), still try to leave a ``failed`` row."""
+    """Persist one final (never-triggered) outcome. If that fails, still try to leave a ``failed`` row."""
     try:
         deploy_id = store.save_deploy(
             conn, verdict_id=verdict.id, now=datetime.now(UTC), outcome=outcome, running_digest=running, detail=detail
@@ -153,8 +155,67 @@ def _save(
         except Exception:
             logger.exception("Could not record any deploy row for %s (verdict %s)", verdict.container, verdict.id)
             return None
-    log = logger.info if outcome in {"pending_verify", "skipped"} else logger.error
+    log = logger.info if outcome == "skipped" else logger.error
     log("Deploy %s of %s (verdict %s): %s, %s", deploy_id, verdict.container, verdict.id, outcome, detail)
+    saved = store.get_deploy(conn, deploy_id)
+    if saved is not None:  # verification counts verified outcomes; these never reach it
+        UPGRADE_DEPLOYS_TOTAL.labels(outcome=saved.outcome).inc()
+    return saved
+
+
+def _settle(conn: sqlite3.Connection, deploy_id: int, state: TriggerState, detail: str) -> bool:
+    """Record how the trigger ended. On a DB error the row stays ``triggering`` and ``verify_pending`` settles it as
+    interrupted once ``TRIGGER_TIMEOUT_SECONDS`` have passed."""
+    try:
+        return store.settle_trigger(conn, deploy_id, state, detail)
+    except Exception:
+        logger.exception(
+            "Could not record the trigger result (%s) of deploy %s; settled by a later run", state, deploy_id
+        )
+        return False
+
+
+async def _trigger(
+    conn: sqlite3.Connection, verdict: VerdictRecord, ready: _Ready, delay_seconds: int
+) -> DeployRecord | None:
+    """Write the ``triggering`` row, then trigger WUD and settle the row with how that ended.
+
+    The row exists before WUD is asked, so a hard kill mid-trigger still leaves a trace that ``verify_pending``
+    settles. Upstream can still move between the guard read and the trigger (WUD deploys whatever it then considers
+    the candidate); verification compares the running digest with the reviewed one and emails at once on a mismatch.
+    """
+    try:
+        deploy_id = store.save_deploy(
+            conn,
+            verdict_id=verdict.id,
+            now=datetime.now(UTC),
+            outcome="triggering",
+            running_digest=ready.running,
+            detail=TRIGGERING,
+            trigger_state="triggering",
+        )
+    except Exception as exc:  # no row to track the deploy by: never trigger
+        logger.exception(
+            "Could not record the deploy of %s (verdict %s); not triggering", verdict.container, verdict.id
+        )
+        return _save(conn, verdict, "failed", None, f"not deployed: could not record the deploy ({type(exc).__name__})")
+    logger.info("Deploy %s of %s (verdict %s): triggering", deploy_id, verdict.container, verdict.id)
+    try:
+        await wud.trigger_deploy(ready.container, ready.wud_id)
+    except asyncio.CancelledError:
+        # Shutdown while WUD was deploying: the deploy may well have completed. Leave it pending so the next advisor
+        # run's verify_pending settles it against the real running digest, then let the cancellation through.
+        _settle(conn, deploy_id, "interrupted", INTERRUPTED_IN_FLIGHT)
+        raise
+    except Exception as exc:  # WudError (incl. our timeout) or a bug: WUD may or may not have deployed
+        kind = type(exc).__name__
+        logger.error("Deploy %s of %s: WUD trigger failed (%s); verifying now", deploy_id, verdict.container, kind)  # noqa: TRY400
+        if _settle(conn, deploy_id, "trigger_error", f"WUD trigger failed: {kind}"):
+            _keep(_verify_later(deploy_id, 0))
+        return store.get_deploy(conn, deploy_id)
+    if _settle(conn, deploy_id, "triggered", TRIGGERED):
+        logger.info("Deploy %s of %s (verdict %s): %s", deploy_id, verdict.container, verdict.id, TRIGGERED)
+        _keep(_verify_later(deploy_id, delay_seconds))
     return store.get_deploy(conn, deploy_id)
 
 
@@ -165,20 +226,14 @@ async def _deploy_one(
     allowlist_error: str | None,
     delay_seconds: int,
 ) -> DeployRecord | None:
-    outcome: DeployOutcome
     try:
-        outcome, running, detail = await _attempt(conn, verdict, containers, allowlist_error)
+        guard = await _check_guards(conn, verdict, containers, allowlist_error)
     except Exception as exc:
         logger.exception("Deploy of %s (verdict %s) crashed", verdict.container, verdict.id)
-        outcome, running, detail = "failed", None, f"deploy crashed ({type(exc).__name__})"
-    saved = _save(conn, verdict, outcome, running, detail)
-    if saved is None:
-        return None
-    if saved.outcome == "pending_verify":
-        _keep(_verify_later(saved.id, delay_seconds))
-    else:  # verification counts the verified outcomes; deploys that never reached verification are counted here
-        UPGRADE_DEPLOYS_TOTAL.labels(outcome=saved.outcome).inc()
-    return saved
+        guard = ("failed", None, f"deploy crashed ({type(exc).__name__})")
+    if isinstance(guard, _Ready):
+        return await _trigger(conn, verdict, guard, delay_seconds)
+    return _save(conn, verdict, *guard)
 
 
 def record_decisions(conn: sqlite3.Connection, batch_id: str, approved_ids: list[int], now: datetime) -> None:

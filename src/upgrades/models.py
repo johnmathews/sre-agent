@@ -6,7 +6,12 @@ from typing import Literal
 from pydantic import BaseModel
 
 Verdict = Literal["upgrade", "hold", "needs_you"]
-DeployOutcome = Literal["pending_verify", "ok", "failed", "digest_mismatch", "skipped"]
+DeployOutcome = Literal["triggering", "pending_verify", "ok", "failed", "digest_mismatch", "skipped"]
+# How a deploy's WUD trigger ended: still running, returned OK, raised (incl. timeout), or cut off by shutdown/kill.
+# None for rows that never reached the trigger (skipped, failed guards).
+TriggerState = Literal["triggering", "triggered", "trigger_error", "interrupted"]
+# The end states a ``triggering`` row may settle into.
+SETTLED_TRIGGER_STATES = ("triggered", "trigger_error", "interrupted")
 
 
 class VerdictRecord(BaseModel):
@@ -34,6 +39,7 @@ class DeployRecord(BaseModel):
     outcome: DeployOutcome
     running_digest: str | None
     detail: str
+    trigger_state: TriggerState | None = None
 
 
 class Batch(BaseModel):

@@ -398,3 +398,58 @@ def test_deploys_for_verdicts(conn: sqlite3.Connection) -> None:
     store.save_deploy(conn, verdict_id=c, now=T0, outcome="failed", running_digest=None, detail="y")
     assert [d.id for d in store.deploys_for_verdicts(conn, [a, b])] == [da]
     assert store.deploys_for_verdicts(conn, []) == []
+
+
+def test_a_triggering_row_settles_once(conn: sqlite3.Connection) -> None:
+    vid = _verdict(conn)
+    did = store.save_deploy(
+        conn,
+        verdict_id=vid,
+        now=T0,
+        outcome="triggering",
+        running_digest="sha256:old",
+        detail="deploy triggering",
+        trigger_state="triggering",
+    )
+    assert [d.id for d in store.triggering_deploys(conn)] == [did]
+    assert store.pending_verifications(conn) == []
+    assert store.settle_trigger(conn, did, "triggered", "deploy triggered") is True
+    assert store.settle_trigger(conn, did, "interrupted", "too late") is False
+    deploy = store.get_deploy(conn, did)
+    assert deploy is not None
+    assert (deploy.outcome, deploy.trigger_state, deploy.detail, deploy.running_digest) == (
+        "pending_verify",
+        "triggered",
+        "deploy triggered",
+        "sha256:old",
+    )
+    assert store.triggering_deploys(conn) == []
+    assert [d.id for d in store.pending_verifications(conn)] == [did]
+    with pytest.raises(LookupError):
+        store.settle_trigger(conn, 999, "triggered", "")
+    for bad in ("bogus", "triggering"):
+        with pytest.raises(ValueError, match="trigger_state"):
+            store.settle_trigger(conn, did, bad, "")  # type: ignore[arg-type]
+
+
+def test_trigger_state_defaults_to_none_and_is_validated(conn: sqlite3.Connection) -> None:
+    vid = _verdict(conn)
+    did = store.save_deploy(conn, verdict_id=vid, now=T0, outcome="skipped", running_digest=None, detail="x")
+    deploy = store.get_deploy(conn, did)
+    assert deploy is not None and deploy.trigger_state is None
+    with pytest.raises(ValueError, match="trigger_state"):
+        store.save_deploy(
+            conn,
+            verdict_id=vid,
+            now=T0,
+            outcome="triggering",
+            running_digest=None,
+            detail="",
+            trigger_state="bogus",  # type: ignore[arg-type]
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO deploys (verdict_id, started_at, outcome, detail, trigger_state)"
+            " VALUES (?, 'x', 'triggering', '', 'bogus')",
+            (vid,),
+        )

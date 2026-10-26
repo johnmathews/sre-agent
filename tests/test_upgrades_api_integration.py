@@ -55,7 +55,7 @@ ALLOWLIST = "containers:\n" + "".join(
 
 
 @pytest.fixture(autouse=True)
-def _env(mock_settings: Any, tmp_path: Path) -> Iterator[None]:
+def _env(mock_settings: Any, tmp_path: Path) -> Iterator[respx.MockRouter]:
     allow = tmp_path / "allow.yml"
     allow.write_text(ALLOWLIST)
     mock_settings.upgrade_advisor_config_path = str(allow)
@@ -73,7 +73,7 @@ def _env(mock_settings: Any, tmp_path: Path) -> Iterator[None]:
     access._logged_config_errors.clear()
     with respx.mock(assert_all_called=False) as mock:
         mock.get(CERTS_URL).mock(return_value=httpx.Response(200, json=jwks(SIGNER)))
-        yield
+        yield mock
     access._jwks_cache.clear()
 
 
@@ -567,7 +567,9 @@ async def test_post_deploys_ticked_items_only(
     assert fake_wud.triggered == ["prometheus"]
     assert _decisions(mock_settings) == {up: True, need: False}
     deploys = _deploys(mock_settings)
-    assert [(d.verdict_id, d.outcome) for d in deploys] == [(up, "pending_verify")]
+    assert [(d.verdict_id, d.outcome, d.trigger_state, d.running_digest) for d in deploys] == [
+        (up, "pending_verify", "triggered", OLD)
+    ]
     verify_mock.assert_awaited_once_with(deploys[0].id)
     assert not deploy._background_tasks  # finished tasks are released
 
@@ -739,21 +741,90 @@ async def test_post_skips_when_already_running(
 
 
 @pytest.mark.integration
-async def test_post_trigger_failure_is_failed_and_others_continue(
-    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+async def test_post_trigger_error_is_verified_at_once_and_others_continue(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud
 ) -> None:
+    mock_settings.upgrade_advisor_verify_delay_seconds = 3600
     bad = _verdict(mock_settings, "prometheus")
     good = _verdict(mock_settings, "openwebui")
     bid, token = _batch(mock_settings, [bad, good])
     fake_wud.fail_trigger.add("prometheus")
-    before = _metric("failed")
-    resp = await _post(client, bid, token, [bad, good])
+    with patch.object(deploy, "_verify_later", new_callable=AsyncMock) as later:
+        resp = await _post(client, bid, token, [bad, good])
     assert resp.status_code == 200
-    outcomes = {d.verdict_id: (d.outcome, d.detail) for d in _deploys(mock_settings)}
-    assert outcomes[bad] == ("failed", "WUD deploy trigger failed (WudError)")
-    assert outcomes[good][0] == "pending_verify"
+    rows = {d.verdict_id: d for d in _deploys(mock_settings)}
+    assert (rows[bad].outcome, rows[bad].trigger_state, rows[bad].detail) == (
+        "pending_verify",
+        "trigger_error",
+        "WUD trigger failed: WudError",
+    )
+    assert (rows[good].outcome, rows[good].trigger_state) == ("pending_verify", "triggered")
+    assert sorted(c.args for c in later.await_args_list) == sorted([(rows[bad].id, 0), (rows[good].id, 3600)])
+    assert fake_wud.triggered == ["openwebui"]
+
+
+def _verify_env(fake: FakeWud, router: respx.MockRouter) -> Any:
+    """Real verification against the fake WUD, a ready service, quiet Loki and a configured email."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(verify, "get_container", side_effect=fake.get_container))
+    stack.enter_context(patch("src.upgrades.verify.is_email_configured", return_value=True))
+    router.get("http://10.0.0.15:9090/-/ready").mock(return_value=httpx.Response(200))
+    router.get("http://loki.test:3100/loki/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": []}})
+    )
+    return stack
+
+
+@pytest.mark.integration
+async def test_trigger_error_on_the_old_image_emails_not_deployed_at_once(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, _env: respx.MockRouter
+) -> None:
+    mock_settings.upgrade_advisor_verify_delay_seconds = 3600  # the immediate check must not wait for the delay
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+    fake_wud.fail_trigger.add("prometheus")
+    before = _metric("failed")
+    with (
+        _verify_env(fake_wud, _env),
+        patch("src.upgrades.verify.send_report_email", return_value=True) as send,
+        patch("src.upgrades.verify.pbs_latest_backup_time", new_callable=AsyncMock) as pbs,
+    ):
+        await _post(client, bid, token, [vid])
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.trigger_state, d.detail) == (
+        "failed",
+        "trigger_error",
+        "not deployed (WUD trigger failed: WudError)",
+    )
+    text, html_body, subject = send.call_args.args
+    assert subject == "Upgrade not deployed: prometheus on prometheus"
+    assert "restore" not in text and "restore" not in html_body and "secret detail" not in text
+    pbs.assert_not_awaited()
     assert _metric("failed") == before + 1
-    assert verify_mock.await_count == 1  # only the triggered deploy is verified
+
+
+@pytest.mark.integration
+async def test_trigger_timeout_but_new_image_running_verifies_normally(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, _env: respx.MockRouter
+) -> None:
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+
+    async def slow_wud(c: Any, wud_id: str) -> None:
+        fake_wud.set(c.name, running=NEW, candidate=NEW)  # WUD finished the deploy...
+        raise WudError("WUD deploy request failed: ReadTimeout")  # ...after our client gave up
+
+    with (
+        _verify_env(fake_wud, _env),
+        patch.object(wud, "trigger_deploy", side_effect=slow_wud),
+        patch("src.upgrades.verify.send_report_email", return_value=True) as send,
+    ):
+        await _post(client, bid, token, [vid])
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.trigger_state, d.running_digest) == ("ok", "trigger_error", NEW)
+    send.assert_not_called()
 
 
 @pytest.mark.integration
@@ -763,14 +834,14 @@ async def test_unexpected_crash_in_one_item_does_not_stop_the_next(
     bad = _verdict(mock_settings, "prometheus")
     good = _verdict(mock_settings, "openwebui")
     bid, token = _batch(mock_settings, [bad, good])
-    real = fake_wud.trigger_deploy
+    real = fake_wud.get_container
 
-    async def trigger(c: Any, wud_id: str) -> None:
+    async def get(c: Any) -> WudContainer:
         if c.name == "prometheus":
             raise RuntimeError("bug")
-        await real(c, wud_id)
+        return await real(c)
 
-    with patch.object(wud, "trigger_deploy", side_effect=trigger):
+    with patch.object(wud, "get_container", side_effect=get):
         await _post(client, bid, token, [bad, good])
     outcomes = {d.verdict_id: (d.outcome, d.detail) for d in _deploys(mock_settings)}
     assert outcomes[bad] == ("failed", "deploy crashed (RuntimeError)")
@@ -779,7 +850,24 @@ async def test_unexpected_crash_in_one_item_does_not_stop_the_next(
 
 
 @pytest.mark.integration
-async def test_record_failure_after_a_trigger_leaves_a_late_failed_row(
+async def test_unexpected_trigger_crash_is_verified_like_a_trigger_error(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+    with patch.object(wud, "trigger_deploy", side_effect=RuntimeError("bug")):
+        await _post(client, bid, token, [vid])
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.trigger_state, d.detail) == (
+        "pending_verify",
+        "trigger_error",
+        "WUD trigger failed: RuntimeError",
+    )
+    verify_mock.assert_awaited_once_with(d.id)  # WUD may have acted on it: the real state decides
+
+
+@pytest.mark.integration
+async def test_unrecordable_deploy_is_never_triggered(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
 ) -> None:
     vid = _verdict(mock_settings, "prometheus")
@@ -787,15 +875,31 @@ async def test_record_failure_after_a_trigger_leaves_a_late_failed_row(
     real_save = store.save_deploy
 
     def flaky_save(conn: Any, **kwargs: Any) -> int:
-        if kwargs["outcome"] == "pending_verify":
+        if kwargs["outcome"] == "triggering":
             raise sqlite3.OperationalError("database is locked")
         return real_save(conn, **kwargs)
 
+    before = _metric("failed")
     with patch.object(store, "save_deploy", side_effect=flaky_save):
+        await _post(client, bid, token, [vid])
+    assert fake_wud.triggered == []
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.detail) == ("failed", "not deployed: could not record the deploy (OperationalError)")
+    assert _metric("failed") == before + 1
+    verify_mock.assert_not_awaited()
+
+
+@pytest.mark.integration
+async def test_unrecordable_trigger_result_leaves_the_row_triggering(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+    with patch.object(store, "settle_trigger", side_effect=sqlite3.OperationalError("database is locked")):
         await _post(client, bid, token, [vid])
     assert fake_wud.triggered == ["prometheus"]
     [d] = _deploys(mock_settings)
-    assert (d.outcome, d.detail) == ("failed", "deploy recorded late (OperationalError)")
+    assert (d.outcome, d.trigger_state) == ("triggering", "triggering")  # verify_pending settles it after the timeout
     verify_mock.assert_not_awaited()
 
 
@@ -1021,11 +1125,11 @@ async def test_shutdown_during_a_trigger_records_the_in_flight_item_and_the_rest
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-    rows = {d.verdict_id: (d.outcome, d.detail, d.running_digest) for d in _deploys(mock_settings)}
+    rows = {d.verdict_id: (d.outcome, d.trigger_state, d.detail, d.running_digest) for d in _deploys(mock_settings)}
     assert rows == {
-        a: ("pending_verify", "interrupted during deploy (shutdown); verified next run", OLD),
-        b: ("failed", "deploy interrupted (shutdown)", None),
-        c: ("failed", "deploy interrupted (shutdown)", None),
+        a: ("pending_verify", "interrupted", "interrupted during deploy (shutdown); verified next run", OLD),
+        b: ("failed", None, "deploy interrupted (shutdown)", None),
+        c: ("failed", None, "deploy interrupted (shutdown)", None),
     }
     assert _metric("failed") == before + 2
     await _drain()

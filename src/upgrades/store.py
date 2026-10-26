@@ -18,7 +18,15 @@ from typing import Literal, get_args
 
 from pydantic import ValidationError
 
-from src.upgrades.models import Batch, DeployOutcome, DeployRecord, Verdict, VerdictRecord
+from src.upgrades.models import (
+    SETTLED_TRIGGER_STATES,
+    Batch,
+    DeployOutcome,
+    DeployRecord,
+    TriggerState,
+    Verdict,
+    VerdictRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +74,11 @@ CREATE TABLE IF NOT EXISTS deploys (
     verdict_id     INTEGER NOT NULL REFERENCES verdicts(id),
     started_at     TEXT NOT NULL,
     outcome        TEXT NOT NULL
-        CHECK (outcome IN ('pending_verify','ok','failed','digest_mismatch','skipped')),
+        CHECK (outcome IN ('triggering','pending_verify','ok','failed','digest_mismatch','skipped')),
     running_digest TEXT,
-    detail         TEXT NOT NULL
+    detail         TEXT NOT NULL,
+    trigger_state  TEXT
+        CHECK (trigger_state IS NULL OR trigger_state IN ('triggering','triggered','trigger_error','interrupted'))
 );
 CREATE INDEX IF NOT EXISTS idx_deploys_started ON deploys(started_at);
 CREATE INDEX IF NOT EXISTS idx_deploys_outcome ON deploys(outcome);
@@ -335,14 +345,19 @@ def save_deploy(
     outcome: DeployOutcome,
     running_digest: str | None,
     detail: str,
+    trigger_state: TriggerState | None = None,
 ) -> int:
-    """Insert a deploy record and return its id."""
+    """Insert a deploy record and return its id. A row written just before the WUD trigger is
+    ``outcome="triggering", trigger_state="triggering"`` and is settled with ``settle_trigger``."""
     _check_choice("outcome", outcome, get_args(DeployOutcome))
+    if trigger_state is not None:
+        _check_choice("trigger_state", trigger_state, get_args(TriggerState))
     started_at = _to_str(now)
     with conn:
         cur = conn.execute(
-            "INSERT INTO deploys (verdict_id, started_at, outcome, running_digest, detail) VALUES (?, ?, ?, ?, ?)",
-            (verdict_id, started_at, outcome, running_digest, detail),
+            "INSERT INTO deploys (verdict_id, started_at, outcome, running_digest, detail, trigger_state)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (verdict_id, started_at, outcome, running_digest, detail, trigger_state),
         )
     assert cur.lastrowid is not None  # noqa: S101 - set after INSERT
     return cur.lastrowid
@@ -361,6 +376,27 @@ def update_deploy(
     if cur.rowcount != 1:
         msg = f"no deploy with id {deploy_id}"
         raise LookupError(msg)
+
+
+def settle_trigger(conn: sqlite3.Connection, deploy_id: int, trigger_state: TriggerState, detail: str) -> bool:
+    """Compare-and-set a ``triggering`` deploy to ``pending_verify`` with how its trigger ended.
+
+    Returns True when this call made the change, False when the row was no longer ``triggering`` (already settled).
+    Raises LookupError if the id is unknown, ValueError for a state that is not an end state.
+    """
+    _check_choice("trigger_state", trigger_state, SETTLED_TRIGGER_STATES)
+    with conn:
+        cur = conn.execute(
+            "UPDATE deploys SET outcome = 'pending_verify', trigger_state = ?, detail = ?"
+            " WHERE id = ? AND outcome = 'triggering'",
+            (trigger_state, detail, deploy_id),
+        )
+        if cur.rowcount == 1:
+            return True
+    if conn.execute("SELECT 1 FROM deploys WHERE id = ?", (deploy_id,)).fetchone() is None:
+        msg = f"no deploy with id {deploy_id}"
+        raise LookupError(msg)
+    return False
 
 
 def finish_deploy(
@@ -394,6 +430,7 @@ def _row_to_deploy(row: sqlite3.Row) -> DeployRecord:
         outcome=row["outcome"],
         running_digest=row["running_digest"],
         detail=row["detail"],
+        trigger_state=row["trigger_state"],
     )
 
 
@@ -409,6 +446,12 @@ def get_deploy(conn: sqlite3.Connection, deploy_id: int) -> DeployRecord | None:
 def pending_verifications(conn: sqlite3.Connection) -> list[DeployRecord]:
     """Deploys still awaiting verification, oldest first (unreadable rows are logged and skipped)."""
     rows = conn.execute("SELECT * FROM deploys WHERE outcome = 'pending_verify' ORDER BY id").fetchall()
+    return _parse_rows(rows, _row_to_deploy, "deploy")
+
+
+def triggering_deploys(conn: sqlite3.Connection) -> list[DeployRecord]:
+    """Deploys whose WUD trigger has not been settled, oldest first (unreadable rows are logged and skipped)."""
+    rows = conn.execute("SELECT * FROM deploys WHERE outcome = 'triggering' ORDER BY id").fetchall()
     return _parse_rows(rows, _row_to_deploy, "deploy")
 
 
@@ -450,5 +493,7 @@ __all__ = [
     "record_decision",
     "save_deploy",
     "save_verdict",
+    "settle_trigger",
+    "triggering_deploys",
     "update_deploy",
 ]

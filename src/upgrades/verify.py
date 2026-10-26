@@ -18,7 +18,7 @@ from src.upgrades.http import ResponseTooLarge, bounded_request
 from src.upgrades.models import DeployOutcome, DeployRecord, VerdictRecord
 from src.upgrades.registry import DIGEST_RE
 from src.upgrades.textutil import clean_text
-from src.upgrades.wud import WudError, get_container
+from src.upgrades.wud import TRIGGER_TIMEOUT_SECONDS, WudError, get_container
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ ERROR_WINDOW = "5m"
 ERROR_FLOOR = 10
 ERROR_BASELINE_FACTOR = 3
 BASELINE_OFFSET = timedelta(hours=1)
-# Detail of a deploy whose WUD trigger was cut off by a shutdown (written by deploy.py; the trigger may or may not
-# have taken effect).
+# Detail of a deploy whose WUD trigger was cut off by a shutdown or a hard kill (trigger_state "interrupted"; the
+# trigger may or may not have taken effect).
 INTERRUPTED_IN_FLIGHT = "interrupted during deploy (shutdown); verified next run"
 NOT_DEPLOYED = "not deployed (interrupted by shutdown); approve again from the next email"
 
@@ -144,10 +144,17 @@ async def _latest_backup(pbs_guest: str) -> str:
     return f"{fallback} (taken {taken.strftime('%Y-%m-%d %H:%M UTC')})"
 
 
-async def _send_failure_email(
-    outcome: DeployOutcome, name: str, host: str, pbs_guest: str, detail: str, version: str | None
+async def _send_failure_email(  # noqa: PLR0913
+    outcome: DeployOutcome,
+    name: str,
+    host: str,
+    pbs_guest: str,
+    detail: str,
+    version: str | None,
+    *,
+    not_deployed: bool = False,
 ) -> None:
-    if detail == NOT_DEPLOYED:  # the service was never touched: nothing to restore
+    if not_deployed:  # the service was never touched: nothing to restore
         subject = f"Upgrade not deployed: {name} on {host}"
         action = "approve the update again from the next advisor email"
     else:
@@ -183,39 +190,46 @@ def _find_container(name: str) -> tuple[AdvisedContainer | None, str]:
     return found, "" if found else f"container {name} is no longer in the allowlist"
 
 
+def _not_deployed_detail(deploy: DeployRecord) -> str:
+    if deploy.trigger_state == "interrupted":
+        return NOT_DEPLOYED
+    return f"not deployed ({deploy.detail})"  # trigger_error: detail is "WUD trigger failed: <ExcType>"
+
+
 async def _evaluate(
     verdict: VerdictRecord, container: AdvisedContainer, now: datetime, deploy: DeployRecord
-) -> tuple[DeployOutcome, str | None, list[str]]:
-    """Run the checks in order; returns ``(outcome, running_digest, detail parts)``."""
+) -> tuple[DeployOutcome, str | None, list[str], bool]:
+    """Run the checks in order; returns ``(outcome, running_digest, detail parts, not_deployed)``."""
     try:
         wud = await get_container(container)
     except WudError as exc:
         logger.warning("WUD read failed for %s: %s", container.name, _exc_log(exc))
-        return "failed", None, ["could not read WUD state (WudError)"]
+        return "failed", None, ["could not read WUD state (WudError)"], False
     if not isinstance(wud.running_digest, str) or not DIGEST_RE.fullmatch(wud.running_digest):
-        return "failed", None, ["WUD reported no valid running digest"]
+        return "failed", None, ["WUD reported no valid running digest"], False
     if wud.running_digest != verdict.candidate_digest:
         if (
-            deploy.detail == INTERRUPTED_IN_FLIGHT
+            deploy.trigger_state in {"interrupted", "trigger_error"}
             and deploy.running_digest is not None
             and wud.running_digest == deploy.running_digest
-        ):  # still the pre-deploy image: the interrupted trigger never took effect
-            return "failed", wud.running_digest, [NOT_DEPLOYED]
+        ):  # still the pre-deploy image: the unconfirmed trigger never took effect
+            return "failed", wud.running_digest, [_not_deployed_detail(deploy)], True
         return (
             "digest_mismatch",
             wud.running_digest,
             [f"running digest {clean_text(wud.running_digest)} is not the approved {verdict.candidate_digest}"],
+            False,
         )
     parts: list[str] = []
     failure = await _check_readiness(container.readiness_url)
     if failure:
-        return "failed", wud.running_digest, [failure]
+        return "failed", wud.running_digest, [failure], False
     failure, warning = await _check_logs(container.name, now)
     if warning:
         parts.append(f"warning: {warning}")
     if failure:
-        return "failed", wud.running_digest, [failure, *parts]
-    return "ok", wud.running_digest, ["digest matches, readiness ok, error logs quiet", *parts]
+        return "failed", wud.running_digest, [failure, *parts], False
+    return "ok", wud.running_digest, ["digest matches, readiness ok, error logs quiet", *parts], False
 
 
 async def verify_deploy(deploy_id: int) -> DeployRecord:
@@ -233,11 +247,12 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
         container, missing = _find_container(verdict.container) if verdict else (None, "")
         name = verdict.container if verdict else f"verdict {deploy.verdict_id}"
         outcome: DeployOutcome
+        not_deployed = False
         if verdict is None or container is None:
             why = "its verdict can no longer be found" if verdict is None else missing
             outcome, digest, parts = "failed", None, [f"cannot verify: {why}"]
         else:
-            outcome, digest, parts = await _evaluate(verdict, container, datetime.now(UTC), deploy)
+            outcome, digest, parts, not_deployed = await _evaluate(verdict, container, datetime.now(UTC), deploy)
         detail = "; ".join(parts)
         if not store.finish_deploy(conn, deploy_id, outcome, digest, detail):
             logger.warning("deploy %s was finished by a concurrent verifier; discarding this result", deploy_id)
@@ -252,6 +267,7 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
                     container.pbs_guest if container else "its PBS guest",
                     detail,
                     verdict.candidate_version if verdict else None,
+                    not_deployed=not_deployed,
                 )
         updated = store.get_deploy(conn, deploy_id)
         if updated is None:
@@ -263,11 +279,24 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
 
 
 async def verify_pending() -> list[DeployRecord]:
-    """Verify every pending deploy older than the verify delay (also picks up ones lost to a restart)."""
+    """Verify every pending deploy older than the verify delay (also picks up ones lost to a restart).
+
+    A ``triggering`` row older than WUD's trigger timeout belongs to a process that died mid-trigger (a hard kill):
+    it is settled as ``interrupted`` and verified like one. Younger ones may still be in flight and are left alone.
+    """
     settings = get_settings()
-    cutoff = datetime.now(UTC) - timedelta(seconds=settings.upgrade_advisor_verify_delay_seconds)
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=settings.upgrade_advisor_verify_delay_seconds)
+    trigger_cutoff = now - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS)
     conn = store.connect(settings.upgrade_advisor_db_path)
     try:
+        for stale in store.triggering_deploys(conn):
+            if stale.started_at <= trigger_cutoff and store.settle_trigger(
+                conn, stale.id, "interrupted", INTERRUPTED_IN_FLIGHT
+            ):
+                logger.warning(
+                    "deploy %s was left mid-trigger (process killed?); verifying it as interrupted", stale.id
+                )
         due = [d for d in store.pending_verifications(conn) if d.started_at <= cutoff]
     finally:
         conn.close()

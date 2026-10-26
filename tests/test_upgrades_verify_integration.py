@@ -13,7 +13,9 @@ import respx
 from prometheus_client import REGISTRY
 
 from src.upgrades import store
+from src.upgrades.models import DeployOutcome, TriggerState
 from src.upgrades.verify import INTERRUPTED_IN_FLIGHT, verify_deploy, verify_pending
+from src.upgrades.wud import TRIGGER_TIMEOUT_SECONDS
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -65,6 +67,8 @@ def _seed(
     container: str = "prometheus",
     detail: str = "",
     running_digest: str | None = None,
+    outcome: DeployOutcome = "pending_verify",
+    trigger_state: TriggerState | None = None,
 ) -> int:
     conn = store.connect(settings.upgrade_advisor_db_path)
     vid = store.save_verdict(
@@ -83,9 +87,10 @@ def _seed(
         conn,
         verdict_id=vid,
         now=started or datetime.now(UTC),
-        outcome="pending_verify",
+        outcome=outcome,
         running_digest=running_digest,
         detail=detail,
+        trigger_state=trigger_state,
     )
     conn.close()
     return did
@@ -152,7 +157,7 @@ async def test_digest_mismatch_emails_at_once(mock_settings: Any, email: MagicMo
 async def test_interrupted_deploy_still_on_the_old_image_is_not_deployed_without_restore_advice(
     mock_settings: Any, email: MagicMock
 ) -> None:
-    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD, trigger_state="interrupted")
     _wud(OLD)
     with patch("src.upgrades.verify.pbs_latest_backup_time", new_callable=AsyncMock) as pbs:
         result = await verify_deploy(did)
@@ -172,7 +177,7 @@ async def test_interrupted_deploy_on_an_unexpected_image_is_a_digest_mismatch(
     mock_settings: Any, email: MagicMock
 ) -> None:
     other = "sha256:" + "c" * 64
-    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD, trigger_state="interrupted")
     _wud(other)
     result = await verify_deploy(did)
     assert result.outcome == "digest_mismatch"
@@ -184,7 +189,7 @@ async def test_interrupted_deploy_on_an_unexpected_image_is_a_digest_mismatch(
 @pytest.mark.integration
 @respx.mock
 async def test_interrupted_deploy_that_completed_verifies_normally(mock_settings: Any, email: MagicMock) -> None:
-    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD, trigger_state="interrupted")
     _wud(NEW)
     respx.get(READY).mock(return_value=httpx.Response(200))
     _loki("0", "0")
@@ -390,3 +395,72 @@ async def test_unreadable_allowlist_is_distinguished(mock_settings: Any, email: 
     assert result.outcome == "failed"
     assert "allowlist unreadable" in result.detail
     email.assert_called_once()
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_the_interrupted_decision_is_structured_not_the_detail_text(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD, trigger_state="triggered")
+    _wud(OLD)
+    result = await verify_deploy(did)
+    assert result.outcome == "digest_mismatch"  # a completed trigger still on the old image is a mismatch
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_trigger_error_still_on_the_old_image_is_not_deployed(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings, detail="WUD trigger failed: WudError", running_digest=OLD, trigger_state="trigger_error")
+    _wud(OLD)
+    with patch("src.upgrades.verify.pbs_latest_backup_time", new_callable=AsyncMock) as pbs:
+        result = await verify_deploy(did)
+    assert (result.outcome, result.detail) == ("failed", "not deployed (WUD trigger failed: WudError)")
+    pbs.assert_not_awaited()
+    text, html_body, subject = email.call_args.args
+    assert subject == "Upgrade not deployed: prometheus on prometheus"
+    assert "approve the update again from the next advisor email" in text
+    assert "restore" not in text and "PBS" not in text and "restore" not in html_body
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_trigger_error_but_new_image_running_verifies_normally(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings, detail="WUD trigger failed: WudError", running_digest=OLD, trigger_state="trigger_error")
+    _wud(NEW)
+    respx.get(READY).mock(return_value=httpx.Response(200))
+    _loki("0", "0")
+    result = await verify_deploy(did)
+    assert result.outcome == "ok"
+    email.assert_not_called()
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_settings: Any, email: MagicMock) -> None:
+    long_ago = datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + 60)
+    killed = _seed(
+        mock_settings,
+        started=long_ago,
+        outcome="triggering",
+        detail="deploy triggering",
+        running_digest=OLD,
+        trigger_state="triggering",
+    )
+    in_flight = _seed(
+        mock_settings,
+        started=datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS - 60),
+        outcome="triggering",
+        detail="deploy triggering",
+        running_digest=OLD,
+        trigger_state="triggering",
+    )
+    _wud(OLD)  # the kill landed before WUD switched the image
+    results = await verify_pending()
+    assert [(r.id, r.outcome, r.trigger_state, r.detail) for r in results] == [
+        (killed, "failed", "interrupted", "not deployed (interrupted by shutdown); approve again from the next email")
+    ]
+    conn = store.connect(mock_settings.upgrade_advisor_db_path)
+    try:
+        assert [d.id for d in store.triggering_deploys(conn)] == [in_flight]  # still within the trigger timeout
+    finally:
+        conn.close()
+    assert email.call_args.args[2] == "Upgrade not deployed: prometheus on prometheus"

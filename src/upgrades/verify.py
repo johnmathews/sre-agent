@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from src.agent.tools.pbs import _pbs_get
+from src.agent.tools.pbs import pbs_latest_backup_time
 from src.config import get_settings
 from src.observability.metrics import UPGRADE_DEPLOYS_TOTAL
 from src.report.email import is_email_configured, send_report_email
@@ -69,10 +69,14 @@ async def _check_logs(container: str, now: datetime) -> tuple[str | None, str | 
         return None, "Loki not configured; error-log check skipped"
     try:
         current = await _loki_error_count(base_url, container, now)
-        baseline = await _loki_error_count(base_url, container, now - BASELINE_OFFSET)
     except (httpx.HTTPError, httpx.InvalidURL, ResponseTooLarge, ValueError, KeyError, IndexError, TypeError) as exc:
         logger.warning("Loki error-log check failed for %s: %s", container, _exc_text(exc))
         return None, f"Loki error-log check skipped: {_exc_text(exc)}"
+    try:
+        baseline = await _loki_error_count(base_url, container, now - BASELINE_OFFSET)
+    except (httpx.HTTPError, httpx.InvalidURL, ResponseTooLarge, ValueError, KeyError, IndexError, TypeError) as exc:
+        logger.warning("Loki baseline query failed for %s: %s", container, _exc_text(exc))
+        return None, f"Loki baseline query failed, error-log check skipped: {_exc_text(exc)}"
     limit = max(ERROR_FLOOR, ERROR_BASELINE_FACTOR * baseline)
     if current > limit:
         return f"{current} error-like log lines in the last {ERROR_WINDOW} (limit {limit}, baseline {baseline})", None
@@ -90,19 +94,13 @@ async def _latest_backup(pbs_guest: str) -> str:
         return f"{fallback} (warning: PBS_DEFAULT_DATASTORE not set, could not look up the backup time)"
     kind, _, guest_id = pbs_guest.partition(" ")
     try:
-        data = await _pbs_get(f"/admin/datastore/{datastore}/groups")
-        groups: Any = data.get("data", [])
-        for group in groups:
-            btype = group.get("backup-type", group.get("backup_type"))
-            bid = str(group.get("backup-id", group.get("backup_id")))
-            if btype == kind.lower() and bid == guest_id:
-                last = group.get("last-backup", group.get("last_backup"))
-                when = datetime.fromtimestamp(int(last), UTC).strftime("%Y-%m-%d %H:%M UTC")
-                return f"restore from the latest PBS backup of {pbs_guest} (taken {when})"
+        taken = await pbs_latest_backup_time(kind.lower(), guest_id, datastore)
     except Exception as exc:  # noqa: BLE001 - PBS trouble must never fail verification
         logger.warning("PBS lookup for %s failed: %s", pbs_guest, _exc_text(exc))
         return f"{fallback} (warning: PBS lookup failed: {_exc_text(exc)})"
-    return f"{fallback} (warning: no backup of {pbs_guest} found in datastore {datastore})"
+    if taken is None:
+        return f"{fallback} (warning: no backup of {pbs_guest} found in datastore {datastore})"
+    return f"{fallback} (taken {taken.strftime('%Y-%m-%d %H:%M UTC')})"
 
 
 async def _send_failure_email(
@@ -129,13 +127,15 @@ async def _send_failure_email(
         logger.error("Failed to send upgrade failure email. %s", text.replace("\n", " | "))
 
 
-def _find_container(name: str) -> AdvisedContainer | None:
+def _find_container(name: str) -> tuple[AdvisedContainer | None, str]:
+    """Look the container up in the allowlist; returns ``(container, reason-if-missing)``."""
     try:
         allowlist = load_allowlist(get_settings().upgrade_advisor_config_path)
-    except Exception:
+    except Exception as exc:
         logger.exception("Cannot load the upgrade allowlist during verification")
-        return None
-    return next((c for c in allowlist if c.name == name), None)
+        return None, f"allowlist unreadable: {type(exc).__name__}"
+    found = next((c for c in allowlist if c.name == name), None)
+    return found, "" if found else f"container {name} is no longer in the allowlist"
 
 
 async def _evaluate(
@@ -150,7 +150,7 @@ async def _evaluate(
         return (
             "digest_mismatch",
             wud.running_digest,
-            [f"running digest {wud.running_digest} is not the approved {verdict.candidate_digest}"],
+            [f"running digest {clean_text(str(wud.running_digest))} is not the approved {verdict.candidate_digest}"],
         )
     parts: list[str] = []
     failure = await _check_readiness(container.readiness_url)
@@ -176,29 +176,33 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
             logger.warning("deploy %s already verified (%s); not re-verifying", deploy_id, deploy.outcome)
             return deploy
         verdict = store.get_verdict(conn, deploy.verdict_id)
-        container = _find_container(verdict.container) if verdict else None
+        container, missing = _find_container(verdict.container) if verdict else (None, "")
         name = verdict.container if verdict else f"verdict {deploy.verdict_id}"
         outcome: DeployOutcome
         if verdict is None or container is None:
-            what = "verdict" if verdict is None else f"container {name} in the allowlist"
-            outcome, digest, parts = "failed", None, [f"cannot verify: {what} can no longer be found"]
+            why = "its verdict can no longer be found" if verdict is None else missing
+            outcome, digest, parts = "failed", None, [f"cannot verify: {why}"]
         else:
             outcome, digest, parts = await _evaluate(verdict, container, datetime.now(UTC))
         detail = "; ".join(parts)
-        store.update_deploy(conn, deploy_id, outcome, digest, detail)
-        UPGRADE_DEPLOYS_TOTAL.labels(outcome=outcome).inc()
-        logger.info("deploy %s of %s verified: %s (%s)", deploy_id, name, outcome, detail)
-        if outcome != "ok":
-            await _send_failure_email(
-                outcome,
-                name,
-                container.host if container else "unknown host",
-                container.pbs_guest if container else "its PBS guest",
-                detail,
-                verdict.candidate_version if verdict else None,
-            )
+        if not store.finish_deploy(conn, deploy_id, outcome, digest, detail):
+            logger.warning("deploy %s was finished by a concurrent verifier; discarding this result", deploy_id)
+        else:
+            UPGRADE_DEPLOYS_TOTAL.labels(outcome=outcome).inc()
+            logger.info("deploy %s of %s verified: %s (%s)", deploy_id, name, outcome, detail)
+            if outcome != "ok":
+                await _send_failure_email(
+                    outcome,
+                    name,
+                    container.host if container else "unknown host",
+                    container.pbs_guest if container else "its PBS guest",
+                    detail,
+                    verdict.candidate_version if verdict else None,
+                )
         updated = store.get_deploy(conn, deploy_id)
-        assert updated is not None  # noqa: S101 - just written
+        if updated is None:
+            msg = f"deploy {deploy_id} vanished after verification"
+            raise LookupError(msg)
         return updated
     finally:
         conn.close()
@@ -218,5 +222,7 @@ async def verify_pending() -> list[DeployRecord]:
         try:
             results.append(await verify_deploy(deploy.id))
         except Exception:
-            logger.exception("Verification of deploy %s crashed; it stays pending", deploy.id)
+            logger.exception(
+                "Verification of deploy %s crashed; it is retried on the next run only if still pending", deploy.id
+            )
     return results

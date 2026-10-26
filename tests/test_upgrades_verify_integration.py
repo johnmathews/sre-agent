@@ -1,5 +1,6 @@
 """Integration tests for post-deploy verification (mocked WUD, readiness, Loki, PBS and SMTP)."""
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import respx
+from prometheus_client import REGISTRY
 
 from src.upgrades import store
 from src.upgrades.verify import verify_deploy, verify_pending
@@ -219,7 +221,7 @@ async def test_missing_container_fails_and_emails(mock_settings: Any, email: Mag
     did = _seed(mock_settings, container="gone")
     result = await verify_deploy(did)
     assert result.outcome == "failed"
-    assert "can no longer be found" in result.detail
+    assert "no longer in the allowlist" in result.detail
     email.assert_called_once()
 
 
@@ -258,3 +260,47 @@ async def test_verify_pending_picks_up_deploys_lost_to_a_restart(mock_settings: 
     conn = store.connect(mock_settings.upgrade_advisor_db_path)
     assert [d.id for d in store.pending_verifications(conn)] == [fresh]
     conn.close()
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_concurrent_verifications_email_and_count_once(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings)
+    _wud("sha256:old")
+    labels = {"outcome": "digest_mismatch"}
+    before = REGISTRY.get_sample_value("sre_assistant_upgrade_deploys_total", labels) or 0.0
+    first, second = await asyncio.gather(verify_deploy(did), verify_deploy(did))
+    assert first.outcome == second.outcome == "digest_mismatch"
+    assert email.call_count == 1
+    after = REGISTRY.get_sample_value("sre_assistant_upgrade_deploys_total", labels) or 0.0
+    assert after - before == 1
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_loki_baseline_failure_is_named_in_the_warning(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings)
+    _wud()
+    respx.get(READY).mock(return_value=httpx.Response(200))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        at = int(request.url.params["time"])
+        if int(datetime.now(UTC).timestamp() * 1e9) - at > 30 * 60 * 1_000_000_000:
+            return httpx.Response(500)
+        return _loki_value("0")
+
+    respx.get(LOKI_QUERY).mock(side_effect=handler)
+    result = await verify_deploy(did)
+    assert result.outcome == "ok"
+    assert "Loki baseline query failed" in result.detail
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_unreadable_allowlist_is_distinguished(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings)
+    Path(mock_settings.upgrade_advisor_config_path).write_text("not: [valid")
+    result = await verify_deploy(did)
+    assert result.outcome == "failed"
+    assert "allowlist unreadable" in result.detail
+    email.assert_called_once()

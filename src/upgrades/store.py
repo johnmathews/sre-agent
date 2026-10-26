@@ -349,6 +349,29 @@ def update_deploy(
         raise LookupError(msg)
 
 
+def finish_deploy(
+    conn: sqlite3.Connection, deploy_id: int, outcome: DeployOutcome, running_digest: str | None, detail: str
+) -> bool:
+    """Compare-and-set a verification result: only a still-``pending_verify`` deploy is updated.
+
+    Returns True when this call made the change, False when the deploy was already finished (so a concurrent
+    verifier lost the race). Raises LookupError if the id is unknown.
+    """
+    _check_choice("outcome", outcome, get_args(DeployOutcome))
+    with conn:
+        cur = conn.execute(
+            "UPDATE deploys SET outcome = ?, running_digest = ?, detail = ?"
+            " WHERE id = ? AND outcome = 'pending_verify'",
+            (outcome, running_digest, detail, deploy_id),
+        )
+        if cur.rowcount == 1:
+            return True
+    if conn.execute("SELECT 1 FROM deploys WHERE id = ?", (deploy_id,)).fetchone() is None:
+        msg = f"no deploy with id {deploy_id}"
+        raise LookupError(msg)
+    return False
+
+
 def _row_to_deploy(row: sqlite3.Row) -> DeployRecord:
     return DeployRecord(
         id=row["id"],
@@ -391,6 +414,7 @@ __all__ = [
     "consume_batch",
     "create_batch",
     "deploys_since",
+    "finish_deploy",
     "first_seen",
     "get_batch",
     "get_batch_verdicts",

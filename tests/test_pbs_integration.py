@@ -213,3 +213,52 @@ class TestPbsNotConfigured:
         mock_settings.pbs_url = ""
         result = await pbs_list_tasks.ainvoke({})
         assert "not configured" in result.lower()
+
+
+@pytest.mark.integration
+class TestPbsLatestBackupTime:
+    GROUPS = "https://pbs.test:8007/api2/json/admin/datastore/backups/groups"
+
+    @respx.mock
+    async def test_finds_the_guest_group(self) -> None:
+        from datetime import UTC, datetime
+
+        from src.agent.tools.pbs import pbs_latest_backup_time
+
+        route = respx.get(self.GROUPS).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"backup-type": "ct", "backup-id": "114", "last-backup": 1},
+                        {"backup-type": "ct", "backup-id": "115", "last-backup": 1_790_000_000},
+                    ]
+                },
+            )
+        )
+        assert await pbs_latest_backup_time("ct", "115") == datetime.fromtimestamp(1_790_000_000, UTC)
+        assert route.calls.last.request.headers["Authorization"].startswith("PBSAPIToken=")
+
+    @respx.mock
+    async def test_unknown_guest_is_none(self) -> None:
+        from src.agent.tools.pbs import pbs_latest_backup_time
+
+        respx.get(self.GROUPS).mock(return_value=httpx.Response(200, json={"data": []}))
+        assert await pbs_latest_backup_time("vm", "999") is None
+
+    @respx.mock
+    async def test_redirect_is_an_error_not_followed(self) -> None:
+        from src.agent.tools.pbs import pbs_latest_backup_time
+
+        respx.get(self.GROUPS).mock(return_value=httpx.Response(302, headers={"Location": "http://evil.test/"}))
+        with pytest.raises(ValueError, match="HTTP 302"):
+            await pbs_latest_backup_time("ct", "115")
+
+    @respx.mock
+    async def test_oversized_body_rejected(self) -> None:
+        from src.agent.tools.pbs import pbs_latest_backup_time
+        from src.upgrades.http import ResponseTooLarge
+
+        respx.get(self.GROUPS).mock(return_value=httpx.Response(200, content=b"x" * (6 * 1024 * 1024)))
+        with pytest.raises(ResponseTooLarge):
+            await pbs_latest_backup_time("ct", "115")

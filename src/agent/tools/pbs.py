@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
+from src.upgrades.http import bounded_request
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,41 @@ async def _pbs_get(path: str, params: dict[str, str] | None = None) -> dict[str,
         _ = response.raise_for_status()
         data: dict[str, object] = response.json()  # pyright: ignore[reportAny]
         return data
+
+
+BOUNDED_TIMEOUT_SECONDS = 10.0
+
+
+async def pbs_latest_backup_time(backup_type: str, backup_id: str, datastore: str | None = None) -> datetime | None:
+    """Time of the latest backup of one guest (e.g. ``"ct"``, ``"115"``), or None if it has no backup group.
+
+    Size-capped, 10 s timeout, no redirects. Raises ``ValueError`` when PBS or the datastore is not configured and
+    lets httpx / ``ResponseTooLarge`` errors propagate, so callers decide how to degrade.
+    """
+    settings = get_settings()
+    if not settings.pbs_url:
+        msg = "PBS is not configured (PBS_URL is empty)"
+        raise ValueError(msg)
+    store = datastore or settings.pbs_default_datastore
+    if not store:
+        msg = "no PBS datastore given and PBS_DEFAULT_DATASTORE is not set"
+        raise ValueError(msg)
+    url = f"{settings.pbs_url}/api2/json/admin/datastore/{store}/groups"
+    async with httpx.AsyncClient(
+        timeout=BOUNDED_TIMEOUT_SECONDS, verify=_pbs_ssl_verify(), follow_redirects=False
+    ) as client:
+        response = await bounded_request(client, "GET", url, headers=_pbs_headers())
+    if not response.is_success:
+        msg = f"PBS returned HTTP {response.status_code}"
+        raise ValueError(msg)
+    groups = response.json().get("data", [])
+    for group in groups:
+        btype = group.get("backup-type", group.get("backup_type"))
+        bid = str(group.get("backup-id", group.get("backup_id")))
+        last = group.get("last-backup", group.get("last_backup"))
+        if btype == backup_type and bid == backup_id and last is not None:
+            return datetime.fromtimestamp(int(last), UTC)
+    return None
 
 
 # --- Response TypedDicts ---

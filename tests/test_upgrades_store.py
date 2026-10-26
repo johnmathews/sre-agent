@@ -344,3 +344,17 @@ def test_get_verdict_and_get_deploy_round_trip(conn: sqlite3.Connection) -> None
 def test_get_verdict_and_get_deploy_unknown_id_is_none(conn: sqlite3.Connection) -> None:
     assert store.get_verdict(conn, 999) is None
     assert store.get_deploy(conn, 999) is None
+
+
+def test_finish_deploy_is_compare_and_set(conn: sqlite3.Connection) -> None:
+    vid = _verdict(conn)
+    did = store.save_deploy(conn, verdict_id=vid, now=T0, outcome="pending_verify", running_digest=None, detail="")
+    assert store.finish_deploy(conn, did, "ok", "sha256:new", "fine") is True
+    assert store.finish_deploy(conn, did, "failed", None, "late") is False
+    deploy = store.get_deploy(conn, did)
+    assert deploy is not None
+    assert (deploy.outcome, deploy.detail) == ("ok", "fine")
+    with pytest.raises(LookupError):
+        store.finish_deploy(conn, 999, "ok", None, "")
+    with pytest.raises(ValueError, match="outcome"):
+        store.finish_deploy(conn, did, "bogus", None, "")  # type: ignore[arg-type]

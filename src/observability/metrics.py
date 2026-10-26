@@ -182,7 +182,7 @@ UPGRADE_LAST_SUCCESS = Gauge(
 
 UPGRADE_DEPLOYS_TOTAL = Counter(
     "sre_assistant_upgrade_deploys_total",
-    "Final outcome of each post-deploy verification (ok, failed, digest_mismatch)",
+    "Final outcome of each approved deploy: verified (ok, failed, digest_mismatch) or never verified (skipped, failed)",
     labelnames=["outcome"],
 )
 

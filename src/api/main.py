@@ -33,6 +33,7 @@ from src.agent.history import (
     search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.api.upgrades import router as upgrades_router
 from src.config import get_settings
 from src.observability.metrics import (
     APP_INFO,
@@ -247,6 +248,8 @@ class TrailingSlashForMCP:
 
 
 app.add_middleware(TrailingSlashForMCP)
+# Upgrade Advisor approval page and guarded deploy (404 unless the advisor is configured).
+app.include_router(upgrades_router)
 
 
 # ---------------------------------------------------------------------------

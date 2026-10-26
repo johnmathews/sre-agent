@@ -358,3 +358,14 @@ def test_finish_deploy_is_compare_and_set(conn: sqlite3.Connection) -> None:
         store.finish_deploy(conn, 999, "ok", None, "")
     with pytest.raises(ValueError, match="outcome"):
         store.finish_deploy(conn, did, "bogus", None, "")  # type: ignore[arg-type]
+
+
+def test_latest_verdict_for_container_is_newest_across_digests(conn: sqlite3.Connection) -> None:
+    assert store.latest_verdict_for_container(conn, "prometheus") is None
+    _verdict(conn, "prometheus", "sha256:one")
+    newest = _verdict(conn, "prometheus", "sha256:two")
+    _verdict(conn, "grafana", "sha256:three")
+    latest = store.latest_verdict_for_container(conn, "prometheus")
+    assert latest is not None
+    assert latest.id == newest
+    assert latest.candidate_digest == "sha256:two"

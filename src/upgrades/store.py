@@ -197,6 +197,18 @@ def latest_verdict(conn: sqlite3.Connection, container: str, digest: str) -> Ver
     return _row_to_verdict(row) if row else None
 
 
+def latest_verdict_for_container(conn: sqlite3.Connection, container: str) -> VerdictRecord | None:
+    """Most recent verdict for a container across all candidate digests, or None.
+
+    An unreadable newest row is logged and yields None (callers treat that as "not this verdict").
+    """
+    row = conn.execute("SELECT * FROM verdicts WHERE container = ? ORDER BY id DESC LIMIT 1", (container,)).fetchone()
+    if row is None:
+        return None
+    parsed = _parse_rows([row], _row_to_verdict, "verdict")
+    return parsed[0] if parsed else None
+
+
 def get_verdict(conn: sqlite3.Connection, verdict_id: int) -> VerdictRecord | None:
     """Fetch one verdict by id, or None (an unreadable row is logged and treated as missing)."""
     row = conn.execute("SELECT * FROM verdicts WHERE id = ?", (verdict_id,)).fetchone()
@@ -421,6 +433,7 @@ __all__ = [
     "get_deploy",
     "get_verdict",
     "latest_verdict",
+    "latest_verdict_for_container",
     "pending_verifications",
     "record_decision",
     "save_deploy",

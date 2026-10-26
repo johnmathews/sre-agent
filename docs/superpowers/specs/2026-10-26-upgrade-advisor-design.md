@@ -243,5 +243,3 @@ emails at once, naming the guest and its latest PBS backup; success goes into th
 - How Ansible creates the WUD `rw` user (WUD API with the bootstrap admin is the likely route).
 - Email layout (reuse the report's HTML style).
 
-Per this repo's Builder Ownership Rule, implementation starts with 2–3 questions to the operator
-confirming the design is understood.

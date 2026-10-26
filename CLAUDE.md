@@ -38,12 +38,6 @@ The LangChain agent decides which approach to use based on the question.
 - **Python version:** latest stable with long-term support
 - **All Python code must be fully typed** — type annotations on all function signatures, return types, and variables where not obvious. Use `mypy` for verification.
 
-## Builder Ownership Rule
-
-**Before writing any code for a new phase or major component, ask the user 2-3 questions to verify they understand what is being built and why.** This is non-negotiable. The user must be able to explain every architectural decision and implementation choice — this is a portfolio project where understanding IS the deliverable. If their answers reveal gaps, ask follow-up questions until understanding is confirmed. Do not proceed with implementation until the user demonstrates clear ownership of the design.
-
-This applies to: starting a new build phase, introducing a new tool/integration, making significant architectural changes, or adding a new dependency. It does not apply to small bug fixes or minor refactoring within already-understood code.
-
 ## Build Plan
 
 See `readme.md` → "Build Order" for detailed phase-by-phase build steps with progress tracking.

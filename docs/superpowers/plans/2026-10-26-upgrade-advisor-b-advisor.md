@@ -51,12 +51,6 @@ its "Interfaces shared with Part B" section is binding here).
 
 ---
 
-### Task 0: Builder Ownership check (no code)
-
-Per `CLAUDE.md`, before any code ask John 2–3 questions, e.g.: why the model has no tools; why
-GET must not deploy; what the post-deploy digest check guards against. Continue only when his
-answers show the design is understood. Record them in the journal entry (Task 9).
-
 ### Task 1: Settings and allowlist
 
 **Files:**
@@ -406,7 +400,7 @@ def test_deploy_is_not_an_agent_or_mcp_tool(): ...
   Advisor's approval path (and, once enabled per container, its allowlisted auto path). The deploy
   capability is never an agent tool or an MCP tool."
 - [ ] **Step 2:** Write the docs sections (what runs when, the verdict rules, the approval
-  security model, the env variables) and the journal entry (decisions, Task 0 answers).
+  security model, the env variables) and the journal entry (decisions).
 - [ ] **Step 3:** `make check` → PASS. Commit `docs: Upgrade Advisor; amend the advisory principle`.
 
 ### Task 10: Rollout (operator, after Part A Tasks 1–3)

@@ -231,12 +231,12 @@ class TestPbsLatestBackupTime:
                 json={
                     "data": [
                         {"backup-type": "ct", "backup-id": "114", "last-backup": 1},
-                        {"backup-type": "ct", "backup-id": "115", "last-backup": 1_790_000_000},
+                        {"backup-type": "ct", "backup-id": "901", "last-backup": 1_790_000_000},
                     ]
                 },
             )
         )
-        assert await pbs_latest_backup_time("ct", "115") == datetime.fromtimestamp(1_790_000_000, UTC)
+        assert await pbs_latest_backup_time("ct", "901") == datetime.fromtimestamp(1_790_000_000, UTC)
         assert route.calls.last.request.headers["Authorization"].startswith("PBSAPIToken=")
 
     @respx.mock
@@ -252,7 +252,7 @@ class TestPbsLatestBackupTime:
 
         respx.get(self.GROUPS).mock(return_value=httpx.Response(302, headers={"Location": "http://evil.test/"}))
         with pytest.raises(ValueError, match="HTTP 302"):
-            await pbs_latest_backup_time("ct", "115")
+            await pbs_latest_backup_time("ct", "901")
 
     @respx.mock
     async def test_oversized_body_rejected(self) -> None:
@@ -261,4 +261,4 @@ class TestPbsLatestBackupTime:
 
         respx.get(self.GROUPS).mock(return_value=httpx.Response(200, content=b"x" * (6 * 1024 * 1024)))
         with pytest.raises(ResponseTooLarge):
-            await pbs_latest_backup_time("ct", "115")
+            await pbs_latest_backup_time("ct", "901")

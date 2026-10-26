@@ -65,7 +65,7 @@ containers:
     github_repo: prometheus/prometheus
     release_tag_format: "{release}"  # GitHub release tag -> image tag
     readiness_url: http://<host ip>:9090/-/ready
-    pbs_guest: "CT 115"
+    pbs_guest: "CT 901"
     context_files:
       - /app/upgrades/context/prometheus/docker-compose.yml.j2
       - /app/upgrades/context/prometheus/prometheus.yml.j2
@@ -283,8 +283,8 @@ def test_advisor_env_file_holds_the_secrets(): ...
 
 - [ ] **Step 2:** `uv run pytest tests/test_sre_upgrade_advisor_wiring.py -v` → FAIL.
 - [ ] **Step 3: Implement.** Defaults list per the Interfaces block (Prometheus: readiness
-  `:9090/-/ready`, `pbs_guest: "CT 115"`, context = its compose and `prometheus/prometheus.yml.j2`
-  templates; Open WebUI: readiness `:3000/health`, `"CT 119"`, context = its compose template).
+  `:9090/-/ready`, `pbs_guest: "CT 901"`, context = its compose and `prometheus/prometheus.yml.j2`
+  templates; Open WebUI: readiness `:3000/health`, `"CT 902"`, context = its compose template).
   Tasks (tagged `docker, sre`): dir `/srv/infra/sre-upgrades` and `context/<name>/` (owner
   `1001`, 0750); `ansible.builtin.copy` each `context_sources` file from the controller to
   `context/<name>/<basename>` (0640, owner 1001; these are template sources, so vault values

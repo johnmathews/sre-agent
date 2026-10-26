@@ -20,7 +20,7 @@ containers:
     github_repo: prometheus/prometheus
     release_tag_format: "{release}"
     readiness_url: http://10.0.0.15:9090/-/ready
-    pbs_guest: "CT 115"
+    pbs_guest: "CT 901"
     context_files:
       - /app/upgrades/context/prometheus/docker-compose.yml.j2
       - /app/upgrades/context/prometheus/prometheus.yml.j2
@@ -42,7 +42,7 @@ def test_load_allowlist_parses_contract_example(tmp_path: Path) -> None:
     assert item.name == "prometheus"
     assert item.tag == "v3"
     assert item.release_tag_format == "{release}"
-    assert item.pbs_guest == "CT 115"
+    assert item.pbs_guest == "CT 901"
     assert len(item.context_files) == 2
     assert item.auto_deploy is False
 

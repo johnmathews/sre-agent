@@ -30,7 +30,7 @@ def _container(name: str = "prometheus", wud_url: str = WUD_URL) -> AdvisedConta
         tag="v3",
         github_repo="prometheus/prometheus",
         readiness_url="http://10.0.0.15:9090/-/ready",
-        pbs_guest="CT 115",
+        pbs_guest="CT 901",
         context_files=[],
     )
 

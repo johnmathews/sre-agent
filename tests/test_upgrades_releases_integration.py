@@ -42,7 +42,7 @@ def _container(release_tag_format: str = "{release}") -> AdvisedContainer:
         github_repo="example/app",
         release_tag_format=release_tag_format,
         readiness_url="http://10.0.0.15:9090/-/ready",
-        pbs_guest="CT 115",
+        pbs_guest="CT 901",
         context_files=[],
     )
 

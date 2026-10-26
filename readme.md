@@ -791,7 +791,7 @@ sre-agent/
 │   ├── upgrades/                 # Upgrade Advisor (allowlist, WUD/registry/GitHub clients, review, deploy, verify)
 │   └── api/
 │       ├── main.py               # FastAPI application
-│       └── upgrades.py           # Upgrade approval page (GET) and guarded deploy (POST)
+│       └── upgrades.py           # Upgrade approval launcher (GET), review page (POST /view), guarded deploy (POST)
 ├── scripts/
 │   ├── ingest_runbooks.py        # Rebuild Chroma vector store
 │   ├── run_eval.py               # Eval framework entry point

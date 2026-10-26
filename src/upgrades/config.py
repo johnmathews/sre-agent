@@ -3,6 +3,7 @@
 import string
 from pathlib import Path, PurePosixPath
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import AfterValidator, AnyHttpUrl, BaseModel, ConfigDict, StringConstraints, field_validator
@@ -12,16 +13,34 @@ from src.config import get_settings
 CONTEXT_ROOT = PurePosixPath("/app/upgrades/context")
 
 
-def _http_url(value: str) -> str:
-    """Validate as an http(s) URL with a host; return the original string unchanged."""
+def _check_url_shape(value: str, *, root_only: bool) -> str:
+    """Validate an http(s) URL with a host and no userinfo, query or fragment; return it unchanged."""
     if value != value.strip():
         msg = "URL must not have leading or trailing whitespace"
         raise ValueError(msg)
-    AnyHttpUrl(value)
+    url = AnyHttpUrl(value)
+    if url.username is not None or url.password is not None or "@" in urlsplit(value).netloc:
+        msg = "URL must not contain credentials"
+        raise ValueError(msg)
+    if "?" in value or "#" in value:
+        msg = "URL must not contain a query or fragment"
+        raise ValueError(msg)
+    if root_only and url.path not in {None, "", "/"}:
+        msg = "URL must not contain a path"
+        raise ValueError(msg)
     return value
 
 
-HttpUrlStr = Annotated[str, AfterValidator(_http_url)]
+def _base_url(value: str) -> str:
+    return _check_url_shape(value, root_only=True)
+
+
+def _endpoint_url(value: str) -> str:
+    return _check_url_shape(value, root_only=False)
+
+
+BaseUrlStr = Annotated[str, AfterValidator(_base_url)]
+EndpointUrlStr = Annotated[str, AfterValidator(_endpoint_url)]
 Name = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}$")]
 Registry = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.-]+(:[0-9]+)?$")]
 Repository = Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$")]
@@ -37,13 +56,13 @@ class AdvisedContainer(BaseModel):
 
     name: Name
     host: Name
-    wud_url: HttpUrlStr
+    wud_url: BaseUrlStr
     registry: Registry
     repository: Repository
     tag: Tag
     github_repo: GithubRepo
     release_tag_format: str = "{release}"
-    readiness_url: HttpUrlStr
+    readiness_url: EndpointUrlStr
     pbs_guest: PbsGuest
     context_files: list[str]
     auto_deploy: bool = False

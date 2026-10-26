@@ -102,6 +102,13 @@ def _with(**changes: Any) -> str:
         ("context_files", ["/app/upgrades/contextual/x"]),
         ("wud_url", "ftp://x"),
         ("wud_url", "not a url"),
+        ("wud_url", "http://u:p@10.0.0.15:3010"),
+        ("wud_url", "http://10.0.0.15:3010/x"),
+        ("wud_url", "http://10.0.0.15:3010?a=1"),
+        ("wud_url", "http://10.0.0.15:3010#f"),
+        ("readiness_url", "http://u:p@10.0.0.19:3000/health"),
+        ("readiness_url", "http://10.0.0.19:3000/health?x=1"),
+        ("readiness_url", "http://10.0.0.19:3000/health#f"),
         ("wud_url", " http://10.0.0.15:3010"),
         ("readiness_url", "http://10.0.0.15:9090/ \n"),
         ("readiness_url", "file:///etc/passwd"),
@@ -128,6 +135,14 @@ def _with(**changes: Any) -> str:
 def test_allowlist_rejects_invalid_value(tmp_path: Path, field: str, value: Any) -> None:
     with pytest.raises(ValidationError):
         load_allowlist(_write(tmp_path, _with(**{field: value})))
+
+
+def test_allowlist_accepts_url_shapes(tmp_path: Path) -> None:
+    for wud in ("http://10.0.0.15:3010", "http://10.0.0.15:3010/", "https://wud.example.com"):
+        item = load_allowlist(_write(tmp_path, _with(wud_url=wud)))[0]
+        assert item.wud_url == wud
+    item = load_allowlist(_write(tmp_path, _with(readiness_url="http://10.0.0.19:3000/health")))[0]
+    assert item.readiness_url == "http://10.0.0.19:3000/health"
 
 
 def test_allowlist_accepts_registry_port_and_release_prefix(tmp_path: Path) -> None:

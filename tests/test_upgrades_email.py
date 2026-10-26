@@ -167,3 +167,16 @@ def test_public_base_url_must_be_https() -> None:
     assert ok.upgrade_advisor_public_base_url == "https://example.com"
     empty = Settings(_env_file=None, upgrade_advisor_public_base_url="", **base)  # type: ignore[call-arg]
     assert empty.upgrade_advisor_public_base_url == ""
+
+
+async def test_scheduled_advisor_job_counts_an_import_error() -> None:
+    import sys
+    from unittest.mock import patch
+
+    from prometheus_client import REGISTRY
+
+    labels = {"status": "error"}
+    before = REGISTRY.get_sample_value("sre_assistant_upgrade_runs_total", labels) or 0.0
+    with patch.dict(sys.modules, {"src.upgrades.job": None}):  # makes `import src.upgrades.job` raise ImportError
+        await sched_mod._scheduled_advisor_job()  # must not raise
+    assert REGISTRY.get_sample_value("sre_assistant_upgrade_runs_total", labels) == before + 1

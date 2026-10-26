@@ -18,7 +18,7 @@ from typing import Any
 from src.config import get_settings
 from src.observability.metrics import UPGRADE_DEPLOYS_TOTAL
 from src.upgrades import store, verify, wud
-from src.upgrades.config import AdvisedContainer, load_allowlist
+from src.upgrades.config import AdvisedContainer, is_advisor_configured, load_allowlist
 from src.upgrades.models import DeployOutcome, DeployRecord, TriggerState, VerdictRecord
 from src.upgrades.registry import DIGEST_RE
 from src.upgrades.verify import INTERRUPTED_IN_FLIGHT
@@ -314,6 +314,21 @@ def start_deploy(batch_id: str, approved_ids: list[int]) -> asyncio.Task[list[De
     _deploy_runs.add(task)
     task.add_done_callback(_deploy_runs.discard)
     return task
+
+
+async def _startup_verify() -> None:
+    try:
+        await verify.verify_pending()
+    except Exception:
+        logger.exception("Startup verification of pending deploys failed; the next advisor run retries")
+
+
+def start_startup_verification() -> asyncio.Task[None] | None:
+    """At startup, when the advisor is configured, settle deploys left pending or mid-trigger by the last process
+    (in the background; the task reference is kept). Returns the task, or None when the advisor is off."""
+    if not is_advisor_configured():
+        return None
+    return _keep(_startup_verify())
 
 
 async def wait_for_deploys(timeout_seconds: float) -> int:

@@ -53,9 +53,9 @@ async def _scheduled_report_job() -> None:
 
 async def _scheduled_advisor_job() -> None:
     """Run the Upgrade Advisor; an unexpected exception is logged and counted, never raised into the scheduler."""
-    from src.upgrades.job import run_advisor  # lazy: the weekly report path must not import the advisor stack
-
     try:
+        from src.upgrades.job import run_advisor  # lazy: the weekly report path must not import the advisor stack
+
         await run_advisor()
     except Exception:
         UPGRADE_RUNS_TOTAL.labels(status="error").inc()

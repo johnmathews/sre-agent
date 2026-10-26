@@ -47,7 +47,7 @@ ALLOWLIST = "containers:\n" + "".join(
     tag: v3
     github_repo: example/{name}
     readiness_url: http://10.0.0.15:9090/-/ready
-    pbs_guest: CT 115
+    pbs_guest: CT 901
     context_files: []
 """
     for name in ("prometheus", "openwebui", "grafana")
@@ -1238,6 +1238,32 @@ async def test_shutdown_before_the_trigger_records_the_item_as_interrupted(
 
 
 @pytest.mark.integration
+async def test_startup_verification_runs_once_in_the_background(mock_settings: Any) -> None:
+    with patch.object(verify, "verify_pending", new_callable=AsyncMock, return_value=[]) as pending:
+        task = deploy.start_startup_verification()
+        assert task is not None and task in deploy._background_tasks
+        await task
+    pending.assert_awaited_once_with()
+
+
+@pytest.mark.integration
+async def test_startup_verification_logs_a_crash(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    with patch.object(verify, "verify_pending", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+        task = deploy.start_startup_verification()
+        assert task is not None
+        await task  # never raises
+    assert any(r.levelname == "ERROR" and "Startup verification" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.integration
+async def test_no_startup_verification_when_the_advisor_is_off(mock_settings: Any) -> None:
+    mock_settings.upgrade_advisor_public_base_url = ""
+    with patch.object(verify, "verify_pending", new_callable=AsyncMock) as pending:
+        assert deploy.start_startup_verification() is None
+    pending.assert_not_awaited()
+
+
+@pytest.mark.integration
 async def test_wait_for_deploys_returns_at_once_when_idle() -> None:
     assert not deploy._deploy_runs
     started = asyncio.get_running_loop().time()
@@ -1281,10 +1307,12 @@ def test_app_shutdown_waits_for_deploys(mock_settings: Any) -> None:
         patch.object(main, "build_agent", return_value=MagicMock()),
         patch.object(main, "wait_for_deploys", new_callable=AsyncMock, return_value=0) as waited,
         patch.object(main, "warn_if_approval_unconfigured") as warned,
+        patch.object(main, "start_startup_verification") as verified,
     ):
         with TestClient(main.app):
             waited.assert_not_awaited()
             warned.assert_called_once_with()
+            verified.assert_called_once_with()
         waited.assert_awaited_once_with(main.SHUTDOWN_DEPLOY_WAIT_SECONDS)
     assert main.SHUTDOWN_DEPLOY_WAIT_SECONDS <= 5.0  # Docker's default stop timeout is 10 s
 

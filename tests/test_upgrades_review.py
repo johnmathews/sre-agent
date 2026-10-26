@@ -76,9 +76,10 @@ def test_gate_holds_unreleased_build() -> None:
 
 
 def test_gate_holds_until_min_age_from_first_seen() -> None:
-    held = gate(_cand(first_seen_at=NOW - timedelta(hours=71)), NOW, MIN_AGE)
+    seen = NOW - timedelta(hours=70)
+    held = gate(_cand(first_seen_at=seen), NOW, MIN_AGE)
     assert held is not None and held.startswith("too new: first seen ")
-    assert (NOW - timedelta(hours=71) + MIN_AGE).isoformat() in held
+    assert (seen + MIN_AGE - review_mod.AGE_SLACK).isoformat() in held  # the eligible time includes the slack
     assert gate(_cand(first_seen_at=NOW - timedelta(hours=73)), NOW, MIN_AGE) is None
 
 
@@ -205,8 +206,14 @@ def test_parse_review_fails_closed_on_ambiguity() -> None:
     assert parse_review(f"\n  {a}  \n") is not None
 
 
-def test_gate_releases_exactly_at_min_age() -> None:
-    assert gate(_cand(first_seen_at=NOW - MIN_AGE), NOW, MIN_AGE) is None
+def test_gate_allows_one_hour_of_slack_for_cron_jitter() -> None:
+    assert timedelta(hours=1) == review_mod.AGE_SLACK
+    boundary = MIN_AGE - timedelta(hours=1)
+    assert gate(_cand(first_seen_at=NOW - boundary), NOW, MIN_AGE) is None  # exactly at min_age - 1 h
+    just_short = gate(_cand(first_seen_at=NOW - boundary + timedelta(seconds=1)), NOW, MIN_AGE)
+    assert just_short is not None and just_short.startswith("too new")
+    # the daily run that lands a few seconds before the 72 h mark is no longer held another day
+    assert gate(_cand(first_seen_at=NOW - MIN_AGE + timedelta(seconds=20)), NOW, MIN_AGE) is None
 
 
 async def test_review_missing_candidate_release_skips_model() -> None:
@@ -312,6 +319,14 @@ def test_parse_review_rejects_oversized_answer() -> None:
 def test_parse_review_pathological_fence_is_fast() -> None:
     start = time.perf_counter()
     assert parse_review("```" + "\n" * 100_000 + "x") is None
+    assert time.perf_counter() - start < 1.0
+
+
+def test_parse_review_pathological_fence_under_the_cap_is_fast() -> None:
+    text = "```" + "\n" * 19_000 + "x"
+    assert len(text) <= review_mod.MAX_ANSWER_CHARS  # reaches the parser, unlike the over-cap case above
+    start = time.perf_counter()
+    assert parse_review(text) is None
     assert time.perf_counter() - start < 1.0
 
 

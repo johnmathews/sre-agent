@@ -16,8 +16,10 @@ from src.upgrades import email as upgrade_email
 from src.upgrades import releases, review, store, verify, wud
 from src.upgrades.config import AdvisedContainer, load_allowlist
 from src.upgrades.models import DeployRecord, Verdict
-from src.upgrades.releases import Release
+from src.upgrades.registry import RegistryError
+from src.upgrades.releases import Release, ReleaseLookupError
 from src.upgrades.review import Candidate, Review
+from src.upgrades.textutil import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -185,43 +187,45 @@ def _abort_metric() -> None:
     UPGRADE_RUNS_TOTAL.labels(status="error").inc()
 
 
-async def run_advisor(now: datetime | None = None, send_email: bool = True) -> RunSummary:  # noqa: FBT001, FBT002
-    """Run the advisor once. With ``send_email=False`` (dry run) nothing is sent, no verdict row, batch or token is
-    created (first-seen times are still recorded) and pending deploy verifications are left alone."""
-    started = time.monotonic()
-    settings = get_settings()
-    now = now or datetime.now(UTC)
-    if now.tzinfo is None:
-        msg = "now must be timezone-aware"
-        raise ValueError(msg)
-    try:
-        containers = load_allowlist(settings.upgrade_advisor_config_path)
-    except Exception as exc:
-        kind = type(exc).__name__
-        logger.exception("Upgrade advisor allowlist could not be loaded: %s", kind)
-        _abort_metric()
-        if send_email:
-            await _send(*upgrade_email.render_abort(kind))
-        return RunSummary(aborted=kind)
+# Our own clients build these messages from cleaned, bounded text, so they may be shown; anything else could carry
+# arbitrary text and is reduced to its class name.
+_OWN_ERRORS = (wud.WudError, RegistryError, ReleaseLookupError)
 
-    items: list[ItemResult] = []
+
+def _item_error(exc: Exception) -> str:
+    if isinstance(exc, _OWN_ERRORS):
+        return f"{type(exc).__name__}: {clean_text(str(exc))}"
+    return type(exc).__name__
+
+
+async def _abort(kind: str, send_email: bool) -> RunSummary:  # noqa: FBT001
+    """A run that cannot continue: error metric, an abort email naming the exception class, nothing else."""
+    _abort_metric()
     if send_email:
-        try:
-            await verify.verify_pending()
-        except Exception as exc:
-            logger.exception("verify_pending failed; continuing with the review")
-            items.append(ItemResult(container="deploy verification", error=type(exc).__name__))
+        await _send(*upgrade_email.render_abort(kind))
+    return RunSummary(aborted=kind)
 
+
+async def _review_all(
+    containers: list[AdvisedContainer],
+    now: datetime,
+    items: list[ItemResult],
+    db_path: str,
+    send_email: bool,  # noqa: FBT001
+) -> RunSummary:
+    """Review every container (one failing is an error item), then batch and collect yesterday's deploys. Anything
+    raised here outside the per-container loop (opening the store, the batch, the outcome lookup) aborts the run."""
+    settings = get_settings()
     min_age = timedelta(hours=settings.upgrade_advisor_min_age_hours)
     cache = _ReleaseCache()
-    conn = store.connect(settings.upgrade_advisor_db_path)
+    conn = store.connect(db_path)
     try:
         for c in containers:
             try:
                 item = await _review_one(conn, c, now, min_age, cache, persist=send_email)
             except Exception as exc:
                 logger.exception("Upgrade review of %s failed", c.name)
-                items.append(ItemResult(container=c.name, error=type(exc).__name__))
+                items.append(ItemResult(container=c.name, error=_item_error(exc)))
                 continue
             if item is not None:
                 items.append(item)
@@ -243,6 +247,39 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
                 summary.outcome_containers[deploy.id] = verdict.container
     finally:
         conn.close()
+    return summary
+
+
+async def run_advisor(now: datetime | None = None, send_email: bool = True) -> RunSummary:  # noqa: FBT001, FBT002
+    """Run the advisor once. With ``send_email=False`` (dry run) nothing is sent, no verdict row, batch or token is
+    created (first-seen times are still recorded) and pending deploy verifications are left alone."""
+    started = time.monotonic()
+    settings = get_settings()
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        msg = "now must be timezone-aware"
+        raise ValueError(msg)
+    try:
+        containers = load_allowlist(settings.upgrade_advisor_config_path)
+    except Exception as exc:
+        kind = type(exc).__name__
+        logger.exception("Upgrade advisor allowlist could not be loaded: %s", kind)
+        return await _abort(kind, send_email)
+
+    items: list[ItemResult] = []
+    if send_email:
+        try:
+            await verify.verify_pending()
+        except Exception as exc:
+            logger.exception("verify_pending failed; continuing with the review")
+            items.append(ItemResult(container="deploy verification", error=_item_error(exc)))
+
+    try:
+        summary = await _review_all(containers, now, items, settings.upgrade_advisor_db_path, send_email)
+    except Exception as exc:  # store, batch or outcome lookup failed: same path as an unreadable allowlist
+        kind = type(exc).__name__
+        logger.exception("Upgrade advisor run failed after the reviews: %s", kind)
+        return await _abort(kind, send_email)
 
     if send_email and (summary.items or summary.outcomes) and not await _send(*upgrade_email.render(summary)):
         _abort_metric()

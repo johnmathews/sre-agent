@@ -28,6 +28,8 @@ MAX_CONTEXT_FILE_CHARS = 20_000
 MAX_RELEASE_BODY_CHARS = 15_000
 MAX_PROMPT_CHARS = 120_000
 MAX_ANSWER_CHARS = 20_000
+# Tolerance on min_age for the daily cron's start-time jitter (see gate).
+AGE_SLACK = timedelta(hours=1)
 RETRY_BUDGET_SECONDS = 120.0
 RETRY_INITIAL_DELAY = 15.0
 MIN_CALL_TIMEOUT = 10.0
@@ -64,11 +66,13 @@ class Review(BaseModel):
 
 
 def gate(c: Candidate, now: datetime, min_age: timedelta) -> str | None:
-    """Why this candidate must wait (``None`` when it may be reviewed). Age counts from our own first sighting."""
+    """Why this candidate must wait (``None`` when it may be reviewed). Age counts from our own first sighting, less
+    ``AGE_SLACK``: the daily run that first saw a digest and the one three days later start seconds apart, and
+    without slack the later one would land just short of ``min_age`` and hold the candidate another whole day."""
     if c.candidate_release is None:
         return "unreleased build"
-    eligible = c.first_seen_at + min_age
-    if now - c.first_seen_at < min_age:
+    eligible = c.first_seen_at + min_age - AGE_SLACK
+    if now < eligible:
         return f"too new: first seen {c.first_seen_at.isoformat()}, eligible {eligible.isoformat()}"
     return None
 

@@ -34,7 +34,7 @@ containers:
     tag: v3
     github_repo: prometheus/prometheus
     readiness_url: {READY}
-    pbs_guest: CT 115
+    pbs_guest: CT 901
     context_files: []
 """
 
@@ -147,7 +147,7 @@ async def test_digest_mismatch_emails_at_once(mock_settings: Any, email: MagicMo
     email.assert_called_once()
     text, html_body, subject = email.call_args.args
     assert subject == "Upgrade digest mismatch: prometheus on prometheus"
-    assert "CT 115" in text
+    assert "CT 901" in text
     assert "restore from the latest PBS backup" in text
     assert "<h2>" in html_body
 
@@ -206,7 +206,7 @@ async def test_readiness_failure_emails_with_pbs_guest(mock_settings: Any, email
     respx.get(READY).mock(return_value=httpx.Response(503))
     respx.get(f"{mock_settings.pbs_url}/api2/json/admin/datastore/main/groups").mock(
         return_value=httpx.Response(
-            200, json={"data": [{"backup-type": "ct", "backup-id": "115", "last-backup": 1_790_000_000}]}
+            200, json={"data": [{"backup-type": "ct", "backup-id": "901", "last-backup": 1_790_000_000}]}
         )
     )
     mock_settings.pbs_default_datastore = "main"
@@ -215,8 +215,8 @@ async def test_readiness_failure_emails_with_pbs_guest(mock_settings: Any, email
     assert "HTTP 503" in result.detail
     text, _, subject = email.call_args.args
     assert subject == "Upgrade FAILED: prometheus on prometheus"
-    assert "CT 115" in text
-    assert "restore from the latest PBS backup of CT 115 (taken 2026-" in text
+    assert "CT 901" in text
+    assert "restore from the latest PBS backup of CT 901 (taken 2026-" in text
 
 
 @pytest.mark.integration
@@ -231,7 +231,7 @@ async def test_pbs_error_is_a_warning_not_a_failure(mock_settings: Any, email: M
     assert result.outcome == "failed"
     text = email.call_args.args[0]
     assert "warning: PBS lookup failed" in text
-    assert "CT 115" in text
+    assert "CT 901" in text
 
 
 @pytest.mark.integration

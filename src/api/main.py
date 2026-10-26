@@ -48,7 +48,7 @@ from src.observability.metrics import (
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
 from src.report.scheduler import start_scheduler, stop_scheduler
-from src.upgrades.deploy import wait_for_deploys
+from src.upgrades.deploy import start_startup_verification, wait_for_deploys
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +226,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         start_scheduler()
         warn_if_approval_unconfigured()
+        start_startup_verification()
         yield
         stop_scheduler()
         # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.

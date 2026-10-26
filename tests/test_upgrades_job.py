@@ -12,7 +12,8 @@ from prometheus_client import REGISTRY
 
 from src.upgrades import store
 from src.upgrades.job import run_advisor
-from src.upgrades.releases import Release
+from src.upgrades.registry import RegistryError
+from src.upgrades.releases import Release, ReleaseLookupError
 from src.upgrades.review import Review
 from src.upgrades.wud import WudContainer, WudError
 
@@ -31,7 +32,7 @@ def _allow(names: list[str]) -> str:
     tag: v1
     github_repo: org/{n}
     readiness_url: http://10.0.0.15:9090/ready
-    pbs_guest: CT 115
+    pbs_guest: CT 901
     context_files: []
 """
         for n in names
@@ -109,17 +110,15 @@ async def test_nothing_pending_sends_no_email_but_sets_last_success(env: Any, mo
 
 async def test_one_wud_host_down_reports_error_and_reviews_the_other(env: Any, mocks: dict[str, MagicMock]) -> None:
     Path(env.upgrade_advisor_config_path).write_text(_allow(["alpha", "beta"]))
-    mocks["get"].side_effect = [WudError("secret detail"), _wud()]
+    mocks["get"].side_effect = [WudError("WUD returned HTTP 503 listing containers\x00"), _wud()]
     # beta is old enough (first seen long ago)
     conn = store.connect(env.upgrade_advisor_db_path)
     store.first_seen(conn, "beta", NEW, NOW - timedelta(days=5))
     conn.close()
     summary = await run_advisor(now=NOW)
     by = {i.container: i for i in summary.items}
-    assert by["alpha"].error == "WudError"
+    assert by["alpha"].error == "WudError: WUD returned HTTP 503 listing containers "  # cleaned own message
     assert by["beta"].verdict == "upgrade"
-    _, body, _ = mocks["send"].call_args.args
-    assert "secret detail" not in body
     assert mocks["send"].call_args.args[2] == "Upgrades: 1 recommended, 0 need you"
 
 
@@ -360,3 +359,41 @@ async def test_dry_run_and_failed_runs_do_not_persist_last_success(env: Any, moc
     summary = await run_advisor(now=NOW)
     assert summary.aborted == "EmailNotSent"
     assert _stored_last_success(env) is None
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (RegistryError("no release of alpha matched sha256:bbbbbbbbbbbb"), "RegistryError: no release of alpha"),
+        (ReleaseLookupError("GitHub returned HTTP 502 for releases of org/alpha"), "ReleaseLookupError: GitHub"),
+        (RuntimeError("secret token sk-ant-xyz"), "RuntimeError"),
+    ],
+)
+async def test_error_items_show_our_own_messages_only(
+    env: Any, mocks: dict[str, MagicMock], exc: Exception, expected: str
+) -> None:
+    mocks["list"].side_effect = exc
+    summary = await run_advisor(now=NOW)
+    [item] = summary.items
+    assert item.error is not None and item.error.startswith(expected)
+    if isinstance(exc, RuntimeError):
+        assert item.error == "RuntimeError"
+
+
+async def test_a_failure_after_the_loop_aborts_with_an_email(
+    env: Any, mocks: dict[str, MagicMock], tmp_path: Path
+) -> None:
+    env.upgrade_advisor_db_path = str(tmp_path / "missing-dir" / "advisor.db")  # cannot be created
+    before = _metric("sre_assistant_upgrade_runs_total", {"status": "error"})
+    summary = await run_advisor(now=NOW)
+    assert summary.aborted == "OperationalError"
+    assert _metric("sre_assistant_upgrade_runs_total", {"status": "error"}) == before + 1
+    assert mocks["send"].call_args.args[2] == "Upgrade advisor could not run: OperationalError"
+
+
+async def test_a_batch_failure_aborts_with_an_email(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    with patch("src.upgrades.job.store.create_batch", side_effect=ValueError("verdict 1 already in a batch")):
+        summary = await run_advisor(now=NOW)
+    assert summary.aborted == "ValueError"
+    assert mocks["send"].call_args.args[2] == "Upgrade advisor could not run: ValueError"

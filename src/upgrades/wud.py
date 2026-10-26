@@ -2,7 +2,6 @@
 
 import logging
 import re
-import unicodedata
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -11,14 +10,11 @@ from pydantic import BaseModel, ValidationError
 
 from src.config import get_settings
 from src.upgrades.config import AdvisedContainer
+from src.upgrades.textutil import MAX_RESPONSE_BYTES, clean_text
 
 logger = logging.getLogger(__name__)
 
-MAX_DETAIL_CHARS = 200
 DOCKER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
-# Unicode categories replaced by a space: all control/format/etc. (C*) plus line and paragraph separators.
-_STRIPPED = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
-MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 GET_TIMEOUT_SECONDS = 30.0
 # WUD answers the trigger POST only after the deploy has finished.
 TRIGGER_TIMEOUT_SECONDS = 600.0
@@ -58,17 +54,11 @@ def _dig(record: dict[str, Any], *keys: str) -> Any:
     return value
 
 
-def _clean(text: str) -> str:
-    """Make text from a WUD response safe for an error message: no control or line/paragraph separator
-    characters, at most 200 chars."""
-    return "".join(" " if unicodedata.category(ch) in _STRIPPED else ch for ch in text[:MAX_DETAIL_CHARS])
-
-
 def _describe_malformed(exc: KeyError | ValidationError) -> str:
     """Name what was wrong with a WUD record (field locations and error types only, never values)."""
     if isinstance(exc, KeyError):
-        return f"missing key {_clean(str(exc.args[0]) if exc.args else '?')}"
-    return _clean(", ".join(".".join(map(str, e["loc"])) + ": " + e["type"] for e in exc.errors()))
+        return f"missing key {clean_text(str(exc.args[0]) if exc.args else '?')}"
+    return clean_text(", ".join(".".join(map(str, e["loc"])) + ": " + e["type"] for e in exc.errors()))
 
 
 def _fail(message: str) -> WudError:
@@ -135,7 +125,7 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     try:
         body = response.json()
         if isinstance(body, dict):
-            detail = _clean(str(body.get("message") or body.get("error") or ""))
+            detail = clean_text(str(body.get("message") or body.get("error") or ""))
     except ValueError:
         pass
     raise _fail(f"WUD deploy failed for {_where(c)}: HTTP {response.status_code} {detail}".rstrip())

@@ -197,6 +197,15 @@ def latest_verdict(conn: sqlite3.Connection, container: str, digest: str) -> Ver
     return _row_to_verdict(row) if row else None
 
 
+def get_verdict(conn: sqlite3.Connection, verdict_id: int) -> VerdictRecord | None:
+    """Fetch one verdict by id, or None (an unreadable row is logged and treated as missing)."""
+    row = conn.execute("SELECT * FROM verdicts WHERE id = ?", (verdict_id,)).fetchone()
+    if row is None:
+        return None
+    parsed = _parse_rows([row], _row_to_verdict, "verdict")
+    return parsed[0] if parsed else None
+
+
 def create_batch(conn: sqlite3.Connection, verdict_ids: list[int], now: datetime, ttl: timedelta) -> tuple[str, str]:
     """Create an approval batch and link its verdicts; returns ``(batch_id, token)``.
 
@@ -351,6 +360,15 @@ def _row_to_deploy(row: sqlite3.Row) -> DeployRecord:
     )
 
 
+def get_deploy(conn: sqlite3.Connection, deploy_id: int) -> DeployRecord | None:
+    """Fetch one deploy by id, or None (an unreadable row is logged and treated as missing)."""
+    row = conn.execute("SELECT * FROM deploys WHERE id = ?", (deploy_id,)).fetchone()
+    if row is None:
+        return None
+    parsed = _parse_rows([row], _row_to_deploy, "deploy")
+    return parsed[0] if parsed else None
+
+
 def pending_verifications(conn: sqlite3.Connection) -> list[DeployRecord]:
     """Deploys still awaiting verification, oldest first (unreadable rows are logged and skipped)."""
     rows = conn.execute("SELECT * FROM deploys WHERE outcome = 'pending_verify' ORDER BY id").fetchall()
@@ -376,6 +394,8 @@ __all__ = [
     "first_seen",
     "get_batch",
     "get_batch_verdicts",
+    "get_deploy",
+    "get_verdict",
     "latest_verdict",
     "pending_verifications",
     "record_decision",

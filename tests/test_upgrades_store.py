@@ -326,3 +326,21 @@ def test_deploys_since_orders_by_start_time_and_handles_other_zones(conn: sqlite
     cest = timezone(timedelta(hours=2))
     got = store.deploys_since(conn, (T0 - timedelta(minutes=1)).astimezone(cest))
     assert [d.id for d in got] == [earlier, later]
+
+
+def test_get_verdict_and_get_deploy_round_trip(conn: sqlite3.Connection) -> None:
+    vid = _verdict(conn)
+    did = store.save_deploy(conn, verdict_id=vid, now=T0, outcome="pending_verify", running_digest=None, detail="")
+    verdict = store.get_verdict(conn, vid)
+    deploy = store.get_deploy(conn, did)
+    assert verdict is not None
+    assert verdict.container == "prometheus"
+    assert verdict.candidate_digest == "sha256:new"
+    assert deploy is not None
+    assert deploy.verdict_id == vid
+    assert deploy.outcome == "pending_verify"
+
+
+def test_get_verdict_and_get_deploy_unknown_id_is_none(conn: sqlite3.Connection) -> None:
+    assert store.get_verdict(conn, 999) is None
+    assert store.get_deploy(conn, 999) is None

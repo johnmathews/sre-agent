@@ -160,6 +160,16 @@ AGENT_ERRORS_TOTAL = Counter(
 )
 
 # ---------------------------------------------------------------------------
+# Upgrade Advisor metrics
+# ---------------------------------------------------------------------------
+
+UPGRADE_DEPLOYS_TOTAL = Counter(
+    "sre_assistant_upgrade_deploys_total",
+    "Final outcome of each post-deploy verification (ok, failed, digest_mismatch)",
+    labelnames=["outcome"],
+)
+
+# ---------------------------------------------------------------------------
 # Cost pricing (USD per token) — GPT-4o-mini as default
 # ---------------------------------------------------------------------------
 

@@ -117,7 +117,8 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     """Ask WUD to deploy the pending update; returns once WUD reports the deploy finished."""
     if not DOCKER_ID_RE.fullmatch(wud_id):
         raise _fail(f"refusing to deploy {_where(c)}: WUD id is not a Docker container id")
-    url = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}/triggers/dockercompose/deploy"
+    base = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}"
+    url = f"{base}/triggers/dockercompose/{quote(c.wud_trigger, safe='')}"
     try:
         async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS, follow_redirects=False) as client:
             response = await bounded_request(client, "POST", url)

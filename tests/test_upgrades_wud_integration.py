@@ -20,7 +20,7 @@ def _use_mock_settings(mock_settings: Any) -> None:
     mock_settings.upgrade_advisor_wud_password = "s3cret"
 
 
-def _container(name: str = "prometheus", wud_url: str = WUD_URL) -> AdvisedContainer:
+def _container(name: str = "prometheus", wud_url: str = WUD_URL, **extra: Any) -> AdvisedContainer:
     return AdvisedContainer(
         name=name,
         host="prometheus",
@@ -32,6 +32,7 @@ def _container(name: str = "prometheus", wud_url: str = WUD_URL) -> AdvisedConta
         readiness_url="http://10.0.0.15:9090/-/ready",
         pbs_guest="CT 901",
         context_files=[],
+        **extra,
     )
 
 
@@ -119,6 +120,14 @@ class TestTriggerDeploy:
         await trigger_deploy(_container(), "abc123def456")
         assert route.call_count == 1
         assert route.calls[0].request.headers["authorization"] == _expected_auth()
+
+    @respx.mock
+    async def test_posts_to_per_entry_trigger_name(self) -> None:
+        route = respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/advise").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        await trigger_deploy(_container(wud_trigger="advise"), "abc123def456")
+        assert route.call_count == 1
 
     @respx.mock
     async def test_500_surfaces_wud_message(self) -> None:

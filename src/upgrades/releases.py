@@ -146,7 +146,9 @@ async def release_for_digest(c: AdvisedContainer, digest: str, releases: list[Re
     newest_first = sorted(releases, key=lambda r: r.published_at, reverse=True)[:MAX_DIGEST_LOOKUPS]
     failed = 0
     for release in newest_first:
-        image_tag = c.release_tag_format.format(release=release.tag)
+        image_tag = c.release_tag_format.format(
+            release=release.tag, version=release.tag[1:] if release.tag.startswith("v") else release.tag
+        )
         try:
             digests = await tag_digests(c.registry, c.repository, image_tag)
         except RegistryError as exc:

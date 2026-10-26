@@ -261,3 +261,19 @@ async def test_regression_issues_other_failures_raise() -> None:
     respx.get(SEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
     with pytest.raises(ReleaseLookupError):
         await regression_issues("example/app", "v1.3.0", since)
+
+
+async def test_release_for_digest_version_placeholder_strips_leading_v(monkeypatch: pytest.MonkeyPatch) -> None:
+    looked_up: list[str] = []
+
+    async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
+        looked_up.append(tag)
+        return {DIGEST}
+
+    monkeypatch.setattr("src.upgrades.releases.tag_digests", fake_digests)
+    now = datetime.now(UTC)
+    for tag, expected in (("v3.7.9", "3.7.9"), ("2.5.8", "2.5.8")):
+        looked_up.clear()
+        release = Release(tag=tag, version=(1,), published_at=now, body="", url="u")
+        assert await release_for_digest(_container("{version}"), DIGEST, [release]) == release
+        assert looked_up == [expected]

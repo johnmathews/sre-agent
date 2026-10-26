@@ -574,6 +574,14 @@ failing does not stop the others. An error item shows our own cleaned message fo
   streaming, redirects are limited, and the registry token realm must be https on the registry host, `auth.docker.io`
   or `ghcr.io`. Allowlist entries are validated (URL shapes, name patterns, context files under one root).
 
+Two allowlist fields shape how an entry is matched and deployed. `release_tag_format` maps a GitHub release tag to the
+image tag and takes exactly one replacement field, with no format spec or conversion: `{release}` is the release tag
+as is (default), `{version}` is the tag without a leading `v` (`v3.7.9` becomes `3.7.9`; `2.5.8` is unchanged).
+`wud_trigger` (default `deploy`, pattern `^[a-z0-9][a-z0-9-]{0,31}$`) names the WUD docker-compose trigger the approved
+deploy posts to (`/api/containers/{id}/triggers/dockercompose/{wud_trigger}`), so hosts that already run an
+auto-deploying WUD can use a second, advise-only trigger. `wud_url` may be a bare service hostname such as
+`http://wud:3000`.
+
 ### Metrics
 
 `sre_assistant_upgrade_runs_total{status}`, `sre_assistant_upgrade_verdicts_total{verdict}`,

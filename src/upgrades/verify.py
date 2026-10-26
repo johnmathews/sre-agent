@@ -27,6 +27,10 @@ ERROR_WINDOW = "5m"
 ERROR_FLOOR = 10
 ERROR_BASELINE_FACTOR = 3
 BASELINE_OFFSET = timedelta(hours=1)
+# Detail of a deploy whose WUD trigger was cut off by a shutdown (written by deploy.py; the trigger may or may not
+# have taken effect).
+INTERRUPTED_IN_FLIGHT = "interrupted during deploy (shutdown); verified next run"
+NOT_DEPLOYED = "not deployed (interrupted by shutdown); approve again from the next email"
 
 
 class _LokiStatusError(Exception):
@@ -143,18 +147,22 @@ async def _latest_backup(pbs_guest: str) -> str:
 async def _send_failure_email(
     outcome: DeployOutcome, name: str, host: str, pbs_guest: str, detail: str, version: str | None
 ) -> None:
-    label = "Upgrade FAILED" if outcome == "failed" else "Upgrade digest mismatch"
-    subject = f"{label}: {name} on {host}"
-    restore = await _latest_backup(pbs_guest)
+    if detail == NOT_DEPLOYED:  # the service was never touched: nothing to restore
+        subject = f"Upgrade not deployed: {name} on {host}"
+        action = "approve the update again from the next advisor email"
+    else:
+        label = "Upgrade FAILED" if outcome == "failed" else "Upgrade digest mismatch"
+        subject = f"{label}: {name} on {host}"
+        action = await _latest_backup(pbs_guest)
     text = (
         f"{subject}\n\nContainer: {name}\nHost: {host}\nCandidate version: {version or 'unknown'}\n"
-        f"Outcome: {outcome}\nDetail: {detail}\n\nRecommended action: {restore}.\n"
+        f"Outcome: {outcome}\nDetail: {detail}\n\nRecommended action: {action}.\n"
     )
     e = html.escape
     body = (
         f"<h2>{e(subject)}</h2><ul><li>Container: {e(name)}</li><li>Host: {e(host)}</li>"
         f"<li>Candidate version: {e(version or 'unknown')}</li><li>Outcome: {e(outcome)}</li>"
-        f"<li>Detail: {e(detail)}</li></ul><p>Recommended action: {e(restore)}.</p>"
+        f"<li>Detail: {e(detail)}</li></ul><p>Recommended action: {e(action)}.</p>"
     )
     if not is_email_configured():
         logger.error("Email not configured; NOT sent. %s", text.replace("\n", " | "))
@@ -176,7 +184,7 @@ def _find_container(name: str) -> tuple[AdvisedContainer | None, str]:
 
 
 async def _evaluate(
-    verdict: VerdictRecord, container: AdvisedContainer, now: datetime
+    verdict: VerdictRecord, container: AdvisedContainer, now: datetime, deploy: DeployRecord
 ) -> tuple[DeployOutcome, str | None, list[str]]:
     """Run the checks in order; returns ``(outcome, running_digest, detail parts)``."""
     try:
@@ -187,6 +195,12 @@ async def _evaluate(
     if not isinstance(wud.running_digest, str) or not DIGEST_RE.fullmatch(wud.running_digest):
         return "failed", None, ["WUD reported no valid running digest"]
     if wud.running_digest != verdict.candidate_digest:
+        if (
+            deploy.detail == INTERRUPTED_IN_FLIGHT
+            and deploy.running_digest is not None
+            and wud.running_digest == deploy.running_digest
+        ):  # still the pre-deploy image: the interrupted trigger never took effect
+            return "failed", wud.running_digest, [NOT_DEPLOYED]
         return (
             "digest_mismatch",
             wud.running_digest,
@@ -223,7 +237,7 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
             why = "its verdict can no longer be found" if verdict is None else missing
             outcome, digest, parts = "failed", None, [f"cannot verify: {why}"]
         else:
-            outcome, digest, parts = await _evaluate(verdict, container, datetime.now(UTC))
+            outcome, digest, parts = await _evaluate(verdict, container, datetime.now(UTC), deploy)
         detail = "; ".join(parts)
         if not store.finish_deploy(conn, deploy_id, outcome, digest, detail):
             logger.warning("deploy %s was finished by a concurrent verifier; discarding this result", deploy_id)

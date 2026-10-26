@@ -51,7 +51,9 @@ from src.upgrades.deploy import wait_for_deploys
 
 logger = logging.getLogger(__name__)
 
-SHUTDOWN_DEPLOY_WAIT_SECONDS = 30.0
+# Must stay well under Docker's default 10 s stop timeout (the compose service sets no stop_grace_period and uvicorn
+# is PID 1): after that SIGKILL lands, and interrupted deploys could no longer record themselves.
+SHUTDOWN_DEPLOY_WAIT_SECONDS = 5.0
 
 
 # ---------------------------------------------------------------------------

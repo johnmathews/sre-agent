@@ -132,11 +132,13 @@ def _versions(v: VerdictRecord) -> str:
     return f"{e(v.running_version or 'unknown')} &rarr; {e(v.candidate_version or 'unknown')}"
 
 
-def _item(v: VerdictRecord) -> str:
+def _item(v: VerdictRecord, superseded: bool) -> str:  # noqa: FBT001
     parts = ['<li class="item">']
     title = f"<strong>{e(v.container)}</strong> {_versions(v)} &middot; {e(_LABELS.get(v.verdict, v.verdict))}"
+    if superseded:  # a newer review exists; the POST would skip it anyway
+        title += " &middot; <em>superseded by a newer email</em>"
     if v.verdict in deploy.DEPLOYABLE:
-        checked = " checked" if v.verdict == "upgrade" else ""
+        checked = " checked" if v.verdict == "upgrade" and not superseded else ""
         control = f'<input type="checkbox" name="verdict_id" value="{v.id}"{checked}>'
         parts.append(f"<label>{control} {title}</label>")
     else:
@@ -153,8 +155,8 @@ def _item(v: VerdictRecord) -> str:
     return "".join(parts)
 
 
-def _review_body(batch_id: str, token: str, verdicts: list[VerdictRecord], email: str) -> str:
-    items = '<ul class="items">' + "".join(_item(v) for v in verdicts) + "</ul>"
+def _review_body(batch_id: str, token: str, verdicts: list[VerdictRecord], superseded: set[int], email: str) -> str:
+    items = '<ul class="items">' + "".join(_item(v, v.id in superseded) for v in verdicts) + "</ul>"
     signed_in = f'<p class="muted">Signed in as {e(email)}.</p>'
     if not any(v.verdict in deploy.DEPLOYABLE for v in verdicts):
         return signed_in + items + "<p>Nothing in this batch can be deployed.</p>"
@@ -224,12 +226,17 @@ async def show_batch(batch_id: str, request: Request) -> HTMLResponse:
             if state != "ok":
                 return _state_page(state)
             verdicts = store.get_batch_verdicts(conn, batch_id)
+            superseded: set[int] = set()
+            for v in verdicts:
+                latest = store.latest_verdict_for_container(conn, v.container)
+                if latest is None or latest.id != v.id:
+                    superseded.add(v.id)
         finally:
             conn.close()
     except Exception:
         logger.exception("Upgrade approval page for batch %s failed", clean_text(batch_id))
         return _error_page()
-    return _page(200, "Upgrade approval", _review_body(batch_id, token, verdicts, email))
+    return _page(200, "Upgrade approval", _review_body(batch_id, token, verdicts, superseded, email))
 
 
 @router.post("/upgrades/batches/{batch_id}")

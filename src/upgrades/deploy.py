@@ -20,6 +20,7 @@ from src.upgrades import store, verify, wud
 from src.upgrades.config import AdvisedContainer, load_allowlist
 from src.upgrades.models import DeployOutcome, DeployRecord, VerdictRecord
 from src.upgrades.registry import DIGEST_RE
+from src.upgrades.verify import INTERRUPTED_IN_FLIGHT
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,6 @@ SUPERSEDED = "superseded by a newer review"
 UPSTREAM_MOVED = "upstream moved since review; re-reviewed next run"
 ALREADY_RUNNING = "already running"
 TRIGGERED = "deploy triggered; verification pending"
-INTERRUPTED_IN_FLIGHT = "interrupted during deploy (shutdown); verified next run"
 INTERRUPTED = "deploy interrupted (shutdown)"
 
 # Strong references to fire-and-forget tasks (deploy runs, delayed verifications) so they are not garbage-collected

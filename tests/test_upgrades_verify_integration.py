@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -13,7 +13,7 @@ import respx
 from prometheus_client import REGISTRY
 
 from src.upgrades import store
-from src.upgrades.verify import verify_deploy, verify_pending
+from src.upgrades.verify import INTERRUPTED_IN_FLIGHT, verify_deploy, verify_pending
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -58,7 +58,13 @@ def email() -> Iterator[MagicMock]:
 
 
 def _seed(
-    settings: Any, *, version: str = "v3.1.1", started: datetime | None = None, container: str = "prometheus"
+    settings: Any,
+    *,
+    version: str = "v3.1.1",
+    started: datetime | None = None,
+    container: str = "prometheus",
+    detail: str = "",
+    running_digest: str | None = None,
 ) -> int:
     conn = store.connect(settings.upgrade_advisor_db_path)
     vid = store.save_verdict(
@@ -78,8 +84,8 @@ def _seed(
         verdict_id=vid,
         now=started or datetime.now(UTC),
         outcome="pending_verify",
-        running_digest=None,
-        detail="",
+        running_digest=running_digest,
+        detail=detail,
     )
     conn.close()
     return did
@@ -139,6 +145,52 @@ async def test_digest_mismatch_emails_at_once(mock_settings: Any, email: MagicMo
     assert "CT 115" in text
     assert "restore from the latest PBS backup" in text
     assert "<h2>" in html_body
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_interrupted_deploy_still_on_the_old_image_is_not_deployed_without_restore_advice(
+    mock_settings: Any, email: MagicMock
+) -> None:
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    _wud(OLD)
+    with patch("src.upgrades.verify.pbs_latest_backup_time", new_callable=AsyncMock) as pbs:
+        result = await verify_deploy(did)
+    assert result.outcome == "failed"
+    assert result.detail == "not deployed (interrupted by shutdown); approve again from the next email"
+    assert result.running_digest == OLD
+    pbs.assert_not_awaited()
+    text, html_body, subject = email.call_args.args
+    assert subject == "Upgrade not deployed: prometheus on prometheus"
+    assert "approve the update again from the next advisor email" in text
+    assert "PBS" not in text and "restore" not in text and "restore" not in html_body
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_interrupted_deploy_on_an_unexpected_image_is_a_digest_mismatch(
+    mock_settings: Any, email: MagicMock
+) -> None:
+    other = "sha256:" + "c" * 64
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    _wud(other)
+    result = await verify_deploy(did)
+    assert result.outcome == "digest_mismatch"
+    text, _, subject = email.call_args.args
+    assert subject == "Upgrade digest mismatch: prometheus on prometheus"
+    assert "restore from the latest PBS backup" in text
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_interrupted_deploy_that_completed_verifies_normally(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings, detail=INTERRUPTED_IN_FLIGHT, running_digest=OLD)
+    _wud(NEW)
+    respx.get(READY).mock(return_value=httpx.Response(200))
+    _loki("0", "0")
+    result = await verify_deploy(did)
+    assert result.outcome == "ok"
+    email.assert_not_called()
 
 
 @pytest.mark.integration

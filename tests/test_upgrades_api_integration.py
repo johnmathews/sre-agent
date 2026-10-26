@@ -290,6 +290,22 @@ async def test_get_renders_the_review_form(client: httpx.AsyncClient, mock_setti
 
 
 @pytest.mark.integration
+async def test_get_marks_superseded_verdicts_unticked(client: httpx.AsyncClient, mock_settings: Any) -> None:
+    old = _verdict(mock_settings, "prometheus", "upgrade")
+    current = _verdict(mock_settings, "openwebui", "upgrade")
+    bid, token = _batch(mock_settings, [old, current])
+    _verdict(mock_settings, "prometheus", "hold", summary="regression reported", details={})  # a newer review
+    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    assert resp.status_code == 200
+    page = resp.text
+    assert f'<input type="checkbox" name="verdict_id" value="{old}">' in page  # unticked
+    assert f'<input type="checkbox" name="verdict_id" value="{current}" checked>' in page
+    assert page.count("superseded by a newer email") == 1
+    old_row = page[page.index(f'value="{old}"') :].split("</li>", 1)[0]
+    assert "superseded by a newer email" in old_row
+
+
+@pytest.mark.integration
 async def test_get_twice_changes_nothing(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
 ) -> None:
@@ -928,7 +944,8 @@ def test_app_shutdown_waits_for_deploys(mock_settings: Any) -> None:
     ):
         with TestClient(main.app):
             waited.assert_not_awaited()
-        waited.assert_awaited_once_with(30.0)
+        waited.assert_awaited_once_with(main.SHUTDOWN_DEPLOY_WAIT_SECONDS)
+    assert main.SHUTDOWN_DEPLOY_WAIT_SECONDS <= 5.0  # Docker's default stop timeout is 10 s
 
 
 @pytest.mark.integration

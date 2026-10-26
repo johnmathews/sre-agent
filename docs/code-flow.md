@@ -404,6 +404,62 @@ Each collector runs independently. If a collector raises (e.g., Prometheus is do
 `asyncio.gather(return_exceptions=True)` catches it and stores `None` for that section. The report is always produced,
 with "data unavailable" placeholders for failed sections.
 
+## Upgrade Advisor Flows
+
+### Daily job
+
+```
+_scheduled_advisor_job()  (APScheduler, UPGRADE_ADVISOR_CRON; exceptions logged + runs_total{error})
+  -> run_advisor()
+       load_allowlist()                     # failure -> abort email, error run
+       verify.verify_pending()              # skipped on dry run; also run once at app startup
+       for each container (a failure is an error item; the loop continues):
+         wud.get_container()                # no update / same digest -> nothing
+         update_kind != "digest"            -> hold
+         store.first_seen()                 # starts the min-age clock (also on dry run)
+         releases.release_for_digest() x2, releases_between(), regression_issues()
+         review.gate()                      # unreleased build / too new -> hold
+         review.review()                    # code rules, else model; fails closed to needs_you
+         store.save_verdict()               # not on dry run
+       store.create_batch(upgrade + needs_you ids, 48 h) -> approve URL .../batches/{id}#token=...
+       # a failure after the loop (store, batch, deploys_since) -> abort email, error run
+       email.render() -> send_report_email  # not sent -> error run ("EmailNotSent")
+       runs_total{success}, last_success_timestamp, store.set_last_success()  # not on dry run
+```
+
+### Approve flow
+
+```
+every route: advisor configured? (404) -> Access JWT (generic 403) -> approvers listed? (403 "not configured")
+             -> JWT email an approver? (403)
+GET  /upgrades/batches/{id}        launcher page; its hash-pinned script moves #token=... into a form and POSTs it
+POST /upgrades/batches/{id}/view   form token -> check_batch (no write) -> render (superseded items unticked)
+POST /upgrades/batches/{id}        (Approve, action "../{id}")
+  -> read bounded form -> check_batch -> parse ids -> validate_selection
+  -> consume_batch (atomic, single use) -> record_decisions -> start_deploy (background task) -> "deploying N" page
+background: deploy_approved()  # one at a time, under a lock
+  per verdict: latest verdict? -> WUD candidate == reviewed digest? -> not already running?
+               -> save "triggering" row (pre-deploy digest; write fails -> failed, never triggered)
+               -> trigger_deploy -> settle_trigger: triggered | trigger_error | interrupted (shutdown)
+               -> pending_verify -> _verify_later(delay)   # also when the settle write failed
+               otherwise skipped / failed with the reason
+```
+
+### Verify flow
+
+```
+verify_pending()    # daily run and startup
+  -> "triggering" rows started before now - 2 x TRIGGER_TIMEOUT -> settle as interrupted (each row on its own)
+  -> every pending_verify row older than the delay -> verify_deploy
+verify_deploy(id)   # after the delay, or from verify_pending()
+  -> WUD running digest == approved?   (no -> digest_mismatch; trigger_state interrupted/trigger_error and still the
+                                        pre-deploy digest -> failed "not deployed (...)", no restore advice)
+  -> readiness URL 2xx?                (no -> failed)
+  -> Loki error burst vs baseline?     (burst -> failed; Loki unavailable -> warning only)
+  -> finish_deploy() compare-and-set   (loser discards: no second email or metric)
+  -> deploys_total{outcome}; failed / mismatch -> email with latest PBS backup time
+```
+
 ## Health Check Flow
 
 `GET /health` checks each dependency:

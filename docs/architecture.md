@@ -483,6 +483,113 @@ src/memory/
 └── baselines.py    # Metric baseline computation from Prometheus
 ```
 
+## Upgrade Advisor
+
+A daily job inside `sre-agent` that reviews pending third-party image updates, emails a recommendation and, on
+approval, deploys and verifies them. Optional: it runs only when the config path, DB path, WUD credentials and public
+base URL are set (and `UPGRADE_ADVISOR_CRON` for the schedule). Approvals additionally need `CF_ACCESS_TEAM_DOMAIN`,
+`CF_ACCESS_AUD` and `UPGRADE_ADVISOR_APPROVER_EMAILS`; without them every approval is refused, and startup logs one
+warning naming the missing settings. Code: `src/upgrades/`, approval endpoint `src/api/upgrades.py`, schedule in
+`src/report/scheduler.py`.
+
+### What runs when
+
+- **Daily (cron, user timezone):** verify pending deploys, read What's Up Docker (WUD) for each allowlisted
+  container, gate and review each pending update, save verdicts, create one batch, send one email.
+- **On approval (POST):** background, sequential deploys through WUD's API; each is verified
+  `UPGRADE_ADVISOR_VERIFY_DELAY_SECONDS` (default 300) later, and by the next daily run if the process restarted.
+- **On startup** (advisor configured): `verify_pending()` once in the background, and the last-success gauge is
+  seeded from the store (`advisor_state`), so a restart neither forgets pending deploys nor resets the gauge.
+- **Dry run:** `make advisor` / `python -m src.upgrades --dry-run`. Prints the result; sends no email, creates no
+  batch or verdict rows, skips verification. It does record first-seen times, which start the minimum-age clock.
+
+### Verdict rules (code decides, the model only advises)
+
+- Digest-only: a WUD tag change is a `hold`. A candidate with no matching GitHub release is a `hold` ("unreleased
+  build"). `min_age` (default 72 h) counts from the advisor's own first sighting of the candidate digest, with 1 h
+  of slack (eligible at `first_seen + min_age - 1 h`): the daily runs start seconds apart, and without it the run
+  three days later could land just short of 72 h and hold the candidate another whole day. If no release matched
+  and any registry tag lookup failed, the item is an error, not an "unreleased build".
+- Forced `needs_you`: a major version (or a `0.x` minor) change, a candidate not newer than the running version, an
+  unknown running version, a failed review, and an ambiguous or unparseable model answer (anything but exactly one
+  JSON object).
+- Otherwise the model (no tools) returns `upgrade`, `hold` or `needs_you` with relevant changes, risks and https
+  links. Release notes, issues and operator context files are fenced as untrusted data with a per-prompt nonce.
+- One batch per run holds the `upgrade` and `needs_you` verdicts; its single-use link lives 48 h.
+
+### Approval and deploy
+
+The email link is `{UPGRADE_ADVISOR_PUBLIC_BASE_URL}/upgrades/batches/{id}#token=...`, behind Cloudflare Access.
+Three routes, each first checking (in this order) that the advisor is configured (else 404), the Access JWT (else the
+generic denied page, so unauthenticated callers never learn the config state), that an approver is listed (else
+"Approval is not configured on this server") and that the JWT email is one of them:
+
+1. `GET /upgrades/batches/{id}` serves a launcher: one inline script, pinned by hash in the CSP, copies the token from
+   the fragment into a form, clears the fragment with `history.replaceState` and POSTs it. It reads no token and
+   touches no state; without JavaScript a `<noscript>` note explains.
+2. `POST /upgrades/batches/{id}/view` (form: token) runs `check_batch` (no write; 403 invalid, 410 used/expired) and
+   renders the review page. Superseded items are unticked and labelled.
+3. `POST /upgrades/batches/{id}` (the review page's Approve form, action `../{id}`) deploys. Order: bounded form,
+   `check_batch`, ids, `validate_selection`, `consume_batch`, record decisions, start the background deploys, answer
+   at once ("approved by X; deploying N; results by email").
+
+Per ticked item a deploy happens only if it is still the newest verdict of its container (any newer verdict,
+including a hold, supersedes it), WUD still offers exactly the reviewed digest, and that digest is not already
+running; otherwise it is recorded `skipped`. A deploy row is written *before* WUD is asked (`outcome=triggering`,
+with the pre-deploy digest); if that write fails nothing is triggered. The row's `trigger_state` then records how the
+trigger ended: `triggered`, `trigger_error` (WUD error, our 600 s timeout, or a bug) or `interrupted` (shutdown).
+Every settled row becomes `pending_verify`; `triggered` and `trigger_error` are verified after the usual delay, even
+if the settle write failed. Shutdown waits 5 s for in-flight deploys (inside Docker's 10 s stop timeout); a
+`triggering` row older than twice the trigger timeout (a hard kill) is settled as `interrupted` by `verify_pending`.
+
+### Verification and email
+
+`verify_deploy` checks: WUD's running digest equals the approved one, the readiness URL answers 2xx, and Loki shows no
+error burst (more than `max(10, 3 x baseline from an hour earlier)` error-like lines in 5 minutes). Loki being
+unavailable is a warning, not a failure ("verified with warnings"). A compare-and-set on the pending row makes the
+outcome, email and metric happen once. When the trigger was not confirmed (`trigger_state` `interrupted` or
+`trigger_error`) and WUD still runs the recorded pre-deploy digest, the outcome is `failed` "not deployed (...)"
+and the email says to approve again, without restore advice. A failure or digest mismatch emails at once with the
+latest PBS backup time (`pbs_latest_backup_time`) as the recovery step.
+
+The daily email is sent when there is anything to say: sections Recommended, Needs you, Held, Errors and Yesterday's
+deploys. Failures that stop a run (unreadable allowlist, store or batch failure after the reviews, email not sent,
+unexpected exception) count as error runs and send an abort email naming the exception class; one container
+failing does not stop the others. An error item shows our own cleaned message for `WudError`, `RegistryError` and
+`ReleaseLookupError`, and only the class name for anything else.
+
+### Security model
+
+- Cloudflare Access is a single wildcard application here, so the Access JWT (RS256, audience and issuer checked,
+  JWKS cached, refetch on unknown key at most once a minute) proves only "a signed-in user". Two further factors:
+  the JWT email must be in `UPGRADE_ADVISOR_APPROVER_EMAILS` (compared trimmed, NFKC-normalised and case-folded on
+  both sides; any non-ASCII address never matches, and non-ASCII configured entries are dropped with a startup
+  warning), and the single-use token: 256-bit random, stored as a hash, consumed atomically, never logged.
+- The token travels only in the URL fragment and in POST bodies, never in a request URL, so no nginx, Traefik,
+  uvicorn or Cloudflare log line (and so nothing in Loki) can hold it. uvicorn's access log still redacts a
+  `?token=` value on these paths as defence in depth.
+- The deploy capability is not an agent tool or an MCP tool (a static test enforces it).
+- HTML is escaped everywhere, pages carry `no-store`, `no-referrer` and a strict CSP (no script anywhere except the
+  launcher's one hash-pinned inline script). All HTTP reads are size-capped while
+  streaming, redirects are limited, and the registry token realm must be https on the registry host, `auth.docker.io`
+  or `ghcr.io`. Allowlist entries are validated (URL shapes, name patterns, context files under one root).
+
+### Metrics
+
+`sre_assistant_upgrade_runs_total{status}`, `sre_assistant_upgrade_verdicts_total{verdict}`,
+`sre_assistant_upgrade_last_success_timestamp` (persisted by real runs, seeded at startup),
+`sre_assistant_upgrade_deploys_total{outcome}`.
+
+### Configuration
+
+`UPGRADE_ADVISOR_CONFIG_PATH` (allowlist YAML), `UPGRADE_ADVISOR_DB_PATH` (SQLite), `UPGRADE_ADVISOR_CRON`,
+`UPGRADE_ADVISOR_MIN_AGE_HOURS` (72), `UPGRADE_ADVISOR_PUBLIC_BASE_URL` (https, e.g. `https://sre.example.com/api`),
+`UPGRADE_ADVISOR_VERIFY_DELAY_SECONDS` (300), `UPGRADE_ADVISOR_WUD_USERNAME`, `UPGRADE_ADVISOR_WUD_PASSWORD`,
+`CF_ACCESS_TEAM_DOMAIN` (e.g. `team.example.cloudflareaccess.com`), `CF_ACCESS_AUD`,
+`UPGRADE_ADVISOR_APPROVER_EMAILS` (comma-separated, e.g. `admin@example.com`), optional
+`UPGRADE_ADVISOR_GITHUB_TOKEN`. Verification also uses `LOKI_URL` and the PBS settings when set. `.env.example` has
+placeholders. `auto_deploy` in the allowlist is rejected for now.
+
 ## Configuration
 
 Settings are loaded from environment variables via `pydantic-settings`. The `Settings` class in `src/config.py` defines

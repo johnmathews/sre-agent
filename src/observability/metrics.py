@@ -160,6 +160,33 @@ AGENT_ERRORS_TOTAL = Counter(
 )
 
 # ---------------------------------------------------------------------------
+# Upgrade Advisor metrics
+# ---------------------------------------------------------------------------
+
+UPGRADE_RUNS_TOTAL = Counter(
+    "sre_assistant_upgrade_runs_total",
+    "Daily Upgrade Advisor runs by status (success, error)",
+    labelnames=["status"],
+)
+
+UPGRADE_VERDICTS_TOTAL = Counter(
+    "sre_assistant_upgrade_verdicts_total",
+    "Upgrade Advisor verdicts saved, by verdict (upgrade, hold, needs_you)",
+    labelnames=["verdict"],
+)
+
+UPGRADE_LAST_SUCCESS = Gauge(
+    "sre_assistant_upgrade_last_success_timestamp",
+    "Unix timestamp of the last completed Upgrade Advisor run (email or not)",
+)
+
+UPGRADE_DEPLOYS_TOTAL = Counter(
+    "sre_assistant_upgrade_deploys_total",
+    "Final outcome of each approved deploy: verified (ok, failed, digest_mismatch) or never verified (skipped, failed)",
+    labelnames=["outcome"],
+)
+
+# ---------------------------------------------------------------------------
 # Cost pricing (USD per token) — GPT-4o-mini as default
 # ---------------------------------------------------------------------------
 

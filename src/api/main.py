@@ -33,6 +33,8 @@ from src.agent.history import (
     search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.api.upgrades import router as upgrades_router
+from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
 from src.observability.metrics import (
     APP_INFO,
@@ -46,8 +48,13 @@ from src.observability.metrics import (
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
 from src.report.scheduler import start_scheduler, stop_scheduler
+from src.upgrades.deploy import start_startup_verification, wait_for_deploys
 
 logger = logging.getLogger(__name__)
+
+# Must stay well under Docker's default 10 s stop timeout (the compose service sets no stop_grace_period and uvicorn
+# is PID 1): after that SIGKILL lands, and interrupted deploys could no longer record themselves.
+SHUTDOWN_DEPLOY_WAIT_SECONDS = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +225,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 credentials_check = asyncio.create_task(keep_fresh(settings.claude_credentials_check_interval_s))
 
         start_scheduler()
+        warn_if_approval_unconfigured()
+        start_startup_verification()
         yield
         stop_scheduler()
+        # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.
+        await wait_for_deploys(SHUTDOWN_DEPLOY_WAIT_SECONDS)
         if credentials_check is not None:
             credentials_check.cancel()
         logger.info("Shutting down SRE assistant")
@@ -247,6 +258,8 @@ class TrailingSlashForMCP:
 
 
 app.add_middleware(TrailingSlashForMCP)
+# Upgrade Advisor approval page and guarded deploy (404 unless the advisor is configured).
+app.include_router(upgrades_router)
 
 
 # ---------------------------------------------------------------------------

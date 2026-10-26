@@ -19,6 +19,7 @@
 | `pyyaml`            | YAML parsing (runbook frontmatter, eval cases)                                              |
 | `prometheus-client` | Self-instrumentation — expose Prometheus metrics at `/metrics`                              |
 | `apscheduler`       | Scheduled report generation — `AsyncIOScheduler` with cron triggers                         |
+| `pyjwt[crypto]`     | Upgrade Advisor — verifies the Cloudflare Access JWT (RS256); floor 2.10.1 (CVE-2024-53861) |
 
 ### Development
 
@@ -90,6 +91,17 @@ Only one LLM provider is required — set `LLM_PROVIDER` to select which one.
 | **TrueNAS SCALE**         | ZFS pools, NFS/SMB shares, snapshots, system status, apps | Bearer token (`TRUENAS_API_KEY`)                               |
 | **Proxmox VE**            | VM/container config, node status, task history            | API token (`PROXMOX_API_TOKEN` as `user@realm!tokenid=secret`) |
 | **Proxmox Backup Server** | Backup status, datastore usage, backup tasks              | API token (`PBS_API_TOKEN` as `user@realm!tokenid=secret`)     |
+
+### Upgrade Advisor services (optional, all off unless configured)
+
+| Service                 | What it provides                                              | Auth                                                              |
+| ----------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **What's Up Docker API** | Pending updates (running and candidate digest) and the deploy trigger | Basic auth (`UPGRADE_ADVISOR_WUD_USERNAME` / `_PASSWORD`)  |
+| **GitHub API**          | Release notes and regression issues for the candidate version | Optional token (`UPGRADE_ADVISOR_GITHUB_TOKEN`); anonymous if empty |
+| **Container registry**  | Digests a tag points at (index and platform manifests)        | Anonymous bearer token; token realm must be https and on the registry host, `auth.docker.io` or `ghcr.io` |
+| **Cloudflare Access**   | Signing keys (JWKS) for the approval-page JWT                 | None (public certs endpoint of `CF_ACCESS_TEAM_DOMAIN`)           |
+
+All HTTP reads are size-capped while streaming. See [architecture.md](architecture.md#upgrade-advisor).
 
 ## Authentication Setup
 

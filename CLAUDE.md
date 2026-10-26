@@ -38,12 +38,6 @@ The LangChain agent decides which approach to use based on the question.
 - **Python version:** latest stable with long-term support
 - **All Python code must be fully typed** — type annotations on all function signatures, return types, and variables where not obvious. Use `mypy` for verification.
 
-## Builder Ownership Rule
-
-**Before writing any code for a new phase or major component, ask the user 2-3 questions to verify they understand what is being built and why.** This is non-negotiable. The user must be able to explain every architectural decision and implementation choice — this is a portfolio project where understanding IS the deliverable. If their answers reveal gaps, ask follow-up questions until understanding is confirmed. Do not proceed with implementation until the user demonstrates clear ownership of the design.
-
-This applies to: starting a new build phase, introducing a new tool/integration, making significant architectural changes, or adding a new dependency. It does not apply to small bug fixes or minor refactoring within already-understood code.
-
 ## Build Plan
 
 See `readme.md` → "Build Order" for detailed phase-by-phase build steps with progress tracking.
@@ -95,6 +89,9 @@ The project is built incrementally. Each phase produces a working, demonstrable 
    reliability
 5. **Evaluation Framework** — Automated test cases scoring tool selection, retrieval relevance, answer quality
 6. **Weekly Reliability Report** — Scheduled summarization of alerts, changes, SLO status
+7. **Agent Memory Store** — Persistent SQLite memory for reports, incidents and metric baselines
+8. **Upgrade Advisor** — Daily review of pending third-party image updates (found by What's Up Docker), emailed
+   verdicts, one single-use approval link, guarded deploys through WUD and post-deploy verification
 
 ## Eval Quality
 
@@ -110,6 +107,8 @@ modifying eval cases.
 - `src/eval/` — Evaluation test cases (YAML) and runner
 - `src/observability/` — Prometheus metric definitions, LangChain callback handler for cost/token tracking
 - `src/report/` — Weekly reliability report generator, email delivery, APScheduler cron scheduling
+- `src/upgrades/` — Upgrade Advisor: allowlist, WUD/registry/GitHub clients, review, store, deploy, verify, email; the
+  approval endpoint is `src/api/upgrades.py`, the daily job is scheduled in `src/report/scheduler.py`
 - `docs/` — Design documentation (architecture, tool reference, code flow, dependencies)
 - `runbooks/` — Operational runbooks (markdown)
 - `ansible/` — Symlink/submodule to ansible home-server project
@@ -127,4 +126,6 @@ This is a **public repository**. Never commit secrets, API keys, tokens, or inte
   accuracy take priority over speed), tool call success rate (> 99%), RAG relevance (> 80% top-3), availability
   (> 99.5%), LLM error rate (< 1%).
 - **Cost awareness.** Every query tracks token usage, estimated cost, tool call count, and latency breakdown.
-- **Advisory only.** The assistant advises but never takes automated remediation actions.
+- **Advisory by default.** The only automated action is a container upgrade through the Upgrade
+  Advisor's approval path (and, once enabled per container, its allowlisted auto path). The deploy
+  capability is never an agent tool or an MCP tool.

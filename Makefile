@@ -1,4 +1,4 @@
-.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report docker-build docker-up docker-down
+.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor docker-build docker-up docker-down
 
 install:
 	uv sync
@@ -39,6 +39,9 @@ eval:
 
 report:
 	uv run python -m scripts.run_report
+
+advisor:
+	uv run python -m src.upgrades --dry-run
 
 hooks:
 	bash scripts/install-hooks.sh

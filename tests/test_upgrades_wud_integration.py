@@ -200,6 +200,19 @@ class TestRobustness:
         assert len(text) < 200 + 120
 
     @respx.mock
+    async def test_malformed_record_never_echoes_values(self, caplog: pytest.LogCaptureFixture) -> None:
+        secret = "sk-secret-0123456789"
+        record = _record("prometheus", updateKind={"kind": [f"{secret}\x1b[31m"]})
+        respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
+        with pytest.raises(WudError, match="malformed") as exc:
+            await get_container(_container())
+        text = str(exc.value)
+        assert "update_kind" in text
+        for blob in (text, caplog.text):
+            assert secret not in blob
+            assert "\x1b" not in blob
+
+    @respx.mock
     async def test_duplicate_names_are_ambiguous(self) -> None:
         respx.get(f"{WUD_URL}/api/containers").mock(
             return_value=httpx.Response(200, json=[_record("prometheus"), _record("prometheus")])

@@ -2,6 +2,7 @@
 
 import logging
 import re
+import unicodedata
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -55,8 +56,15 @@ def _dig(record: dict[str, Any], *keys: str) -> Any:
 
 
 def _clean(text: str) -> str:
-    """Make text from a WUD response safe for an error message: one line, at most 200 chars."""
-    return text.replace("\r", " ").replace("\n", " ")[:MAX_DETAIL_CHARS]
+    """Make text from a WUD response safe for an error message: no control characters, at most 200 chars."""
+    return "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text)[:MAX_DETAIL_CHARS]
+
+
+def _describe_malformed(exc: KeyError | ValidationError) -> str:
+    """Name what was wrong with a WUD record (field locations and error types only, never values)."""
+    if isinstance(exc, KeyError):
+        return f"missing key {_clean(str(exc.args[0]) if exc.args else '?')}"
+    return _clean(", ".join(".".join(map(str, e["loc"])) + ": " + e["type"] for e in exc.errors()))
 
 
 def _fail(message: str) -> WudError:
@@ -96,7 +104,7 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
                 update_kind=_dig(record, "updateKind", "kind"),
             )
         except (KeyError, ValidationError) as exc:
-            raise _fail(f"WUD returned a malformed record for {_where(c)}: {_clean(repr(exc))}") from exc
+            raise _fail(f"WUD returned a malformed record for {_where(c)}: {_describe_malformed(exc)}") from exc
     raise _fail(f"WUD does not list {_where(c)}")
 
 

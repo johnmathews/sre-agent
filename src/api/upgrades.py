@@ -169,6 +169,8 @@ def _review_body(batch_id: str, token: str, verdicts: list[VerdictRecord], email
 
 
 def _outcome_body(email: str, ticked: list[VerdictRecord]) -> str:
+    if not ticked:
+        return f"<p>Approved by {e(email)}. No updates were selected; nothing was deployed.</p>"
     rows = "".join(f'<li class="item"><strong>{e(v.container)}</strong> {_versions(v)}</li>' for v in ticked)
     return f"<p>Approved by {e(email)}. Deploying {len(ticked)} update(s); results arrive by email.</p>" + (
         f'<ul class="items">{rows}</ul>' if rows else ""
@@ -283,7 +285,8 @@ async def approve_batch(batch_id: str, request: Request) -> HTMLResponse:
         finally:
             conn.close()
         logger.info("Upgrade batch %s approved by %s: verdicts %s ticked", safe_batch, safe_email, ids)
-        deploy.start_deploy(batch_id, ids)
+        if ids:
+            deploy.start_deploy(batch_id, ids)
     except Exception as exc:
         logger.exception("Upgrade batch %s: approval by %s failed", safe_batch, safe_email)
         if consumed:  # the link is spent: leave a failed row for every ticked verdict rather than nothing

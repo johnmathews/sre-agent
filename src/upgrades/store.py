@@ -198,17 +198,13 @@ def latest_verdict(conn: sqlite3.Connection, container: str, digest: str) -> Ver
 
 
 def latest_verdict_for_container(conn: sqlite3.Connection, container: str) -> VerdictRecord | None:
-    """Most recent approvable verdict for a container across all candidate digests, or None.
+    """Most recent verdict of any kind for a container across all candidate digests, or None.
 
-    Only verdicts that went out in a batch with verdict upgrade or needs_you count, so a dry-run row or a hold can
-    never supersede a live approval link. An unreadable newest row is logged and yields None (callers treat that as
-    "not this verdict").
+    A newer verdict supersedes every older approval link for the container, including a later ``hold`` (for example
+    a regression found since). Dry runs save no verdicts, so they cannot supersede. An unreadable newest row is
+    logged and yields None (callers treat that as "not this verdict").
     """
-    row = conn.execute(
-        "SELECT * FROM verdicts WHERE container = ? AND batch_id IS NOT NULL AND verdict IN ('upgrade', 'needs_you')"
-        " ORDER BY id DESC LIMIT 1",
-        (container,),
-    ).fetchone()
+    row = conn.execute("SELECT * FROM verdicts WHERE container = ? ORDER BY id DESC LIMIT 1", (container,)).fetchone()
     if row is None:
         return None
     parsed = _parse_rows([row], _row_to_verdict, "verdict")

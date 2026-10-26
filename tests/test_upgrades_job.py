@@ -174,9 +174,24 @@ async def test_dry_run_sends_nothing_and_creates_no_batch(env: Any, mocks: dict[
     conn.close()
     summary = await run_advisor(now=NOW, send_email=False)
     assert summary.items[0].verdict == "upgrade"
+    assert summary.items[0].verdict_id is None
     assert summary.batch_id is None
     assert summary.approve_url is None
     mocks["send"].assert_not_called()
+
+
+async def test_dry_run_saves_no_verdicts_but_records_first_seen(env: Any, mocks: dict[str, MagicMock]) -> None:
+    conn = store.connect(env.upgrade_advisor_db_path)
+    before = conn.execute("SELECT * FROM verdicts").fetchall()
+    conn.close()
+    summary = await run_advisor(now=NOW, send_email=False)  # alpha is too new: a hold, which is not saved either
+    assert summary.items and all(i.verdict_id is None for i in summary.items)
+    conn = store.connect(env.upgrade_advisor_db_path)
+    try:
+        assert conn.execute("SELECT * FROM verdicts").fetchall() == before == []
+        assert store.first_seen(conn, "alpha", NEW, NOW + timedelta(days=9)) == NOW
+    finally:
+        conn.close()
 
 
 async def test_unloadable_allowlist_aborts_with_class_name_only(env: Any, mocks: dict[str, MagicMock]) -> None:

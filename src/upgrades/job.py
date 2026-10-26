@@ -78,9 +78,16 @@ class _ReleaseCache:
 
 
 async def _review_one(
-    conn: sqlite3.Connection, c: AdvisedContainer, now: datetime, min_age: timedelta, cache: _ReleaseCache
+    conn: sqlite3.Connection,
+    c: AdvisedContainer,
+    now: datetime,
+    min_age: timedelta,
+    cache: _ReleaseCache,
+    *,
+    persist: bool = True,
 ) -> ItemResult | None:
-    """Review one container; ``None`` when nothing is pending."""
+    """Review one container; ``None`` when nothing is pending. With ``persist=False`` (dry run) no verdict row is
+    saved: the newest verdict of a container supersedes older approval links, so a dry run must not create one."""
     record = await wud.get_container(c)
     if not record.update_available:
         return None
@@ -92,19 +99,30 @@ async def _review_one(
     running: str = record.running_digest
     candidate: str = record.candidate_digest
 
-    def hold(reason: str, running_version: str | None = None, candidate_version: str | None = None) -> ItemResult:
-        vid = store.save_verdict(
+    def save(
+        verdict: Verdict,
+        summary: str,
+        details: dict[str, object],
+        running_version: str | None,
+        candidate_version: str | None,
+    ) -> int | None:
+        if not persist:
+            return None
+        return store.save_verdict(
             conn,
             container=c.name,
             running_digest=running,
             candidate_digest=candidate,
             running_version=running_version,
             candidate_version=candidate_version,
-            verdict="hold",
-            summary=reason,
-            details={},
+            verdict=verdict,
+            summary=summary,
+            details=details,
             now=now,
         )
+
+    def hold(reason: str, running_version: str | None = None, candidate_version: str | None = None) -> ItemResult:
+        vid = save("hold", reason, {}, running_version, candidate_version)
         return ItemResult(container=c.name, verdict="hold", hold_reason=reason, verdict_id=vid)
 
     if record.update_kind != "digest":
@@ -141,18 +159,7 @@ async def _review_one(
     if reason is not None:
         return hold(reason, running_version, candidate_version)
     result = await review.review(cand)
-    vid = store.save_verdict(
-        conn,
-        container=c.name,
-        running_digest=running,
-        candidate_digest=candidate,
-        running_version=running_version,
-        candidate_version=candidate_version,
-        verdict=result.verdict,
-        summary=result.summary,
-        details=result.model_dump(mode="json"),
-        now=now,
-    )
+    vid = save(result.verdict, result.summary, result.model_dump(mode="json"), running_version, candidate_version)
     return ItemResult(
         container=c.name,
         verdict=result.verdict,
@@ -167,8 +174,8 @@ def _abort_metric() -> None:
 
 
 async def run_advisor(now: datetime | None = None, send_email: bool = True) -> RunSummary:  # noqa: FBT001, FBT002
-    """Run the advisor once. With ``send_email=False`` (dry run) nothing is sent, no batch/token is created and
-    pending deploy verifications are left alone."""
+    """Run the advisor once. With ``send_email=False`` (dry run) nothing is sent, no verdict row, batch or token is
+    created (first-seen times are still recorded) and pending deploy verifications are left alone."""
     started = time.monotonic()
     settings = get_settings()
     now = now or datetime.now(UTC)
@@ -199,7 +206,7 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
     try:
         for c in containers:
             try:
-                item = await _review_one(conn, c, now, min_age, cache)
+                item = await _review_one(conn, c, now, min_age, cache, persist=send_email)
             except Exception as exc:
                 logger.exception("Upgrade review of %s failed", c.name)
                 items.append(ItemResult(container=c.name, error=type(exc).__name__))

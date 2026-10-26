@@ -28,10 +28,14 @@ SUPERSEDED = "superseded by a newer review"
 UPSTREAM_MOVED = "upstream moved since review; re-reviewed next run"
 ALREADY_RUNNING = "already running"
 TRIGGERED = "deploy triggered; verification pending"
+INTERRUPTED_IN_FLIGHT = "interrupted during deploy (shutdown); verified next run"
+INTERRUPTED = "deploy interrupted (shutdown)"
 
 # Strong references to fire-and-forget tasks (deploy runs, delayed verifications) so they are not garbage-collected
 # mid-flight; each removes itself when done.
 _background_tasks: set[asyncio.Task[Any]] = set()
+# The deploy runs among them (not the delayed verifications), which shutdown waits for.
+_deploy_runs: set[asyncio.Task[Any]] = set()
 # One deploy lock per event loop (a module-level Lock would bind to the first loop that contends for it).
 _locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
 
@@ -123,6 +127,11 @@ async def _attempt(
         await wud.trigger_deploy(container, record.id)
     except wud.WudError:
         return "failed", running, "WUD deploy trigger failed (WudError)"
+    except asyncio.CancelledError:
+        # Shutdown while WUD was deploying: the deploy may well have completed. Leave it pending so the next advisor
+        # run's verify_pending settles it against the real running digest, then let the cancellation through.
+        _save(conn, verdict, "pending_verify", running, INTERRUPTED_IN_FLIGHT)
+        raise
     return "pending_verify", running, TRIGGERED
 
 
@@ -233,6 +242,10 @@ async def deploy_approved(batch_id: str, approved_ids: list[int]) -> list[Deploy
 async def _run(batch_id: str, approved_ids: list[int]) -> list[DeployRecord]:
     try:
         return await deploy_approved(batch_id, approved_ids)
+    except asyncio.CancelledError:
+        logger.error("Deploy run for batch %s interrupted by shutdown", batch_id)  # noqa: TRY400 - no traceback needed
+        record_missing(approved_ids, INTERRUPTED)
+        raise
     except Exception as exc:
         logger.exception("Deploy run for batch %s crashed", batch_id)
         record_missing(approved_ids, f"deploy run crashed ({type(exc).__name__})")
@@ -242,4 +255,24 @@ async def _run(batch_id: str, approved_ids: list[int]) -> list[DeployRecord]:
 def start_deploy(batch_id: str, approved_ids: list[int]) -> asyncio.Task[list[DeployRecord]]:
     """Deploy in the background (the approval page returns at once). A crash leaves a ``failed`` row per ticked
     verdict that has none."""
-    return _keep(_run(batch_id, approved_ids))
+    task = _keep(_run(batch_id, approved_ids))
+    _deploy_runs.add(task)
+    task.add_done_callback(_deploy_runs.discard)
+    return task
+
+
+async def wait_for_deploys(timeout_seconds: float) -> int:
+    """Wait (bounded) for running deploy runs, e.g. at shutdown; returns how many are still running afterwards.
+
+    Whatever is still running when the event loop then cancels it records itself as interrupted (see ``_run``).
+    """
+    if not _deploy_runs:
+        return 0
+    _, pending = await asyncio.wait(set(_deploy_runs), timeout=timeout_seconds)
+    if pending:
+        logger.error(
+            "%d upgrade deploy run(s) still running after %.0fs; they will be interrupted",
+            len(pending),
+            timeout_seconds,
+        )
+    return len(pending)

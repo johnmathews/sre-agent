@@ -530,18 +530,19 @@ async def test_post_skips_superseded_verdict(
 
 
 @pytest.mark.integration
-async def test_dry_run_rows_and_holds_do_not_supersede_a_live_link(
+async def test_a_later_hold_supersedes_an_earlier_link(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
 ) -> None:
-    live = _verdict(mock_settings, "prometheus")
-    bid, token = _batch(mock_settings, [live])
-    _verdict(mock_settings, "prometheus", candidate=NEWER)  # a dry run: saved, never batched
-    held = _verdict(mock_settings, "prometheus", "hold", details={}, candidate=NEWER)
-    _batch(mock_settings, [held])
-    resp = await _post(client, bid, token, [live])
+    yesterday = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [yesterday])
+    _verdict(
+        mock_settings, "prometheus", "hold", summary="regression reported upstream", details={}
+    )  # today, unbatched
+    resp = await _post(client, bid, token, [yesterday])
     assert resp.status_code == 200
-    assert fake_wud.triggered == ["prometheus"]
-    assert [(d.verdict_id, d.outcome) for d in _deploys(mock_settings)] == [(live, "pending_verify")]
+    assert fake_wud.triggered == []
+    [d] = _deploys(mock_settings)
+    assert (d.verdict_id, d.outcome, d.detail) == (yesterday, "skipped", "superseded by a newer review")
 
 
 @pytest.mark.integration
@@ -761,6 +762,8 @@ async def test_post_with_nothing_ticked_records_rejections_only(
     bid, token = _batch(mock_settings, [up])
     resp = await _post(client, bid, token, [])
     assert resp.status_code == 200
+    assert "No updates were selected; nothing was deployed." in resp.text
+    assert "Deploying" not in resp.text
     assert _decisions(mock_settings) == {up: False}
     assert _deploys(mock_settings) == [] and fake_wud.triggered == []
 
@@ -802,6 +805,130 @@ async def test_deploys_from_two_batches_never_overlap(mock_settings: Any, verify
     ):
         await asyncio.gather(deploy.deploy_approved(bid_a, [a]), deploy.deploy_approved(bid_b, [b]))
     assert peak == 1
+
+
+def _patched_wud(fake: FakeWud, **overrides: Any) -> Any:
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch.object(wud, "get_container", side_effect=overrides.get("get_container", fake.get_container))
+    )
+    stack.enter_context(
+        patch.object(wud, "trigger_deploy", side_effect=overrides.get("trigger_deploy", fake.trigger_deploy))
+    )
+    return stack
+
+
+@pytest.mark.integration
+async def test_shutdown_during_a_trigger_records_the_in_flight_item_and_the_rest(
+    mock_settings: Any, verify_mock: AsyncMock
+) -> None:
+    a, b, c = (_verdict(mock_settings, n) for n in ("prometheus", "openwebui", "grafana"))
+    bid, _ = _batch(mock_settings, [a, b, c])
+    fake = FakeWud()
+    for name in ("prometheus", "openwebui", "grafana"):
+        fake.set(name)
+    entered = asyncio.Event()
+
+    async def slow_trigger(c: Any, wud_id: str) -> None:
+        entered.set()
+        await asyncio.sleep(3600)
+
+    before = _metric("failed")
+    with _patched_wud(fake, trigger_deploy=slow_trigger):
+        task = deploy.start_deploy(bid, [a, b, c])
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    rows = {d.verdict_id: (d.outcome, d.detail, d.running_digest) for d in _deploys(mock_settings)}
+    assert rows == {
+        a: ("pending_verify", "interrupted during deploy (shutdown); verified next run", OLD),
+        b: ("failed", "deploy interrupted (shutdown)", None),
+        c: ("failed", "deploy interrupted (shutdown)", None),
+    }
+    assert _metric("failed") == before + 2
+    await _drain()
+    verify_mock.assert_not_awaited()  # the next advisor run's verify_pending settles the in-flight one
+    conn = _conn(mock_settings)
+    try:
+        assert [d.verdict_id for d in store.pending_verifications(conn)] == [a]
+    finally:
+        conn.close()
+
+
+@pytest.mark.integration
+async def test_shutdown_before_the_trigger_records_the_item_as_interrupted(
+    mock_settings: Any, verify_mock: AsyncMock
+) -> None:
+    a = _verdict(mock_settings, "prometheus")
+    bid, _ = _batch(mock_settings, [a])
+    fake = FakeWud()
+    entered = asyncio.Event()
+
+    async def slow_get(c: Any) -> WudContainer:
+        entered.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    with _patched_wud(fake, get_container=slow_get):
+        task = deploy.start_deploy(bid, [a])
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert fake.triggered == []
+    assert [(d.outcome, d.detail) for d in _deploys(mock_settings)] == [("failed", "deploy interrupted (shutdown)")]
+
+
+@pytest.mark.integration
+async def test_wait_for_deploys_returns_at_once_when_idle() -> None:
+    assert not deploy._deploy_runs
+    started = asyncio.get_running_loop().time()
+    assert await deploy.wait_for_deploys(30) == 0
+    assert asyncio.get_running_loop().time() - started < 1
+
+
+@pytest.mark.integration
+async def test_wait_for_deploys_is_bounded_and_reports_stragglers(
+    mock_settings: Any, verify_mock: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    a = _verdict(mock_settings, "prometheus")
+    bid, _ = _batch(mock_settings, [a])
+    fake = FakeWud()
+    fake.set("prometheus")
+    release = asyncio.Event()
+
+    async def blocking_trigger(c: Any, wud_id: str) -> None:
+        await release.wait()
+
+    with _patched_wud(fake, trigger_deploy=blocking_trigger):
+        deploy.start_deploy(bid, [a])
+        await asyncio.sleep(0)
+        assert await deploy.wait_for_deploys(0.05) == 1
+        assert any("still running" in r.getMessage() for r in caplog.records)
+        release.set()
+        assert await deploy.wait_for_deploys(5) == 0
+        await _drain()
+    assert [d.outcome for d in _deploys(mock_settings)] == ["pending_verify"]
+
+
+@pytest.mark.integration
+def test_app_shutdown_waits_for_deploys(mock_settings: Any) -> None:
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    from src.api import main
+
+    with (
+        patch.object(main, "build_agent", return_value=MagicMock()),
+        patch.object(main, "wait_for_deploys", new_callable=AsyncMock, return_value=0) as waited,
+    ):
+        with TestClient(main.app):
+            waited.assert_not_awaited()
+        waited.assert_awaited_once_with(30.0)
 
 
 @pytest.mark.integration

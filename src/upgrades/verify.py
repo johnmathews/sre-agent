@@ -16,6 +16,7 @@ from src.upgrades import store
 from src.upgrades.config import AdvisedContainer, load_allowlist
 from src.upgrades.http import ResponseTooLarge, bounded_request
 from src.upgrades.models import DeployOutcome, DeployRecord, VerdictRecord
+from src.upgrades.registry import DIGEST_RE
 from src.upgrades.textutil import clean_text
 from src.upgrades.wud import WudError, get_container
 
@@ -28,7 +29,25 @@ ERROR_BASELINE_FACTOR = 3
 BASELINE_OFFSET = timedelta(hours=1)
 
 
+class _LokiStatusError(Exception):
+    """Loki answered with a non-2xx status."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
 def _exc_text(exc: Exception) -> str:
+    """Safe description for persisted detail and emails: class name (and HTTP status) only, never message text."""
+    if isinstance(exc, _LokiStatusError):
+        return f"{type(exc).__name__} (HTTP {exc.status})"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__} (HTTP {exc.response.status_code})"
+    return type(exc).__name__
+
+
+def _exc_log(exc: Exception) -> str:
+    """Full (cleaned) description, for log lines only."""
     return f"{type(exc).__name__}: {clean_text(str(exc))}"
 
 
@@ -40,6 +59,7 @@ async def _check_readiness(url: str) -> str | None:
     except ResponseTooLarge:
         return "readiness response too large"
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        logger.warning("readiness probe failed: %s", _exc_log(exc))
         return f"readiness probe failed: {_exc_text(exc)}"
     if not response.is_success:
         return f"readiness probe returned HTTP {response.status_code}"
@@ -53,8 +73,7 @@ async def _loki_error_count(base_url: str, container: str, at: datetime) -> int:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False) as client:
         response = await bounded_request(client, "GET", f"{base_url.rstrip('/')}/loki/api/v1/query", params=params)
     if not response.is_success:
-        msg = f"HTTP {response.status_code}"
-        raise ValueError(msg)
+        raise _LokiStatusError(response.status_code)
     body: Any = response.json()
     result = body["data"]["result"]
     if not result:
@@ -69,13 +88,31 @@ async def _check_logs(container: str, now: datetime) -> tuple[str | None, str | 
         return None, "Loki not configured; error-log check skipped"
     try:
         current = await _loki_error_count(base_url, container, now)
-    except (httpx.HTTPError, httpx.InvalidURL, ResponseTooLarge, ValueError, KeyError, IndexError, TypeError) as exc:
-        logger.warning("Loki error-log check failed for %s: %s", container, _exc_text(exc))
+    except (
+        httpx.HTTPError,
+        httpx.InvalidURL,
+        ResponseTooLarge,
+        _LokiStatusError,
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+    ) as exc:
+        logger.warning("Loki error-log check failed for %s: %s", container, _exc_log(exc))
         return None, f"Loki error-log check skipped: {_exc_text(exc)}"
     try:
         baseline = await _loki_error_count(base_url, container, now - BASELINE_OFFSET)
-    except (httpx.HTTPError, httpx.InvalidURL, ResponseTooLarge, ValueError, KeyError, IndexError, TypeError) as exc:
-        logger.warning("Loki baseline query failed for %s: %s", container, _exc_text(exc))
+    except (
+        httpx.HTTPError,
+        httpx.InvalidURL,
+        ResponseTooLarge,
+        _LokiStatusError,
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+    ) as exc:
+        logger.warning("Loki baseline query failed for %s: %s", container, _exc_log(exc))
         return None, f"Loki baseline query failed, error-log check skipped: {_exc_text(exc)}"
     limit = max(ERROR_FLOOR, ERROR_BASELINE_FACTOR * baseline)
     if current > limit:
@@ -96,7 +133,7 @@ async def _latest_backup(pbs_guest: str) -> str:
     try:
         taken = await pbs_latest_backup_time(kind.lower(), guest_id, datastore)
     except Exception as exc:  # noqa: BLE001 - PBS trouble must never fail verification
-        logger.warning("PBS lookup for %s failed: %s", pbs_guest, _exc_text(exc))
+        logger.warning("PBS lookup for %s failed: %s", pbs_guest, _exc_log(exc))
         return f"{fallback} (warning: PBS lookup failed: {_exc_text(exc)})"
     if taken is None:
         return f"{fallback} (warning: no backup of {pbs_guest} found in datastore {datastore})"
@@ -145,12 +182,15 @@ async def _evaluate(
     try:
         wud = await get_container(container)
     except WudError as exc:
-        return "failed", None, [f"could not read WUD state: {clean_text(str(exc))}"]
+        logger.warning("WUD read failed for %s: %s", container.name, _exc_log(exc))
+        return "failed", None, ["could not read WUD state (WudError)"]
+    if not isinstance(wud.running_digest, str) or not DIGEST_RE.fullmatch(wud.running_digest):
+        return "failed", None, ["WUD reported no valid running digest"]
     if wud.running_digest != verdict.candidate_digest:
         return (
             "digest_mismatch",
             wud.running_digest,
-            [f"running digest {clean_text(str(wud.running_digest))} is not the approved {verdict.candidate_digest}"],
+            [f"running digest {clean_text(wud.running_digest)} is not the approved {verdict.candidate_digest}"],
         )
     parts: list[str] = []
     failure = await _check_readiness(container.readiness_url)

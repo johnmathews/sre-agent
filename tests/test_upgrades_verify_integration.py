@@ -15,6 +15,8 @@ from prometheus_client import REGISTRY
 from src.upgrades import store
 from src.upgrades.verify import verify_deploy, verify_pending
 
+OLD = "sha256:" + "a" * 64
+NEW = "sha256:" + "b" * 64
 WUD = "http://10.0.0.15:3010"
 READY = "http://10.0.0.15:9090/-/ready"
 LOKI = "http://loki.test:3100"
@@ -55,15 +57,17 @@ def email() -> Iterator[MagicMock]:
         yield send
 
 
-def _seed(settings: Any, *, started: datetime | None = None, container: str = "prometheus") -> int:
+def _seed(
+    settings: Any, *, version: str = "v3.1.1", started: datetime | None = None, container: str = "prometheus"
+) -> int:
     conn = store.connect(settings.upgrade_advisor_db_path)
     vid = store.save_verdict(
         conn,
         container=container,
-        running_digest="sha256:old",
-        candidate_digest="sha256:new",
+        running_digest=OLD,
+        candidate_digest=NEW,
         running_version="v3.1.0",
-        candidate_version="v3.1.1",
+        candidate_version=version,
         verdict="upgrade",
         summary="ok",
         details={},
@@ -81,12 +85,12 @@ def _seed(settings: Any, *, started: datetime | None = None, container: str = "p
     return did
 
 
-def _wud(digest: str = "sha256:new") -> None:
+def _wud(digest: object = NEW) -> None:
     record = {
         "id": "abcdef123456",
         "name": "prometheus",
         "image": {"digest": {"value": digest}},
-        "result": {"digest": "sha256:new"},
+        "result": {"digest": NEW},
         "updateAvailable": False,
     }
     respx.get(f"{WUD}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
@@ -115,7 +119,7 @@ async def test_verify_ok_when_digest_ready_and_quiet(mock_settings: Any, email: 
     _loki("2", "0")
     result = await verify_deploy(did)
     assert result.outcome == "ok"
-    assert result.running_digest == "sha256:new"
+    assert result.running_digest == NEW
     email.assert_not_called()
     query = respx.calls.last.request.url.params["query"]
     assert query == 'sum(count_over_time({container="prometheus"} |~ "(?i)(error|panic|fatal)" [5m]))'
@@ -125,10 +129,10 @@ async def test_verify_ok_when_digest_ready_and_quiet(mock_settings: Any, email: 
 @respx.mock
 async def test_digest_mismatch_emails_at_once(mock_settings: Any, email: MagicMock) -> None:
     did = _seed(mock_settings)
-    _wud("sha256:old")
+    _wud(OLD)
     result = await verify_deploy(did)
     assert result.outcome == "digest_mismatch"
-    assert result.running_digest == "sha256:old"
+    assert result.running_digest == OLD
     email.assert_called_once()
     text, html_body, subject = email.call_args.args
     assert subject == "Upgrade digest mismatch: prometheus on prometheus"
@@ -228,8 +232,8 @@ async def test_missing_container_fails_and_emails(mock_settings: Any, email: Mag
 @pytest.mark.integration
 @respx.mock
 async def test_email_html_escapes_values(mock_settings: Any, email: MagicMock) -> None:
-    did = _seed(mock_settings)
-    _wud("sha256:<script>alert(1)</script>")
+    did = _seed(mock_settings, version="<script>alert(1)</script>")
+    _wud(OLD)
     await verify_deploy(did)
     text, html_body, _ = email.call_args.args
     assert "<script>" in text
@@ -239,9 +243,39 @@ async def test_email_html_escapes_values(mock_settings: Any, email: MagicMock) -
 
 @pytest.mark.integration
 @respx.mock
+@pytest.mark.parametrize("bad", [None, "", "sha256:short", "sha256:<script>alert(1)</script>"])
+async def test_invalid_wud_digest_fails_without_echoing_it(mock_settings: Any, email: MagicMock, bad: object) -> None:
+    did = _seed(mock_settings)
+    _wud(bad)
+    result = await verify_deploy(did)
+    assert result.outcome == "failed"
+    assert result.detail == "WUD reported no valid running digest"
+    assert result.running_digest is None
+    assert "script" not in email.call_args.args[0]
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_exception_text_never_reaches_detail_or_email(mock_settings: Any, email: MagicMock) -> None:
+    did = _seed(mock_settings)
+    _wud()
+    respx.get(READY).mock(side_effect=httpx.ConnectError("secret-host-detail"))
+    mock_settings.pbs_default_datastore = "main"
+    respx.get(f"{mock_settings.pbs_url}/api2/json/admin/datastore/main/groups").mock(
+        side_effect=httpx.ConnectError("secret-pbs-detail")
+    )
+    result = await verify_deploy(did)
+    assert result.outcome == "failed"
+    assert "ConnectError" in result.detail
+    assert "secret" not in result.detail
+    assert "secret" not in email.call_args.args[0] + email.call_args.args[1]
+
+
+@pytest.mark.integration
+@respx.mock
 async def test_unconfigured_email_logs_error(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
     did = _seed(mock_settings)
-    _wud("sha256:old")
+    _wud(OLD)
     with patch("src.upgrades.verify.is_email_configured", return_value=False):
         await verify_deploy(did)
     assert any(r.levelname == "ERROR" and "Email not configured" in r.message for r in caplog.records)
@@ -266,7 +300,7 @@ async def test_verify_pending_picks_up_deploys_lost_to_a_restart(mock_settings: 
 @respx.mock
 async def test_concurrent_verifications_email_and_count_once(mock_settings: Any, email: MagicMock) -> None:
     did = _seed(mock_settings)
-    _wud("sha256:old")
+    _wud(OLD)
     labels = {"outcome": "digest_mismatch"}
     before = REGISTRY.get_sample_value("sre_assistant_upgrade_deploys_total", labels) or 0.0
     first, second = await asyncio.gather(verify_deploy(did), verify_deploy(did))

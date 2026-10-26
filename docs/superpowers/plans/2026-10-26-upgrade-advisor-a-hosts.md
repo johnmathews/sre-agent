@@ -49,7 +49,7 @@ UPGRADE_ADVISOR_WUD_USERNAME=sre-advisor
 UPGRADE_ADVISOR_WUD_PASSWORD=<vault_wud_sre_advisor_password>
 CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 CF_ACCESS_AUD=<Access application AUD tag>
-GITHUB_TOKEN=<optional; empty = anonymous>
+UPGRADE_ADVISOR_GITHUB_TOKEN=<optional; empty = anonymous>
 ```
 
 Allowlist file (`/app/upgrades/allowlist.yml` in the container), one entry per container:
@@ -275,10 +275,10 @@ def test_sre_agent_reads_advisor_secrets_from_its_own_env_file(): ...
     # compose("infra_vm")["services"]["sre-agent"]["env_file"] == [".env", "sre-upgrades.env"];
     # a volume "/srv/infra/sre-upgrades:/app/upgrades"
 def test_no_advisor_secret_in_shared_env(): ...
-    # rendered .env.j2 has no UPGRADE_ADVISOR_WUD_PASSWORD, CF_ACCESS_AUD or GITHUB_TOKEN
+    # rendered .env.j2 has no UPGRADE_ADVISOR_WUD_PASSWORD, CF_ACCESS_AUD or UPGRADE_ADVISOR_GITHUB_TOKEN
 def test_advisor_env_file_holds_the_secrets(): ...
     # rendered sre-upgrades.env.j2 keys ⊇ {"UPGRADE_ADVISOR_WUD_USERNAME",
-    # "UPGRADE_ADVISOR_WUD_PASSWORD", "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "GITHUB_TOKEN"}
+    # "UPGRADE_ADVISOR_WUD_PASSWORD", "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "UPGRADE_ADVISOR_GITHUB_TOKEN"}
 ```
 
 - [ ] **Step 2:** `uv run pytest tests/test_sre_upgrade_advisor_wiring.py -v` → FAIL.

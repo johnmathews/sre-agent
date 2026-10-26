@@ -70,7 +70,7 @@ answers show the design is understood. Record them in the journal entry (Task 9)
   `upgrade_advisor_min_age_hours: int = 72`, `upgrade_advisor_public_base_url: str = ""`,
   `upgrade_advisor_verify_delay_seconds: int = 300`, `upgrade_advisor_wud_username: str = ""`,
   `upgrade_advisor_wud_password: str = ""`, `cf_access_team_domain: str = ""`,
-  `cf_access_aud: str = ""`, `github_token: str = ""`.
+  `cf_access_aud: str = ""`, `upgrade_advisor_github_token: str = ""`.
 - Produces in `src/upgrades/config.py`:
   `class AdvisedContainer(BaseModel)` with fields `name, host, wud_url, registry, repository,
   tag, github_repo, release_tag_format: str = "{release}", readiness_url, pbs_guest,
@@ -183,7 +183,7 @@ def test_pending_verifications_lists_only_pending(): ...
   `is_major(running: tuple[int, ...], candidate: tuple[int, ...]) -> bool`
   (major differs, or major == 0 and minor differs);
   `async list_releases(github_repo: str, limit: int = 30) -> list[Release]` (skips drafts,
-  prereleases and unparseable tags; `Authorization` header only when `github_token` is set);
+  prereleases and unparseable tags; `Authorization` header only when `upgrade_advisor_github_token` is set);
   `async release_for_digest(c: AdvisedContainer, digest: str, releases: list[Release]) -> Release | None`
   (newest first; image tag = `c.release_tag_format.format(release=r.tag)`; match when `digest in
   await tag_digests(...)`; stop after 10 lookups);

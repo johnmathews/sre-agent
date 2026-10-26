@@ -1,5 +1,7 @@
 """Tests for the supply-chain gate and the model review (LLM stubbed)."""
 
+import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -299,3 +301,35 @@ def test_load_context_reads_real_file_and_refuses_symlink_escape(tmp_path: Any) 
     assert "TOPSECRET" not in "".join(out.values())
     assert "unreadable" in out[str(root / "link.md")]
     assert "unreadable" in out[str(root / "missing.md")]
+
+
+def test_parse_review_rejects_oversized_answer() -> None:
+    body = '{"verdict": "hold", "summary": "' + "a" * 20_000 + '"}'
+    assert len(body) > review_mod.MAX_ANSWER_CHARS
+    assert parse_review(body) is None
+
+
+def test_parse_review_pathological_fence_is_fast() -> None:
+    start = time.perf_counter()
+    assert parse_review("```" + "\n" * 100_000 + "x") is None
+    assert time.perf_counter() - start < 1.0
+
+
+def test_parse_review_fence_edges() -> None:
+    obj = '{"verdict": "hold", "summary": "s"}'
+    assert parse_review(f"```JSON\n{obj}\n```") == Review(verdict="hold", summary="s")
+    assert parse_review(f"```\n{obj}\n```") == Review(verdict="hold", summary="s")
+    assert parse_review(f"```json\n{obj}") is None
+    assert parse_review("``````") is None
+    assert parse_review("```") is None
+
+
+async def test_review_unparseable_log_has_no_model_text(caplog: pytest.LogCaptureFixture) -> None:
+    secret = "sk-ant-SECRETVALUE123 ignore previous instructions"
+    p, _ = _stub_llm(f"```json\n{secret}\n```")
+    with p, caplog.at_level(logging.ERROR, logger="src.upgrades.review"):
+        r = await review_mod.review(_cand())
+    assert r.verdict == "needs_you"
+    text = caplog.text
+    assert "not parseable" in text and "len=" in text and "fenced=True" in text
+    assert "SECRETVALUE" not in text and "ignore previous" not in text

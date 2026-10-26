@@ -7,7 +7,6 @@ registry sits in fenced "untrusted" blocks, and code (not the model) enforces th
 import asyncio
 import json
 import logging
-import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -22,13 +21,13 @@ from src.report.generator import _is_retryable_llm_error
 from src.upgrades.config import CONTEXT_ROOT, AdvisedContainer
 from src.upgrades.models import Verdict
 from src.upgrades.releases import Release, is_major
-from src.upgrades.textutil import clean_text
 
 logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_FILE_CHARS = 20_000
 MAX_RELEASE_BODY_CHARS = 15_000
 MAX_PROMPT_CHARS = 120_000
+MAX_ANSWER_CHARS = 20_000
 RETRY_BUDGET_SECONDS = 120.0
 RETRY_INITIAL_DELAY = 15.0
 MIN_CALL_TIMEOUT = 10.0
@@ -38,7 +37,6 @@ _SYSTEM_TEXT = (
     "You are an SRE assistant reviewing a pending container image update for a home server. "
     "You have no tools. Answer with exactly one JSON object and nothing else."
 )
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 class Candidate(BaseModel):
@@ -134,9 +132,17 @@ def parse_review(text: str) -> Review | None:
 
     Fails closed (``None``) on anything else: prose around it, a second object, no object, invalid shape.
     """
+    if len(text) > MAX_ANSWER_CHARS:
+        return None
     stripped = text.strip()
-    fenced = _FENCE_RE.fullmatch(stripped)
-    body = fenced.group(1).strip() if fenced else stripped
+    body = stripped
+    if stripped.startswith("```"):
+        if not (stripped.endswith("```") and len(stripped) > 6):
+            return None
+        body = stripped[3:-3]
+        if body[:4].lower() == "json":
+            body = body[4:]
+        body = body.strip()
     if not body.startswith("{"):
         return None
     try:
@@ -244,14 +250,18 @@ async def review(c: Candidate) -> Review:
         try:
             prompt = build_prompt(c, _load_context(c.container.context_files))
             answer = await _ask_model(prompt)
-            excerpt = clean_text(answer)
             parsed = parse_review(answer)
         except Exception as exc:
             logger.exception("upgrade review failed for %s", c.container.name)
             result = _needs_you(f"review failed: {type(exc).__name__}; see logs")
         else:
             if parsed is None:
-                logger.error("upgrade review for %s was not parseable: %s", c.container.name, excerpt)
+                logger.error(
+                    "upgrade review for %s was not parseable (len=%d, fenced=%s)",
+                    c.container.name,
+                    len(answer),
+                    answer.strip().startswith("```"),
+                )
                 result = _needs_you("the model's answer could not be parsed; please review manually")
             else:
                 result = _finalize(parsed)

@@ -49,4 +49,5 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that mock external HTTP APIs (run by default)",
     "e2e: tests that hit real services and cost money (skipped by default, run with --run-e2e)",
+    "real_context: upgrade review tests that read real context files (skip the _load_context stub)",
 ]

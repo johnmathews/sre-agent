@@ -61,7 +61,10 @@ def _stub_llm(content: str | None = None, exc: Exception | None = None) -> Any:
 
 
 @pytest.fixture(autouse=True)
-def _ctx(mock_settings: Any) -> Any:
+def _ctx(mock_settings: Any, request: pytest.FixtureRequest) -> Any:
+    if request.node.get_closest_marker("real_context"):
+        yield
+        return
     with patch("src.upgrades.review._load_context", return_value={"/app/upgrades/context/app.md": "ctx"}):
         yield
 
@@ -122,7 +125,7 @@ async def test_review_llm_exception_becomes_needs_you_with_error() -> None:
     with p:
         r = await review_mod.review(_cand())
     assert r.verdict == "needs_you"
-    assert "ValueError" in r.summary and "bad request" in r.summary
+    assert r.summary == "review failed: ValueError; see logs"
 
 
 async def test_review_unknown_running_version_skips_model() -> None:
@@ -278,3 +281,21 @@ async def test_review_uses_temperature_zero_and_oauth_prefix(mock_settings: Any)
     assert create.call_args.kwargs["temperature"] == 0
     system = llm.ainvoke.call_args.args[0][0]
     assert system.content.startswith("You are Claude Code")
+
+
+@pytest.mark.real_context
+def test_load_context_reads_real_file_and_refuses_symlink_escape(tmp_path: Any) -> None:
+    from pathlib import PurePosixPath
+
+    root = tmp_path / "ctx"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("TOPSECRET")
+    (root / "ok.md").write_text("fine")
+    (root / "link.md").symlink_to(outside)
+    with patch("src.upgrades.review.CONTEXT_ROOT", PurePosixPath(root)):
+        out = review_mod._load_context([str(root / "ok.md"), str(root / "link.md"), str(root / "missing.md")])
+    assert out[str(root / "ok.md")] == "fine"
+    assert "TOPSECRET" not in "".join(out.values())
+    assert "unreadable" in out[str(root / "link.md")]
+    assert "unreadable" in out[str(root / "missing.md")]

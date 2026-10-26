@@ -19,7 +19,7 @@ from pydantic import AwareDatetime, BaseModel, ValidationError
 from src.agent.llm import _is_oauth_token, create_llm
 from src.config import get_settings
 from src.report.generator import _is_retryable_llm_error
-from src.upgrades.config import AdvisedContainer
+from src.upgrades.config import CONTEXT_ROOT, AdvisedContainer
 from src.upgrades.models import Verdict
 from src.upgrades.releases import Release, is_major
 from src.upgrades.textutil import clean_text
@@ -163,7 +163,12 @@ def _load_context(paths: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for path in paths:
         try:
-            out[path] = Path(path).read_text(encoding="utf-8", errors="replace")
+            real = Path(path).resolve(strict=True)
+            if not real.is_relative_to(Path(CONTEXT_ROOT).resolve()) or not real.is_file():
+                logger.warning("context file %s resolves outside the context root or is not a file; skipped", path)
+                out[path] = "[context file unreadable: outside context root]"
+                continue
+            out[path] = real.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             logger.warning("context file %s unreadable: %s", path, exc)
             out[path] = f"[context file unreadable: {type(exc).__name__}]"
@@ -243,7 +248,7 @@ async def review(c: Candidate) -> Review:
             parsed = parse_review(answer)
         except Exception as exc:
             logger.exception("upgrade review failed for %s", c.container.name)
-            result = _needs_you(f"review failed: {type(exc).__name__}: {clean_text(str(exc))}")
+            result = _needs_you(f"review failed: {type(exc).__name__}; see logs")
         else:
             if parsed is None:
                 logger.error("upgrade review for %s was not parseable: %s", c.container.name, excerpt)
@@ -255,4 +260,4 @@ async def review(c: Candidate) -> Review:
         return result
     except Exception as exc:
         logger.exception("unexpected error reviewing %s", c.container.name)
-        return _needs_you(f"review failed: {type(exc).__name__}: {clean_text(str(exc))}")
+        return _needs_you(f"review failed: {type(exc).__name__}; see logs")

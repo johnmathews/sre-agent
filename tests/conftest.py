@@ -107,6 +107,18 @@ def mock_settings() -> Generator[Any]:
             "documentation_mcp_url": "",
             # User timezone (used by clock tool and prompt time fields)
             "user_timezone": "UTC",
+            # Upgrade Advisor (disabled by default)
+            "upgrade_advisor_config_path": "",
+            "upgrade_advisor_db_path": "",
+            "upgrade_advisor_cron": "",
+            "upgrade_advisor_min_age_hours": 72,
+            "upgrade_advisor_public_base_url": "",
+            "upgrade_advisor_verify_delay_seconds": 300,
+            "upgrade_advisor_wud_username": "",
+            "upgrade_advisor_wud_password": "",
+            "cf_access_team_domain": "",
+            "cf_access_aud": "",
+            "upgrade_advisor_github_token": "",
         },
     )()
     patch_sites = [
@@ -131,6 +143,7 @@ def mock_settings() -> Generator[Any]:
         "src.agent.mcp_tools.get_settings",
         "src.agent.sdk_agent.get_settings",
         "src.api.mcp_server.get_settings",
+        "src.upgrades.config.get_settings",
     ]
     with ExitStack() as stack:
         for site in patch_sites:

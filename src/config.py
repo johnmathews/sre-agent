@@ -86,6 +86,19 @@ class Settings(BaseSettings):
     pbs_node: str = "localhost"
     pbs_default_datastore: str = ""
 
+    # Upgrade Advisor (optional — empty config path / DB path / credentials = disabled)
+    upgrade_advisor_config_path: str = ""
+    upgrade_advisor_db_path: str = ""
+    upgrade_advisor_cron: str = ""
+    upgrade_advisor_min_age_hours: int = 72
+    upgrade_advisor_public_base_url: str = ""
+    upgrade_advisor_verify_delay_seconds: int = 300
+    upgrade_advisor_wud_username: str = ""
+    upgrade_advisor_wud_password: str = ""
+    cf_access_team_domain: str = ""
+    cf_access_aud: str = ""
+    upgrade_advisor_github_token: str = ""  # optional; empty = anonymous GitHub API
+
     @field_validator("user_timezone")
     @classmethod
     def _validate_user_timezone(cls, value: str) -> str:

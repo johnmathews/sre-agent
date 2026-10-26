@@ -436,7 +436,7 @@ async def test_trigger_error_but_new_image_running_verifies_normally(mock_settin
 @pytest.mark.integration
 @respx.mock
 async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_settings: Any, email: MagicMock) -> None:
-    long_ago = datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + 60)
+    long_ago = datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS + 60)
     killed = _seed(
         mock_settings,
         started=long_ago,
@@ -447,7 +447,7 @@ async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_setting
     )
     in_flight = _seed(
         mock_settings,
-        started=datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS - 60),
+        started=datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS - 60),  # inside the margin
         outcome="triggering",
         detail="deploy triggering",
         running_digest=OLD,
@@ -460,7 +460,44 @@ async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_setting
     ]
     conn = store.connect(mock_settings.upgrade_advisor_db_path)
     try:
-        assert [d.id for d in store.triggering_deploys(conn)] == [in_flight]  # still within the trigger timeout
+        assert [d.id for d in store.triggering_deploys(conn)] == [in_flight]  # within 2 x the trigger timeout
     finally:
         conn.close()
     assert email.call_args.args[2] == "Upgrade not deployed: prometheus on prometheus"
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_a_reaper_failure_does_not_stop_other_rows_or_pending_verifications(
+    mock_settings: Any, email: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    long_ago = datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS + 60)
+    kw: dict[str, Any] = {"outcome": "triggering", "detail": "deploy triggering", "running_digest": OLD}
+    broken = _seed(mock_settings, started=long_ago, trigger_state="triggering", **kw)
+    reaped = _seed(mock_settings, started=long_ago, trigger_state="triggering", **kw)
+    pending = _seed(mock_settings, started=datetime.now(UTC) - timedelta(hours=2))
+    _wud(NEW)
+    respx.get(READY).mock(return_value=httpx.Response(200))
+    _loki("0", "0")
+    real = store.settle_trigger
+
+    def flaky(conn: Any, deploy_id: int, *args: Any) -> bool:
+        if deploy_id == broken:
+            raise RuntimeError("database is locked")
+        return real(conn, deploy_id, *args)
+
+    with patch.object(store, "settle_trigger", side_effect=flaky):
+        results = await verify_pending()
+    assert sorted(r.id for r in results) == sorted([reaped, pending])
+    assert any(f"Could not settle deploy {broken}" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.integration
+async def test_a_reaper_listing_failure_still_verifies_pending(mock_settings: Any, email: MagicMock) -> None:
+    pending = _seed(mock_settings, started=datetime.now(UTC) - timedelta(hours=2))
+    with (
+        patch.object(store, "triggering_deploys", side_effect=RuntimeError("boom")),
+        patch("src.upgrades.verify.verify_deploy", new_callable=AsyncMock) as verified,
+    ):
+        await verify_pending()
+    verified.assert_awaited_once_with(pending)

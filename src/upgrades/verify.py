@@ -3,6 +3,7 @@
 import asyncio
 import html
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -240,6 +241,9 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
         if deploy is None:
             msg = f"no deploy with id {deploy_id}"
             raise LookupError(msg)
+        if deploy.outcome == "triggering":
+            logger.warning("deploy %s is still recorded as triggering; verify_pending settles it later", deploy_id)
+            return deploy
         if deploy.outcome != "pending_verify":
             logger.warning("deploy %s already verified (%s); not re-verifying", deploy_id, deploy.outcome)
             return deploy
@@ -278,25 +282,40 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
         conn.close()
 
 
+def _reap_stale_triggers(conn: sqlite3.Connection, cutoff: datetime) -> None:
+    """Settle ``triggering`` rows that started strictly before ``cutoff`` as interrupted (each row on its own)."""
+    try:
+        triggering = store.triggering_deploys(conn)
+    except Exception:
+        logger.exception("Could not list deploys left mid-trigger; retried on the next run")
+        return
+    for stale in triggering:
+        if stale.started_at >= cutoff:
+            continue
+        try:
+            if store.settle_trigger(conn, stale.id, "interrupted", INTERRUPTED_IN_FLIGHT):
+                logger.warning(
+                    "deploy %s was left mid-trigger (process killed?); verifying it as interrupted", stale.id
+                )
+        except Exception:
+            logger.exception("Could not settle deploy %s left mid-trigger; retried on the next run", stale.id)
+
+
 async def verify_pending() -> list[DeployRecord]:
     """Verify every pending deploy older than the verify delay (also picks up ones lost to a restart).
 
-    A ``triggering`` row older than WUD's trigger timeout belongs to a process that died mid-trigger (a hard kill):
-    it is settled as ``interrupted`` and verified like one. Younger ones may still be in flight and are left alone.
+    A ``triggering`` row older than twice WUD's trigger timeout belongs to a process that died mid-trigger (a hard
+    kill): it is settled as ``interrupted`` and verified like one. Younger ones may still be in flight and are left
+    alone; the margin keeps the reaper clear of a slow trigger that is about to return. A failure on one row is
+    logged and never stops the others or the pending verifications.
     """
     settings = get_settings()
     now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=settings.upgrade_advisor_verify_delay_seconds)
-    trigger_cutoff = now - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS)
+    trigger_cutoff = now - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS)
     conn = store.connect(settings.upgrade_advisor_db_path)
     try:
-        for stale in store.triggering_deploys(conn):
-            if stale.started_at <= trigger_cutoff and store.settle_trigger(
-                conn, stale.id, "interrupted", INTERRUPTED_IN_FLIGHT
-            ):
-                logger.warning(
-                    "deploy %s was left mid-trigger (process killed?); verifying it as interrupted", stale.id
-                )
+        _reap_stale_triggers(conn, trigger_cutoff)
         due = [d for d in store.pending_verifications(conn) if d.started_at <= cutoff]
     finally:
         conn.close()

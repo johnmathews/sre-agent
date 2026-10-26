@@ -813,7 +813,7 @@ async def test_post_skips_when_already_running(
 
 
 @pytest.mark.integration
-async def test_post_trigger_error_is_verified_at_once_and_others_continue(
+async def test_post_trigger_error_is_verified_after_the_delay_and_others_continue(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud
 ) -> None:
     mock_settings.upgrade_advisor_verify_delay_seconds = 3600
@@ -831,7 +831,8 @@ async def test_post_trigger_error_is_verified_at_once_and_others_continue(
         "WUD trigger failed: WudError",
     )
     assert (rows[good].outcome, rows[good].trigger_state) == ("pending_verify", "triggered")
-    assert sorted(c.args for c in later.await_args_list) == sorted([(rows[bad].id, 0), (rows[good].id, 3600)])
+    # both after the usual delay: a deploy WUD finishes after our client timed out must be seen
+    assert sorted(c.args for c in later.await_args_list) == sorted([(rows[bad].id, 3600), (rows[good].id, 3600)])
     assert fake_wud.triggered == ["openwebui"]
 
 
@@ -850,10 +851,9 @@ def _verify_env(fake: FakeWud, router: respx.MockRouter) -> Any:
 
 
 @pytest.mark.integration
-async def test_trigger_error_on_the_old_image_emails_not_deployed_at_once(
+async def test_trigger_error_on_the_old_image_emails_not_deployed(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, _env: respx.MockRouter
 ) -> None:
-    mock_settings.upgrade_advisor_verify_delay_seconds = 3600  # the immediate check must not wait for the delay
     vid = _verdict(mock_settings, "prometheus")
     bid, token = _batch(mock_settings, [vid])
     fake_wud.fail_trigger.add("prometheus")
@@ -971,8 +971,30 @@ async def test_unrecordable_trigger_result_leaves_the_row_triggering(
         await _post(client, bid, token, [vid])
     assert fake_wud.triggered == ["prometheus"]
     [d] = _deploys(mock_settings)
-    assert (d.outcome, d.trigger_state) == ("triggering", "triggering")  # verify_pending settles it after the timeout
-    verify_mock.assert_not_awaited()
+    assert (d.outcome, d.trigger_state) == ("triggering", "triggering")  # verify_pending settles it later
+    verify_mock.assert_awaited_once_with(d.id)  # WUD said it deployed: verification is still scheduled
+
+
+@pytest.mark.integration
+async def test_a_trigger_returning_after_the_reaper_is_still_verified(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+
+    async def reaped_meanwhile(c: Any, wud_id: str) -> None:
+        conn = _conn(mock_settings)
+        try:
+            [row] = store.triggering_deploys(conn)
+            assert store.settle_trigger(conn, row.id, "interrupted", verify.INTERRUPTED_IN_FLIGHT)
+        finally:
+            conn.close()
+
+    with patch.object(wud, "trigger_deploy", side_effect=reaped_meanwhile):
+        await _post(client, bid, token, [vid])
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.trigger_state) == ("pending_verify", "interrupted")
+    verify_mock.assert_awaited_once_with(d.id)
 
 
 @pytest.mark.integration

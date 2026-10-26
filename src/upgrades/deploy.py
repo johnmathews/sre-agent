@@ -209,13 +209,21 @@ async def _trigger(
         raise
     except Exception as exc:  # WudError (incl. our timeout) or a bug: WUD may or may not have deployed
         kind = type(exc).__name__
-        logger.error("Deploy %s of %s: WUD trigger failed (%s); verifying now", deploy_id, verdict.container, kind)  # noqa: TRY400
-        if _settle(conn, deploy_id, "trigger_error", f"WUD trigger failed: {kind}"):
-            _keep(_verify_later(deploy_id, 0))
+        logger.error(  # noqa: TRY400 - the class is the signal; WudError already logged its cleaned message
+            "Deploy %s of %s: WUD trigger failed (%s); verifying after the usual delay",
+            deploy_id,
+            verdict.container,
+            kind,
+        )
+        # Verify after the normal delay, not at once: a deploy WUD completes after our client timed out must be seen.
+        _settle(conn, deploy_id, "trigger_error", f"WUD trigger failed: {kind}")
+        _keep(_verify_later(deploy_id, delay_seconds))
         return store.get_deploy(conn, deploy_id)
     if _settle(conn, deploy_id, "triggered", TRIGGERED):
         logger.info("Deploy %s of %s (verdict %s): %s", deploy_id, verdict.container, verdict.id, TRIGGERED)
-        _keep(_verify_later(deploy_id, delay_seconds))
+    # WUD said it deployed: always verify, even if the row was already settled (the reaper) or the write failed.
+    # verify_deploy is compare-and-set guarded, so a second verification is harmless.
+    _keep(_verify_later(deploy_id, delay_seconds))
     return store.get_deploy(conn, deploy_id)
 
 

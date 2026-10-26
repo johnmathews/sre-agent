@@ -10,7 +10,8 @@ from pydantic import BaseModel, ValidationError
 
 from src.config import get_settings
 from src.upgrades.config import AdvisedContainer
-from src.upgrades.textutil import MAX_RESPONSE_BYTES, clean_text
+from src.upgrades.http import ResponseTooLarge, bounded_request
+from src.upgrades.textutil import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,11 @@ def _describe_malformed(exc: KeyError | ValidationError) -> str:
     return clean_text(", ".join(".".join(map(str, e["loc"])) + ": " + e["type"] for e in exc.errors()))
 
 
+def _exc_text(exc: Exception) -> str:
+    """Exception class plus cleaned message, for log lines (never the raw repr)."""
+    return f"{type(exc).__name__}: {clean_text(str(exc))}"
+
+
 def _fail(message: str) -> WudError:
     """Log ``message`` and build the WudError (the caller raises it, chained)."""
     logger.error(message)
@@ -72,11 +78,11 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
     url = f"{c.wud_url.rstrip('/')}/api/containers"
     try:
         async with httpx.AsyncClient(auth=_auth(), timeout=GET_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = await client.get(url)
+            response = await bounded_request(client, "GET", url)
+    except ResponseTooLarge as exc:
+        raise _fail(f"WUD response too large for {_where(c)}") from exc
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        raise _fail(f"WUD request failed for {_where(c)}: {exc!r}") from exc
-    if len(response.content) > MAX_RESPONSE_BYTES:
-        raise _fail(f"WUD response too large for {_where(c)}")
+        raise _fail(f"WUD request failed for {_where(c)}: {_exc_text(exc)}") from exc
     if not response.is_success:
         raise _fail(f"WUD returned HTTP {response.status_code} listing containers for {_where(c)}")
     try:
@@ -114,11 +120,11 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     url = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}/triggers/dockercompose/deploy"
     try:
         async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = await client.post(url)
+            response = await bounded_request(client, "POST", url)
+    except ResponseTooLarge as exc:
+        raise _fail(f"WUD response too large for {_where(c)}") from exc
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        raise _fail(f"WUD deploy request failed for {_where(c)}: {exc!r}") from exc
-    if len(response.content) > MAX_RESPONSE_BYTES:
-        raise _fail(f"WUD response too large for {_where(c)}")
+        raise _fail(f"WUD deploy request failed for {_where(c)}: {_exc_text(exc)}") from exc
     if response.is_success:
         return
     detail = ""

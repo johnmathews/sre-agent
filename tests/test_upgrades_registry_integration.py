@@ -24,14 +24,18 @@ INDEX_BODY = {
 
 @respx.mock
 async def test_tag_digests_follows_bearer_challenge_and_returns_platform_digests() -> None:
-    challenge = f'Bearer realm="https://auth.example.com/token",service="{REGISTRY}",scope="repository:team/app:pull"'
+    challenge = (
+        f'Bearer realm="https://registry.example.com/token",service="{REGISTRY}",scope="repository:team/app:pull"'
+    )
     route = respx.get(MANIFEST_URL).mock(
         side_effect=[
             httpx.Response(401, headers={"WWW-Authenticate": challenge}),
             httpx.Response(200, json=INDEX_BODY, headers={"Docker-Content-Digest": INDEX}),
         ]
     )
-    token = respx.get("https://auth.example.com/token").mock(return_value=httpx.Response(200, json={"token": "tok"}))
+    token = respx.get("https://registry.example.com/token").mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
 
     digests = await tag_digests(REGISTRY, "team/app", "v1")
 
@@ -64,9 +68,9 @@ async def test_tag_digests_single_manifest_returns_only_its_digest() -> None:
 
 @respx.mock
 async def test_tag_digests_rejects_non_https_realm() -> None:
-    challenge = 'Bearer realm="http://auth.example.com/token",service="x",scope="y"'
+    challenge = 'Bearer realm="http://registry.example.com/token",service="x",scope="y"'
     respx.get(MANIFEST_URL).mock(return_value=httpx.Response(401, headers={"WWW-Authenticate": challenge}))
-    token = respx.get("http://auth.example.com/token").mock(return_value=httpx.Response(200, json={"token": "t"}))
+    token = respx.get("http://registry.example.com/token").mock(return_value=httpx.Response(200, json={"token": "t"}))
     with pytest.raises(RegistryError, match="https"):
         await tag_digests(REGISTRY, "team/app", "v1")
     assert not token.called
@@ -81,9 +85,9 @@ async def test_tag_digests_401_without_bearer_challenge_raises() -> None:
 
 @respx.mock
 async def test_tag_digests_second_401_after_token_raises() -> None:
-    challenge = 'Bearer realm="https://auth.example.com/token",service="s",scope="c"'
+    challenge = 'Bearer realm="https://registry.example.com/token",service="s",scope="c"'
     route = respx.get(MANIFEST_URL).mock(return_value=httpx.Response(401, headers={"WWW-Authenticate": challenge}))
-    respx.get("https://auth.example.com/token").mock(return_value=httpx.Response(200, json={"token": "tok"}))
+    respx.get("https://registry.example.com/token").mock(return_value=httpx.Response(200, json={"token": "tok"}))
     with pytest.raises(RegistryError, match="401"):
         await tag_digests(REGISTRY, "team/app", "v1")
     assert route.call_count == 2
@@ -91,9 +95,9 @@ async def test_tag_digests_second_401_after_token_raises() -> None:
 
 @respx.mock
 async def test_tag_digests_token_response_without_token_raises() -> None:
-    challenge = 'Bearer realm="https://auth.example.com/token",service="s",scope="c"'
+    challenge = 'Bearer realm="https://registry.example.com/token",service="s",scope="c"'
     respx.get(MANIFEST_URL).mock(return_value=httpx.Response(401, headers={"WWW-Authenticate": challenge}))
-    respx.get("https://auth.example.com/token").mock(return_value=httpx.Response(200, json={"nope": 1}))
+    respx.get("https://registry.example.com/token").mock(return_value=httpx.Response(200, json={"nope": 1}))
     with pytest.raises(RegistryError, match="token"):
         await tag_digests(REGISTRY, "team/app", "v1")
 
@@ -134,3 +138,91 @@ async def test_tag_digests_refuses_redirect_to_plain_http() -> None:
     respx.get("http://cdn.example.com/m").mock(return_value=httpx.Response(200, json=INDEX_BODY))
     with pytest.raises(RegistryError, match="https"):
         await tag_digests(REGISTRY, "team/app", "v1")
+
+
+def _challenge_401(realm_params: str) -> httpx.Response:
+    return httpx.Response(401, headers={"WWW-Authenticate": f"Bearer {realm_params}"})
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "realm",
+    [
+        "https://evil.example.com/token",
+        "https://auth.docker.io:8443/token",
+        "https://user:pw@auth.docker.io/token",
+        "https://user@registry.example.com/token",
+        "https://registry.example.com.evil.example.com/token",
+    ],
+)
+async def test_tag_digests_refuses_realm_outside_allowed_hosts(realm: str) -> None:
+    respx.get(MANIFEST_URL).mock(return_value=_challenge_401(f'realm="{realm}",service="s"'))
+    token = respx.get(url__regex=r"https://(evil|auth|user|registry\.example\.com\.evil).*").mock(
+        return_value=httpx.Response(200, json={"token": "t"})
+    )
+    with pytest.raises(RegistryError) as info:
+        await tag_digests(REGISTRY, "team/app", "v1")
+    assert "evil" not in str(info.value)
+    assert not token.called
+
+
+@respx.mock
+async def test_tag_digests_uses_the_first_realm_only() -> None:
+    challenge = 'realm="https://registry.example.com/token",service="s",realm="https://evil.example.com/token"'
+    route = respx.get(MANIFEST_URL).mock(
+        side_effect=[_challenge_401(challenge), httpx.Response(200, json={}, headers={"Docker-Content-Digest": INDEX})]
+    )
+    token = respx.get("https://registry.example.com/token").mock(return_value=httpx.Response(200, json={"token": "t"}))
+    evil = respx.get("https://evil.example.com/token").mock(return_value=httpx.Response(200, json={"token": "e"}))
+    assert await tag_digests(REGISTRY, "team/app", "v1") == {INDEX}
+    assert token.called
+    assert not evil.called
+    assert route.calls[1].request.headers["authorization"] == "Bearer t"
+
+
+@respx.mock
+async def test_tag_digests_token_endpoint_redirect_is_an_error_and_not_followed() -> None:
+    respx.get(MANIFEST_URL).mock(return_value=_challenge_401('realm="https://registry.example.com/token",service="s"'))
+    respx.get("https://registry.example.com/token").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://registry.example.com/elsewhere"})
+    )
+    target = respx.get("https://registry.example.com/elsewhere").mock(
+        return_value=httpx.Response(200, json={"token": "t"})
+    )
+    with pytest.raises(RegistryError, match="redirect"):
+        await tag_digests(REGISTRY, "team/app", "v1")
+    assert not target.called
+
+
+@respx.mock
+async def test_tag_digests_docker_hub_and_ghcr_token_hosts_are_accepted() -> None:
+    for registry, realm in (
+        ("registry-1.docker.io", "https://auth.docker.io/token"),
+        ("ghcr.io", "https://ghcr.io/token"),
+    ):
+        url = f"https://{registry}/v2/team/app/manifests/v1"
+        respx.get(url).mock(
+            side_effect=[
+                _challenge_401(f'realm="{realm}",service="s",scope="repository:team/app:pull"'),
+                httpx.Response(200, json={}, headers={"Docker-Content-Digest": INDEX}),
+            ]
+        )
+        respx.get(realm).mock(return_value=httpx.Response(200, json={"token": "t"}))
+        assert await tag_digests(registry, "team/app", "v1") == {INDEX}
+
+
+@respx.mock
+async def test_tag_digests_authenticated_retry_redirect_does_not_leak_authorization() -> None:
+    respx.get(MANIFEST_URL).mock(
+        side_effect=[
+            _challenge_401('realm="https://registry.example.com/token",service="s"'),
+            httpx.Response(307, headers={"Location": "https://cdn.example.net/blob"}),
+        ]
+    )
+    respx.get("https://registry.example.com/token").mock(return_value=httpx.Response(200, json={"token": "secret"}))
+    cdn = respx.get("https://cdn.example.net/blob").mock(
+        return_value=httpx.Response(200, json={}, headers={"Docker-Content-Digest": INDEX})
+    )
+    assert await tag_digests(REGISTRY, "team/app", "v1") == {INDEX}
+    assert cdn.called
+    assert "authorization" not in cdn.calls.last.request.headers

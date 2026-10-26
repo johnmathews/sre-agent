@@ -10,8 +10,9 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from src.config import get_settings
 from src.upgrades.config import AdvisedContainer, GithubRepo
+from src.upgrades.http import BoundedResponse, ResponseTooLarge, bounded_request
 from src.upgrades.registry import RegistryError, tag_digests
-from src.upgrades.textutil import MAX_RESPONSE_BYTES, clean_text
+from src.upgrades.textutil import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,16 @@ def is_major(running: tuple[int, ...], candidate: tuple[int, ...]) -> bool:
     return run[0] != cand[0] or (run[0] == 0 and run[1] != cand[1])
 
 
+def _padded(version: tuple[int, ...], width: int) -> tuple[int, ...]:
+    """Zero-pad a version tuple so (3, 15) compares equal to (3, 15, 0)."""
+    return version + (0,) * (width - len(version))
+
+
 def releases_between(releases: list[Release], running: tuple[int, ...], candidate: tuple[int, ...]) -> list[Release]:
     """Releases newer than ``running`` up to and including ``candidate`` (input order kept)."""
-    return [r for r in releases if running < r.version <= candidate]
+    width = max(len(running), len(candidate), *(len(r.version) for r in releases), 0)
+    low, high = _padded(running, width), _padded(candidate, width)
+    return [r for r in releases if low < _padded(r.version, width) <= high]
 
 
 def _headers() -> dict[str, str]:
@@ -77,19 +85,19 @@ def _check_repo(github_repo: str) -> None:
         raise _fail("refusing GitHub lookup: repository name is not owner/name") from None
 
 
-async def _github_get(path: str, params: dict[str, str | int], what: str) -> httpx.Response:
+async def _github_get(path: str, params: dict[str, str | int], what: str) -> BoundedResponse:
     """GET ``path`` on the GitHub API; network errors and oversized bodies raise, status is the caller's call."""
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=True) as client:
-            response = await client.get(f"{GITHUB_API}{path}", params=params, headers=_headers())
+            response = await bounded_request(client, "GET", f"{GITHUB_API}{path}", params=params, headers=_headers())
+    except ResponseTooLarge as exc:
+        raise _fail(f"GitHub response too large for {what}") from exc
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        raise _fail(f"GitHub request failed for {what}: {exc!r}") from exc
-    if len(response.content) > MAX_RESPONSE_BYTES:
-        raise _fail(f"GitHub response too large for {what}")
+        raise _fail(f"GitHub request failed for {what}: {type(exc).__name__}: {clean_text(str(exc))}") from exc
     return response
 
 
-def _json(response: httpx.Response, what: str) -> Any:
+def _json(response: BoundedResponse, what: str) -> Any:
     if not response.is_success:
         raise _fail(f"GitHub returned HTTP {response.status_code} for {what}")
     try:

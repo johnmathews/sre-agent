@@ -40,3 +40,11 @@ def test_releases_between_is_exclusive_inclusive() -> None:
     releases = [_release(t) for t in ("v3.17.0", "v3.16.0", "v3.15.1", "v3.15.0", "v3.14.0")]
     got = releases_between(releases, (3, 15, 0), (3, 16, 0))
     assert [r.tag for r in got] == ["v3.16.0", "v3.15.1"]
+
+
+def test_releases_between_treats_short_and_padded_versions_as_equal() -> None:
+    releases = [_release("v3.15"), _release("v3.15.0"), _release("v3.16"), _release("v3.17.0")]
+    got = releases_between(releases, (3, 15), (3, 16, 0))
+    assert [r.tag for r in got] == ["v3.16"]
+    got = releases_between(releases, (3, 15, 0), (3, 16))
+    assert [r.tag for r in got] == ["v3.16"]

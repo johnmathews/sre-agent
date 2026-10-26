@@ -98,9 +98,12 @@ def _with(**changes: Any) -> str:
         ("context_files", ["/etc/passwd"]),
         ("context_files", ["/app/upgrades/context/../x"]),
         ("context_files", ["relative/path.yml"]),
+        ("context_files", ["/app/upgrades/context", "/app/upgrades/context/"]),
         ("context_files", ["/app/upgrades/contextual/x"]),
         ("wud_url", "ftp://x"),
         ("wud_url", "not a url"),
+        ("wud_url", " http://10.0.0.15:3010"),
+        ("readiness_url", "http://10.0.0.15:9090/ \n"),
         ("readiness_url", "file:///etc/passwd"),
         ("name", "Bad Name"),
         ("name", "-lead"),
@@ -119,6 +122,7 @@ def _with(**changes: Any) -> str:
         ("release_tag_format", "{release}-{other}"),
         ("release_tag_format", "{release.__class__}"),
         ("release_tag_format", "{"),
+        ("release_tag_format", "{release:{x}}"),
     ],
 )
 def test_allowlist_rejects_invalid_value(tmp_path: Path, field: str, value: Any) -> None:

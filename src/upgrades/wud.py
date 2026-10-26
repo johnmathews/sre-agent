@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 MAX_DETAIL_CHARS = 200
 DOCKER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+# Unicode categories replaced by a space: all control/format/etc. (C*) plus line and paragraph separators.
+_STRIPPED = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 GET_TIMEOUT_SECONDS = 30.0
 # WUD answers the trigger POST only after the deploy has finished.
 TRIGGER_TIMEOUT_SECONDS = 600.0
@@ -56,8 +59,9 @@ def _dig(record: dict[str, Any], *keys: str) -> Any:
 
 
 def _clean(text: str) -> str:
-    """Make text from a WUD response safe for an error message: no control characters, at most 200 chars."""
-    return "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text)[:MAX_DETAIL_CHARS]
+    """Make text from a WUD response safe for an error message: no control or line/paragraph separator
+    characters, at most 200 chars."""
+    return "".join(" " if unicodedata.category(ch) in _STRIPPED else ch for ch in text[:MAX_DETAIL_CHARS])
 
 
 def _describe_malformed(exc: KeyError | ValidationError) -> str:
@@ -81,6 +85,8 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
             response = await client.get(url)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise _fail(f"WUD request failed for {_where(c)}: {exc!r}") from exc
+    if len(response.content) > MAX_RESPONSE_BYTES:
+        raise _fail(f"WUD response too large for {_where(c)}")
     if not response.is_success:
         raise _fail(f"WUD returned HTTP {response.status_code} listing containers for {_where(c)}")
     try:
@@ -103,8 +109,11 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
                 update_available=bool(record.get("updateAvailable", False)),
                 update_kind=_dig(record, "updateKind", "kind"),
             )
-        except (KeyError, ValidationError) as exc:
+        except KeyError as exc:
             raise _fail(f"WUD returned a malformed record for {_where(c)}: {_describe_malformed(exc)}") from exc
+        except ValidationError as exc:
+            # `from None`: the ValidationError holds the raw input values, which must not reach a traceback.
+            raise _fail(f"WUD returned a malformed record for {_where(c)}: {_describe_malformed(exc)}") from None
     raise _fail(f"WUD does not list {_where(c)}")
 
 
@@ -118,6 +127,8 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
             response = await client.post(url)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise _fail(f"WUD deploy request failed for {_where(c)}: {exc!r}") from exc
+    if len(response.content) > MAX_RESPONSE_BYTES:
+        raise _fail(f"WUD response too large for {_where(c)}")
     if response.is_success:
         return
     detail = ""

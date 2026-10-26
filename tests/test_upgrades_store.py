@@ -170,6 +170,13 @@ def test_unknown_verdict_id_raises(conn: sqlite3.Connection) -> None:
     assert conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
 
 
+def test_duplicate_verdict_id_raises_up_front(conn: sqlite3.Connection) -> None:
+    a = _verdict(conn)
+    with pytest.raises(ValueError, match="duplicate verdict id"):
+        store.create_batch(conn, [a, a], T0, timedelta(hours=48))
+    assert conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+
+
 def test_empty_batch_raises(conn: sqlite3.Connection) -> None:
     with pytest.raises(ValueError, match="at least one"):
         store.create_batch(conn, [], T0, timedelta(hours=48))

@@ -88,9 +88,7 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 def _to_str(value: datetime) -> str:
-    if value.tzinfo is None:
-        msg = "naive datetime not allowed; pass a timezone-aware datetime"
-        raise ValueError(msg)
+    _require_aware(value)
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -208,6 +206,9 @@ def create_batch(conn: sqlite3.Connection, verdict_ids: list[int], now: datetime
     """
     if not verdict_ids:
         msg = "a batch needs at least one verdict"
+        raise ValueError(msg)
+    if len(set(verdict_ids)) != len(verdict_ids):
+        msg = f"duplicate verdict id in {verdict_ids}"
         raise ValueError(msg)
     created_at, expires_at = _to_str(now), _to_str(now + ttl)
     batch_id = secrets.token_urlsafe(16)

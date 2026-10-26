@@ -1,6 +1,7 @@
 """Integration tests for the WUD client (mocked HTTP)."""
 
 import base64
+import traceback
 from typing import Any
 
 import httpx
@@ -208,7 +209,7 @@ class TestRobustness:
             await get_container(_container())
         text = str(exc.value)
         assert "update_kind" in text
-        for blob in (text, caplog.text):
+        for blob in (text, caplog.text, "".join(traceback.format_exception(exc.value))):
             assert secret not in blob
             assert "\x1b" not in blob
 
@@ -234,11 +235,38 @@ class TestRobustness:
         assert len(text) < 200 + 120
 
     @respx.mock
+    async def test_trigger_error_message_strips_control_and_separator_chars(self) -> None:
+        message = "boom \x1b[31mred\u202eevil\u2028next\u2029end"
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(500, json={"message": message})
+        )
+        with pytest.raises(WudError) as exc:
+            await trigger_deploy(_container(), "abc123def456")
+        text = str(exc.value)
+        for ch in ("\x1b", "\u202e", "\u2028", "\u2029"):
+            assert ch not in text
+        assert "boom" in text
+
+    @respx.mock
+    async def test_oversized_get_body_is_refused(self) -> None:
+        respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, content=b"[" + b" " * (6 * 2**20)))
+        with pytest.raises(WudError, match="WUD response too large"):
+            await get_container(_container())
+
+    @respx.mock
+    async def test_oversized_trigger_body_is_refused(self) -> None:
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(500, content=b'{"message": "' + b"x" * (6 * 2**20) + b'"}')
+        )
+        with pytest.raises(WudError, match="WUD response too large"):
+            await trigger_deploy(_container(), "abc123def456")
+
+    @respx.mock
     async def test_record_without_id_raises_wud_error(self) -> None:
         record = _record("prometheus")
         del record["id"]
         respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
-        with pytest.raises(WudError, match="malformed"):
+        with pytest.raises(WudError, match="missing key id"):
             await get_container(_container())
 
     @respx.mock

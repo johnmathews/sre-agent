@@ -14,6 +14,9 @@ CONTEXT_ROOT = PurePosixPath("/app/upgrades/context")
 
 def _http_url(value: str) -> str:
     """Validate as an http(s) URL with a host; return the original string unchanged."""
+    if value != value.strip():
+        msg = "URL must not have leading or trailing whitespace"
+        raise ValueError(msg)
     AnyHttpUrl(value)
     return value
 
@@ -50,7 +53,12 @@ class AdvisedContainer(BaseModel):
     def _context_files_under_root(cls, value: list[str]) -> list[str]:
         for entry in value:
             path = PurePosixPath(entry)
-            if not path.is_absolute() or ".." in path.parts or not path.is_relative_to(CONTEXT_ROOT):
+            if (
+                not path.is_absolute()
+                or ".." in path.parts
+                or not path.is_relative_to(CONTEXT_ROOT)
+                or path == CONTEXT_ROOT
+            ):
                 msg = f"context file {entry!r} must be absolute, free of '..', and under {CONTEXT_ROOT}/"
                 raise ValueError(msg)
         return value
@@ -59,10 +67,14 @@ class AdvisedContainer(BaseModel):
     @classmethod
     def _release_tag_format_fields(cls, value: str) -> str:
         try:
-            fields = [name for _, name, _, _ in string.Formatter().parse(value) if name is not None]
+            parsed = list(string.Formatter().parse(value))
         except ValueError as exc:
             msg = f"release_tag_format is not a valid format string: {exc}"
             raise ValueError(msg) from exc
+        if any(spec and "{" in spec for _, _, spec, _ in parsed):
+            msg = "release_tag_format must not nest fields inside a format spec"
+            raise ValueError(msg)
+        fields = [name for _, name, _, _ in parsed if name is not None]
         if fields.count("release") < 1 or any(f != "release" for f in fields):
             msg = "release_tag_format must contain {release} and no other {...} field"
             raise ValueError(msg)

@@ -112,48 +112,90 @@ class TestGetContainer:
 class TestTriggerDeploy:
     @respx.mock
     async def test_posts_exact_path_with_basic_auth(self) -> None:
-        route = respx.post(f"{WUD_URL}/api/containers/abc123/triggers/dockercompose/deploy").mock(
+        route = respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
             return_value=httpx.Response(200, json={})
         )
-        await trigger_deploy(_container(), "abc123")
+        await trigger_deploy(_container(), "abc123def456")
         assert route.call_count == 1
         assert route.calls[0].request.headers["authorization"] == _expected_auth()
 
     @respx.mock
     async def test_500_surfaces_wud_message(self) -> None:
-        respx.post(f"{WUD_URL}/api/containers/abc123/triggers/dockercompose/deploy").mock(
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
             return_value=httpx.Response(500, json={"error": "x", "message": "compose up failed: no space"})
         )
         with pytest.raises(WudError, match="compose up failed: no space") as exc:
-            await trigger_deploy(_container(), "abc123")
+            await trigger_deploy(_container(), "abc123def456")
         assert "prometheus" in str(exc.value)
 
     @respx.mock
     async def test_non_json_error_body_still_raises(self) -> None:
-        respx.post(f"{WUD_URL}/api/containers/abc123/triggers/dockercompose/deploy").mock(
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
             return_value=httpx.Response(502, text="bad gateway")
         )
         with pytest.raises(WudError, match="502"):
-            await trigger_deploy(_container(), "abc123")
+            await trigger_deploy(_container(), "abc123def456")
 
     @respx.mock
     async def test_network_error_raises_wud_error(self) -> None:
-        respx.post(f"{WUD_URL}/api/containers/abc123/triggers/dockercompose/deploy").mock(
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
             side_effect=httpx.ReadTimeout("slow")
         )
         with pytest.raises(WudError, match="prometheus"):
-            await trigger_deploy(_container(), "abc123")
+            await trigger_deploy(_container(), "abc123def456")
 
 
 @pytest.mark.integration
 class TestRobustness:
     @respx.mock
-    async def test_wud_id_is_path_quoted(self) -> None:
+    async def test_non_docker_id_is_refused_without_a_request(self) -> None:
         route = respx.post(url__regex=r".*/triggers/dockercompose/deploy").mock(
             return_value=httpx.Response(200, json={})
         )
-        await trigger_deploy(_container(), "a/b?c")
-        assert route.calls[0].request.url.raw_path == b"/api/containers/a%2Fb%3Fc/triggers/dockercompose/deploy"
+        for bad in ("a/b?c", "../x", "ABC123DEF456", "abc", ""):
+            with pytest.raises(WudError, match="Docker container id"):
+                await trigger_deploy(_container(), bad)
+        assert not route.called
+
+    @respx.mock
+    async def test_hex_id_happy_path(self) -> None:
+        route = respx.post(f"{WUD_URL}/api/containers/{'a' * 64}/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        await trigger_deploy(_container(), "a" * 64)
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_redirect_is_not_followed(self) -> None:
+        first = respx.get(f"{WUD_URL}/api/containers").mock(
+            return_value=httpx.Response(302, headers={"location": "http://evil.example.com/x"})
+        )
+        target = respx.get("http://evil.example.com/x").mock(return_value=httpx.Response(200, json=[]))
+        with pytest.raises(WudError, match="302"):
+            await get_container(_container())
+        assert first.call_count == 1
+        assert not target.called
+
+    @respx.mock
+    async def test_duplicate_names_are_ambiguous(self) -> None:
+        respx.get(f"{WUD_URL}/api/containers").mock(
+            return_value=httpx.Response(200, json=[_record("prometheus"), _record("prometheus")])
+        )
+        with pytest.raises(WudError, match="ambiguous: 2 WUD containers named prometheus"):
+            await get_container(_container())
+
+    @respx.mock
+    async def test_wud_message_is_truncated_and_single_line(self) -> None:
+        message = ("line one\r\nline two\n" * 40)[:500]
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
+            return_value=httpx.Response(500, json={"message": message})
+        )
+        with pytest.raises(WudError) as exc:
+            await trigger_deploy(_container(), "abc123def456")
+        text = str(exc.value)
+        assert "\n" not in text and "\r" not in text
+        assert "line one  line two" in text
+        assert len(text) < 200 + 120
 
     @respx.mock
     async def test_record_without_id_raises_wud_error(self) -> None:
@@ -174,7 +216,7 @@ class TestRobustness:
         with pytest.raises(WudError):
             await get_container(_container(wud_url="not a url"))
         with pytest.raises(WudError):
-            await trigger_deploy(_container(wud_url="not a url"), "abc")
+            await trigger_deploy(_container(wud_url="not a url"), "abc123def456")
 
     @respx.mock
     async def test_trailing_slash_wud_url(self) -> None:
@@ -187,14 +229,14 @@ class TestRobustness:
     @respx.mock
     async def test_password_never_in_error_or_logs(self, caplog: pytest.LogCaptureFixture) -> None:
         respx.get(f"{WUD_URL}/api/containers").mock(side_effect=httpx.ConnectError("refused"))
-        respx.post(f"{WUD_URL}/api/containers/abc/triggers/dockercompose/deploy").mock(
+        respx.post(f"{WUD_URL}/api/containers/abc123def456/triggers/dockercompose/deploy").mock(
             return_value=httpx.Response(500, json={"message": "boom"})
         )
         with caplog.at_level("DEBUG"):
             with pytest.raises(WudError) as e1:
                 await get_container(_container())
             with pytest.raises(WudError) as e2:
-                await trigger_deploy(_container(), "abc")
+                await trigger_deploy(_container(), "abc123def456")
         assert "s3cret" not in str(e1.value) + str(e2.value)
         assert "s3cret" not in caplog.text
         assert "failed" in caplog.text

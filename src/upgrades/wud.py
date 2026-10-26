@@ -1,6 +1,7 @@
 """Client for What's Up Docker's API: detect pending updates and trigger a deploy."""
 
 import logging
+import re
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -12,6 +13,8 @@ from src.upgrades.config import AdvisedContainer
 
 logger = logging.getLogger(__name__)
 
+MAX_DETAIL_CHARS = 200
+DOCKER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 GET_TIMEOUT_SECONDS = 30.0
 # WUD answers the trigger POST only after the deploy has finished.
 TRIGGER_TIMEOUT_SECONDS = 600.0
@@ -51,6 +54,11 @@ def _dig(record: dict[str, Any], *keys: str) -> Any:
     return value
 
 
+def _clean(text: str) -> str:
+    """Make text from a WUD response safe for an error message: one line, at most 200 chars."""
+    return text.replace("\r", " ").replace("\n", " ")[:MAX_DETAIL_CHARS]
+
+
 def _fail(message: str) -> WudError:
     """Log ``message`` and build the WudError (the caller raises it, chained)."""
     logger.error(message)
@@ -61,7 +69,7 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
     """Fetch WUD's record for ``c`` (matched on ``name``)."""
     url = f"{c.wud_url.rstrip('/')}/api/containers"
     try:
-        async with httpx.AsyncClient(auth=_auth(), timeout=GET_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(auth=_auth(), timeout=GET_TIMEOUT_SECONDS, follow_redirects=False) as client:
             response = await client.get(url)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise _fail(f"WUD request failed for {_where(c)}: {exc!r}") from exc
@@ -73,27 +81,32 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
         raise _fail(f"WUD returned invalid JSON for {_where(c)}") from exc
     if not isinstance(records, list):
         raise _fail(f"WUD returned an unexpected payload for {_where(c)}")
-    for record in records:
-        if isinstance(record, dict) and record.get("name") == c.name:
-            try:
-                return WudContainer(
-                    id=str(record["id"]),
-                    name=c.name,
-                    running_digest=_dig(record, "image", "digest", "value"),
-                    candidate_digest=_dig(record, "result", "digest"),
-                    update_available=bool(record.get("updateAvailable", False)),
-                    update_kind=_dig(record, "updateKind", "kind"),
-                )
-            except (KeyError, ValidationError) as exc:
-                raise _fail(f"WUD returned a malformed record for {_where(c)}: {exc!r}") from exc
+    matches = [r for r in records if isinstance(r, dict) and r.get("name") == c.name]
+    if len(matches) > 1:
+        raise _fail(f"ambiguous: {len(matches)} WUD containers named {c.name} at {urlparse(c.wud_url).hostname}")
+    if matches:
+        record = matches[0]
+        try:
+            return WudContainer(
+                id=str(record["id"]),
+                name=c.name,
+                running_digest=_dig(record, "image", "digest", "value"),
+                candidate_digest=_dig(record, "result", "digest"),
+                update_available=bool(record.get("updateAvailable", False)),
+                update_kind=_dig(record, "updateKind", "kind"),
+            )
+        except (KeyError, ValidationError) as exc:
+            raise _fail(f"WUD returned a malformed record for {_where(c)}: {exc!r}") from exc
     raise _fail(f"WUD does not list {_where(c)}")
 
 
 async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     """Ask WUD to deploy the pending update; returns once WUD reports the deploy finished."""
+    if not DOCKER_ID_RE.fullmatch(wud_id):
+        raise _fail(f"refusing to deploy {_where(c)}: WUD id is not a Docker container id")
     url = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}/triggers/dockercompose/deploy"
     try:
-        async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS, follow_redirects=False) as client:
             response = await client.post(url)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise _fail(f"WUD deploy request failed for {_where(c)}: {exc!r}") from exc
@@ -103,7 +116,7 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     try:
         body = response.json()
         if isinstance(body, dict):
-            detail = str(body.get("message") or body.get("error") or "")
+            detail = _clean(str(body.get("message") or body.get("error") or ""))
     except ValueError:
         pass
     raise _fail(f"WUD deploy failed for {_where(c)}: HTTP {response.status_code} {detail}".rstrip())

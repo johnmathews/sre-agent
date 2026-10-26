@@ -17,3 +17,12 @@ are all 2.x, so a 1.x candidate never matched and was held as an "unreleased bui
 watched tag is major-only (`^v?\d+$`) the releases are now filtered to that major before the cap and ordering, for both
 the running and candidate lookups. Other tags are unchanged. `list_releases` now asks GitHub for 100 per page (its max)
 instead of 30, with no pagination. Tests first, failing before the change.
+
+## Follow-up: release pages under the response cap
+
+The 100-per-page change was wrong in practice: measured 2026-10-27, GitHub's releases response at per_page=100 is
+7.0 MiB for prometheus/prometheus and 9.5 MiB for grafana/loki, over the 5 MiB `MAX_RESPONSE_BYTES` cap, so those
+lookups would have failed every run (about 2.9 MiB at 30). `list_releases` now pages 30 at a time (up to 4 pages, limit
+120), stopping on a short page; a later-page failure logs a warning and returns what was collected, page 1 still raises.
+The major-only tag regex now rejects leading zeros (`01`), and when the watched major has no release the lookup warns and
+falls back to the unscoped list instead of reporting "unreleased" with zero lookups.

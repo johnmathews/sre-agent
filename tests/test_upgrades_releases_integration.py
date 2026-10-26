@@ -87,14 +87,15 @@ async def test_list_releases_skips_prereleases_and_drafts() -> None:
 
 
 @respx.mock
-async def test_list_releases_sends_github_headers_and_limit() -> None:
+async def test_list_releases_sends_github_headers_and_page_size() -> None:
     route = respx.get(RELEASES_URL).mock(return_value=httpx.Response(200, json=[]))
-    await list_releases("example/app", limit=12)
+    await list_releases("example/app")
     request = route.calls.last.request
     assert request.headers["accept"] == "application/vnd.github+json"
     assert request.headers["x-github-api-version"] == "2022-11-28"
     assert "authorization" not in request.headers
-    assert request.url.params["per_page"] == "12"
+    assert request.url.params["per_page"] == "30"
+    assert request.url.params["page"] == "1"
 
 
 @respx.mock
@@ -320,12 +321,6 @@ async def test_major_tag_scopes_to_that_major(monkeypatch: pytest.MonkeyPatch, t
     assert calls == ["3.1.0"]
 
 
-async def test_major_tag_with_no_release_of_that_major_is_unreleased(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = await _lookups(monkeypatch, "x")
-    assert await release_for_digest(_container(tag="1"), DIGEST, [_release("2.0.0", 9, (2, 0, 0))]) is None
-    assert calls == []
-
-
 @pytest.mark.parametrize("tag", ["1.2", "v1.2.3", "main", "1-alpine"])
 async def test_other_tags_are_not_major_scoped(monkeypatch: pytest.MonkeyPatch, tag: str) -> None:
     calls = await _lookups(monkeypatch, "x")
@@ -334,8 +329,72 @@ async def test_other_tags_are_not_major_scoped(monkeypatch: pytest.MonkeyPatch, 
     assert len(calls) == 2
 
 
+def _page(start: int, count: int) -> list[dict[str, Any]]:
+    return [_gh(f"v1.{start + i}.0", 1 + (start + i) % 27) for i in range(count)]
+
+
+def _pages_route(pages: dict[str, httpx.Response]) -> respx.Route:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return pages.get(request.url.params["page"], httpx.Response(200, json=[]))
+
+    return respx.get(RELEASES_URL).mock(side_effect=handler)
+
+
 @respx.mock
-async def test_list_releases_default_fetches_a_full_page() -> None:
-    route = respx.get(RELEASES_URL).mock(return_value=httpx.Response(200, json=[]))
-    await list_releases("example/app")
-    assert route.calls.last.request.url.params["per_page"] == "100"
+async def test_list_releases_stops_on_short_page() -> None:
+    route = _pages_route({"1": httpx.Response(200, json=_page(0, 30)), "2": httpx.Response(200, json=_page(30, 5))})
+    got = await list_releases("example/app")
+    assert len(got) == 35
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_list_releases_collects_up_to_limit() -> None:
+    route = _pages_route({str(n): httpx.Response(200, json=_page(30 * (n - 1), 30)) for n in range(1, 6)})
+    assert len(await list_releases("example/app")) == 120
+    assert route.call_count == 4
+    route.reset()
+    assert len(await list_releases("example/app", limit=40)) == 40
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_list_releases_later_page_failure_returns_earlier_pages(caplog: pytest.LogCaptureFixture) -> None:
+    _pages_route({"1": httpx.Response(200, json=_page(0, 30)), "2": httpx.Response(500)})
+    with caplog.at_level("WARNING"):
+        got = await list_releases("example/app")
+    assert len(got) == 30
+    assert any("page 2 failed" in r.message for r in caplog.records)
+
+
+@respx.mock
+async def test_list_releases_later_page_too_large_returns_earlier_pages() -> None:
+    big = httpx.Response(200, content=b"x" * (5 * 1024 * 1024 + 1))
+    _pages_route({"1": httpx.Response(200, json=_page(0, 30)), "2": big})
+    assert len(await list_releases("example/app")) == 30
+
+
+@respx.mock
+async def test_list_releases_first_page_failure_raises() -> None:
+    _pages_route({"1": httpx.Response(500)})
+    with pytest.raises(ReleaseLookupError, match="500"):
+        await list_releases("example/app")
+
+
+async def test_major_tag_with_no_release_of_that_major_falls_back(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = await _lookups(monkeypatch, "2.0.0")
+    with caplog.at_level("WARNING"):
+        found = await release_for_digest(_container(tag="1"), DIGEST, [_release("2.0.0", 9, (2, 0, 0))])
+    assert found is not None
+    assert found.tag == "2.0.0"
+    assert calls == ["2.0.0"]
+    assert any("falling back" in r.message and "tag 1" in r.message for r in caplog.records)
+
+
+async def test_leading_zero_tag_is_not_a_major_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = await _lookups(monkeypatch, "x")
+    releases = [_release("2.0.0", 9, (2, 0, 0)), _release("1.0.0", 8, (1, 0, 0))]
+    assert await release_for_digest(_container(tag="01"), DIGEST, releases) is None
+    assert len(calls) == 2

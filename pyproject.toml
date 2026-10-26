@@ -19,7 +19,7 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "claude-agent-sdk>=0.1.51",
     "fastmcp>=3.2",
-    "pyjwt[crypto]>=2.9",
+    "pyjwt[crypto]>=2.10.1",
 ]
 
 [dependency-groups]

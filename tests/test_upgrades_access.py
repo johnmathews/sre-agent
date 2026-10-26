@@ -1,5 +1,6 @@
 """Tests for Cloudflare Access JWT verification (keys generated in-test, JWKS endpoint mocked with respx)."""
 
+import json
 import logging
 import time
 from collections.abc import Iterator
@@ -10,6 +11,8 @@ import httpx
 import jwt
 import pytest
 import respx
+from cryptography.hazmat.primitives.asymmetric import ec
+from jwt.algorithms import ECAlgorithm
 
 from src.upgrades import access
 from src.upgrades.access import AccessDenied, verify_access_jwt
@@ -23,11 +26,9 @@ K2 = Signer("k2")
 def _env(mock_settings: Any) -> Iterator[None]:
     mock_settings.cf_access_team_domain = TEAM
     mock_settings.cf_access_aud = AUD
-    access._jwks_cache.clear()
-    access._logged_config_errors.clear()
+    access._reset_state()
     yield
-    access._jwks_cache.clear()
-    access._logged_config_errors.clear()
+    access._reset_state()
 
 
 def _certs(*signers: Signer) -> respx.Route:
@@ -156,8 +157,10 @@ async def test_unknown_kid_refetches_once_and_succeeds() -> None:
     route = respx.get(CERTS_URL).mock(
         side_effect=[httpx.Response(200, json=jwks(K1)), httpx.Response(200, json=jwks(K1, K2))]
     )
-    assert await verify_access_jwt(K1.token()) == EMAIL
-    assert await verify_access_jwt(K2.token()) == EMAIL  # rotated key: one refetch
+    with patch.object(access, "_monotonic", return_value=1000.0):
+        assert await verify_access_jwt(K1.token()) == EMAIL
+    with patch.object(access, "_monotonic", return_value=1061.0):
+        assert await verify_access_jwt(K2.token()) == EMAIL  # rotated key: one refetch
     assert route.call_count == 2
 
 
@@ -165,10 +168,86 @@ async def test_unknown_kid_refetches_once_and_succeeds() -> None:
 @respx.mock
 async def test_unknown_kid_after_refetch_denied_with_a_single_refetch() -> None:
     route = _certs(K1)
-    await verify_access_jwt(K1.token())
-    with pytest.raises(AccessDenied):
+    with patch.object(access, "_monotonic", return_value=1000.0):
+        await verify_access_jwt(K1.token())
+    with patch.object(access, "_monotonic", return_value=1061.0), pytest.raises(AccessDenied):
         await verify_access_jwt(K2.token())
     assert route.call_count == 2
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_forged_kids_refetch_at_most_once_per_minute() -> None:
+    route = _certs(K1)
+    forged = [Signer(f"forged-{i}").token() for i in range(3)]
+    with patch.object(access, "_monotonic", return_value=1000.0):
+        await verify_access_jwt(K1.token())  # the TTL fetch counts as the last fetch
+    for t in (1001.0, 1030.0, 1059.0):
+        with patch.object(access, "_monotonic", return_value=t):
+            for token in forged:
+                with pytest.raises(AccessDenied):
+                    await verify_access_jwt(token)
+    assert route.call_count == 1
+    with patch.object(access, "_monotonic", return_value=1060.0):
+        for token in forged:
+            with pytest.raises(AccessDenied):
+                await verify_access_jwt(token)
+    assert route.call_count == 2  # one refetch, then the floor applies again
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_first_request_with_unknown_kid_fetches_once() -> None:
+    route = _certs(K1)
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(K2.token())
+    assert route.call_count == 1
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_token_without_kid_denied() -> None:
+    route = _certs(K1)
+    token = jwt.encode(K1.claims(), K1.key, algorithm="RS256")
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(token)
+    assert route.call_count == 0
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_aud_as_plain_string() -> None:
+    _certs(K1)
+    assert await verify_access_jwt(K1.token(aud=AUD)) == EMAIL
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(K1.token(aud="some-other-app"))
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_iat_in_the_future_beyond_leeway_denied() -> None:
+    _certs(K1)
+    now = int(time.time())
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(K1.token(iat=now + 300, exp=now + 900))
+    assert await verify_access_jwt(K1.token(iat=now + 30, exp=now + 900)) == EMAIL  # within leeway
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_jwks_mixing_key_types_uses_the_rsa_key() -> None:
+    ec_jwk = json.loads(ECAlgorithm.to_jwk(ec.generate_private_key(ec.SECP256R1()).public_key()))
+    ec_jwk.update(kid="ec1", alg="ES256")
+    oct_jwk = {"kty": "oct", "k": "c2VjcmV0", "kid": "oct1", "alg": "HS256"}
+    respx.get(CERTS_URL).mock(return_value=httpx.Response(200, json={"keys": [ec_jwk, oct_jwk, K1.jwk()]}))
+    assert await verify_access_jwt(K1.token()) == EMAIL
+    hs = jwt.encode(K1.claims(), "s" * 40, algorithm="HS256", headers={"kid": "oct1"})
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(hs)
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    es = jwt.encode(K1.claims(), ec_key, algorithm="ES256", headers={"kid": "ec1"})
+    with pytest.raises(AccessDenied):
+        await verify_access_jwt(es)
 
 
 @pytest.mark.integration

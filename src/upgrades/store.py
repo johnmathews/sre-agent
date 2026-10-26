@@ -198,11 +198,17 @@ def latest_verdict(conn: sqlite3.Connection, container: str, digest: str) -> Ver
 
 
 def latest_verdict_for_container(conn: sqlite3.Connection, container: str) -> VerdictRecord | None:
-    """Most recent verdict for a container across all candidate digests, or None.
+    """Most recent approvable verdict for a container across all candidate digests, or None.
 
-    An unreadable newest row is logged and yields None (callers treat that as "not this verdict").
+    Only verdicts that went out in a batch with verdict upgrade or needs_you count, so a dry-run row or a hold can
+    never supersede a live approval link. An unreadable newest row is logged and yields None (callers treat that as
+    "not this verdict").
     """
-    row = conn.execute("SELECT * FROM verdicts WHERE container = ? ORDER BY id DESC LIMIT 1", (container,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM verdicts WHERE container = ? AND batch_id IS NOT NULL AND verdict IN ('upgrade', 'needs_you')"
+        " ORDER BY id DESC LIMIT 1",
+        (container,),
+    ).fetchone()
     if row is None:
         return None
     parsed = _parse_rows([row], _row_to_verdict, "verdict")
@@ -410,6 +416,15 @@ def pending_verifications(conn: sqlite3.Connection) -> list[DeployRecord]:
     return _parse_rows(rows, _row_to_deploy, "deploy")
 
 
+def deploys_for_verdicts(conn: sqlite3.Connection, verdict_ids: list[int]) -> list[DeployRecord]:
+    """Deploys of the given verdicts, oldest first (unreadable rows are logged and skipped)."""
+    if not verdict_ids:
+        return []
+    marks = ",".join("?" * len(verdict_ids))
+    rows = conn.execute(f"SELECT * FROM deploys WHERE verdict_id IN ({marks}) ORDER BY id", verdict_ids).fetchall()
+    return _parse_rows(rows, _row_to_deploy, "deploy")
+
+
 def deploys_since(conn: sqlite3.Connection, since: datetime) -> list[DeployRecord]:
     """Deploys started at or after `since`, oldest first (unreadable rows are logged and skipped)."""
     rows = conn.execute(
@@ -425,6 +440,7 @@ __all__ = [
     "connect",
     "consume_batch",
     "create_batch",
+    "deploys_for_verdicts",
     "deploys_since",
     "finish_deploy",
     "first_seen",

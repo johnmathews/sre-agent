@@ -360,12 +360,44 @@ def test_finish_deploy_is_compare_and_set(conn: sqlite3.Connection) -> None:
         store.finish_deploy(conn, did, "bogus", None, "")  # type: ignore[arg-type]
 
 
-def test_latest_verdict_for_container_is_newest_across_digests(conn: sqlite3.Connection) -> None:
+def test_latest_verdict_for_container_is_newest_batched_across_digests(conn: sqlite3.Connection) -> None:
     assert store.latest_verdict_for_container(conn, "prometheus") is None
-    _verdict(conn, "prometheus", "sha256:one")
+    first = _verdict(conn, "prometheus", "sha256:one")
     newest = _verdict(conn, "prometheus", "sha256:two")
-    _verdict(conn, "grafana", "sha256:three")
+    other = _verdict(conn, "grafana", "sha256:three")
+    assert store.latest_verdict_for_container(conn, "prometheus") is None  # nothing batched yet
+    store.create_batch(conn, [first, newest, other], T0, timedelta(hours=48))
     latest = store.latest_verdict_for_container(conn, "prometheus")
     assert latest is not None
     assert latest.id == newest
     assert latest.candidate_digest == "sha256:two"
+
+
+def test_dry_run_rows_and_holds_never_supersede(conn: sqlite3.Connection) -> None:
+    live = _verdict(conn, "prometheus", "sha256:one")
+    store.create_batch(conn, [live], T0, timedelta(hours=48))
+    _verdict(conn, "prometheus", "sha256:two")  # dry run: never batched
+    held = store.save_verdict(
+        conn,
+        container="prometheus",
+        running_digest="sha256:old",
+        candidate_digest="sha256:three",
+        running_version=None,
+        candidate_version=None,
+        verdict="hold",
+        summary="unreleased build",
+        details={},
+        now=T0,
+    )
+    store.create_batch(conn, [held], T0, timedelta(hours=48))
+    latest = store.latest_verdict_for_container(conn, "prometheus")
+    assert latest is not None
+    assert latest.id == live
+
+
+def test_deploys_for_verdicts(conn: sqlite3.Connection) -> None:
+    a, b, c = _verdict(conn, "a"), _verdict(conn, "b"), _verdict(conn, "c")
+    da = store.save_deploy(conn, verdict_id=a, now=T0, outcome="skipped", running_digest=None, detail="x")
+    store.save_deploy(conn, verdict_id=c, now=T0, outcome="failed", running_digest=None, detail="y")
+    assert [d.id for d in store.deploys_for_verdicts(conn, [a, b])] == [da]
+    assert store.deploys_for_verdicts(conn, []) == []

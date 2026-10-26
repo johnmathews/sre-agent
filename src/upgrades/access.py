@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 ALGORITHM = "RS256"
 JWKS_TTL_SECONDS = 3600.0
+# An unknown kid triggers a refetch at most this often, counted from the last fetch attempt of any kind.
+JWKS_MIN_REFETCH_SECONDS = 60.0
 JWKS_TIMEOUT_SECONDS = 10.0
 JWKS_MAX_BYTES = 256 * 1024
 LEEWAY_SECONDS = 60
@@ -31,6 +33,8 @@ _TEAM_DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudf
 
 # team domain -> (monotonic fetch time, kid -> key)
 _jwks_cache: dict[str, tuple[float, dict[str, jwt.PyJWK]]] = {}
+# team domain -> monotonic time of the last fetch attempt (successful or not)
+_last_fetch_attempt: dict[str, float] = {}
 _logged_config_errors: set[str] = set()
 
 
@@ -40,6 +44,13 @@ class AccessDenied(Exception):
 
 def _monotonic() -> float:
     return time.monotonic()
+
+
+def _reset_state() -> None:
+    """Forget cached keys, fetch times and logged config errors (tests)."""
+    _jwks_cache.clear()
+    _last_fetch_attempt.clear()
+    _logged_config_errors.clear()
 
 
 def _config_error(reason: str) -> AccessDenied:
@@ -82,19 +93,24 @@ async def _fetch_keys(team: str) -> dict[str, jwt.PyJWK]:
     return keys
 
 
+async def _fetch_and_cache(team: str) -> dict[str, jwt.PyJWK]:
+    _last_fetch_attempt[team] = _monotonic()
+    keys = await _fetch_keys(team)
+    _jwks_cache[team] = (_monotonic(), keys)
+    return keys
+
+
 async def _key_for(team: str, kid: str) -> jwt.PyJWK:
-    """The key for ``kid``: from the 1 h cache, else a fetch; an unknown ``kid`` triggers one refetch (rotation)."""
+    """The key for ``kid``: from the 1 h cache, else a fetch. An unknown ``kid`` (key rotation) triggers a refetch,
+    but at most once per ``JWKS_MIN_REFETCH_SECONDS`` since the last fetch attempt, so forged kids cannot make every
+    request call out to Cloudflare."""
     cached = _jwks_cache.get(team)
-    fetched_now = False
     if cached is None or _monotonic() - cached[0] >= JWKS_TTL_SECONDS:
-        keys = await _fetch_keys(team)
-        _jwks_cache[team] = (_monotonic(), keys)
-        fetched_now = True
+        keys = await _fetch_and_cache(team)
     else:
         keys = cached[1]
-    if kid not in keys and not fetched_now:
-        keys = await _fetch_keys(team)
-        _jwks_cache[team] = (_monotonic(), keys)
+    if kid not in keys and _monotonic() - _last_fetch_attempt.get(team, float("-inf")) >= JWKS_MIN_REFETCH_SECONDS:
+        keys = await _fetch_and_cache(team)
     if kid not in keys:
         raise AccessDenied("unknown key id")
     return keys[kid]

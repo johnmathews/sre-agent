@@ -116,11 +116,37 @@ async def _attempt(
         return "skipped", running, ALREADY_RUNNING
     if record.candidate_digest != verdict.candidate_digest:
         return "skipped", running, UPSTREAM_MOVED
+    # Upstream can still move between this read and the trigger (WUD deploys whatever it then considers the
+    # candidate). That window is covered after the fact: verification compares the running digest with the reviewed
+    # one and emails at once on a mismatch.
     try:
         await wud.trigger_deploy(container, record.id)
     except wud.WudError:
         return "failed", running, "WUD deploy trigger failed (WudError)"
     return "pending_verify", running, TRIGGERED
+
+
+def _save(
+    conn: sqlite3.Connection, verdict: VerdictRecord, outcome: DeployOutcome, running: str | None, detail: str
+) -> DeployRecord | None:
+    """Persist one outcome. If that fails (e.g. after WUD already deployed), still try to leave a ``failed`` row."""
+    try:
+        deploy_id = store.save_deploy(
+            conn, verdict_id=verdict.id, now=datetime.now(UTC), outcome=outcome, running_digest=running, detail=detail
+        )
+    except Exception as exc:
+        logger.exception("Could not record the %s deploy of %s (verdict %s)", outcome, verdict.container, verdict.id)
+        outcome, detail = "failed", f"deploy recorded late ({type(exc).__name__})"
+        try:
+            deploy_id = store.save_deploy(
+                conn, verdict_id=verdict.id, now=datetime.now(UTC), outcome=outcome, running_digest=None, detail=detail
+            )
+        except Exception:
+            logger.exception("Could not record any deploy row for %s (verdict %s)", verdict.container, verdict.id)
+            return None
+    log = logger.info if outcome in {"pending_verify", "skipped"} else logger.error
+    log("Deploy %s of %s (verdict %s): %s, %s", deploy_id, verdict.container, verdict.id, outcome, detail)
+    return store.get_deploy(conn, deploy_id)
 
 
 async def _deploy_one(
@@ -129,62 +155,91 @@ async def _deploy_one(
     containers: dict[str, AdvisedContainer],
     allowlist_error: str | None,
     delay_seconds: int,
-) -> DeployRecord:
+) -> DeployRecord | None:
     outcome: DeployOutcome
     try:
         outcome, running, detail = await _attempt(conn, verdict, containers, allowlist_error)
     except Exception as exc:
         logger.exception("Deploy of %s (verdict %s) crashed", verdict.container, verdict.id)
         outcome, running, detail = "failed", None, f"deploy crashed ({type(exc).__name__})"
-    deploy_id = store.save_deploy(
-        conn, verdict_id=verdict.id, now=datetime.now(UTC), outcome=outcome, running_digest=running, detail=detail
-    )
-    log = logger.info if outcome in {"pending_verify", "skipped"} else logger.error
-    log("Deploy %s of %s (verdict %s): %s, %s", deploy_id, verdict.container, verdict.id, outcome, detail)
-    if outcome == "pending_verify":
-        _keep(_verify_later(deploy_id, delay_seconds))
-    else:  # verification counts the verified outcomes; deploys that never reached WUD are counted here
-        UPGRADE_DEPLOYS_TOTAL.labels(outcome=outcome).inc()
-    saved = store.get_deploy(conn, deploy_id)
+    saved = _save(conn, verdict, outcome, running, detail)
     if saved is None:
-        msg = f"deploy {deploy_id} vanished after it was saved"
-        raise LookupError(msg)
+        return None
+    if saved.outcome == "pending_verify":
+        _keep(_verify_later(saved.id, delay_seconds))
+    else:  # verification counts the verified outcomes; deploys that never reached verification are counted here
+        UPGRADE_DEPLOYS_TOTAL.labels(outcome=saved.outcome).inc()
     return saved
 
 
-async def deploy_approved(batch_id: str, approved_ids: list[int]) -> list[DeployRecord]:
-    """Record a decision for every verdict of the batch and deploy the ticked ones, one at a time.
+def record_decisions(conn: sqlite3.Connection, batch_id: str, approved_ids: list[int], now: datetime) -> None:
+    """Record approved (ticked) or not for every verdict of the batch."""
+    approved = set(approved_ids)
+    for v in store.get_batch_verdicts(conn, batch_id):
+        store.record_decision(conn, v.id, v.id in approved, now)
 
-    The batch must already be consumed by the caller. Raises ``InvalidSelection`` (before writing anything) when
-    the ids are not deployable members of the batch.
+
+def record_missing(verdict_ids: list[int], detail: str) -> None:
+    """Write a ``failed`` row for every given verdict that has no deploy row yet (after a crash)."""
+    try:
+        conn = store.connect(get_settings().upgrade_advisor_db_path)
+        try:
+            have = {d.verdict_id for d in store.deploys_for_verdicts(conn, verdict_ids)}
+            for vid in verdict_ids:
+                if vid in have:
+                    continue
+                deploy_id = store.save_deploy(
+                    conn, verdict_id=vid, now=datetime.now(UTC), outcome="failed", running_digest=None, detail=detail
+                )
+                UPGRADE_DEPLOYS_TOTAL.labels(outcome="failed").inc()
+                logger.error("Deploy %s (verdict %s): failed, %s", deploy_id, vid, detail)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Could not record failed deploys for verdicts %s", verdict_ids)
+
+
+async def deploy_approved(batch_id: str, approved_ids: list[int]) -> list[DeployRecord]:
+    """Deploy the ticked verdicts of an already consumed batch, one at a time (decisions are recorded by the caller).
+
+    Re-checks the selection (``InvalidSelection`` before anything is written) and the R23 guards per item. A failure
+    in one item is recorded as ``failed`` and the next item still runs.
     """
     settings = get_settings()
     async with _deploy_lock():
         conn = store.connect(settings.upgrade_advisor_db_path)
         try:
             validate_selection(conn, batch_id, approved_ids)
-            verdicts = store.get_batch_verdicts(conn, batch_id)
             approved = set(approved_ids)
-            decided_at = datetime.now(UTC)
-            for v in verdicts:
-                store.record_decision(conn, v.id, v.id in approved, decided_at)
+            verdicts = [v for v in store.get_batch_verdicts(conn, batch_id) if v.id in approved]
             containers, allowlist_error = _load_containers()
-            return [
-                await _deploy_one(conn, v, containers, allowlist_error, settings.upgrade_advisor_verify_delay_seconds)
-                for v in verdicts
-                if v.id in approved
-            ]
+            records: list[DeployRecord] = []
+            for v in verdicts:
+                try:
+                    record = await _deploy_one(
+                        conn, v, containers, allowlist_error, settings.upgrade_advisor_verify_delay_seconds
+                    )
+                except Exception as exc:
+                    logger.exception("Deploy of %s (verdict %s) crashed", v.container, v.id)
+                    record_missing([v.id], f"deploy crashed ({type(exc).__name__})")
+                    continue
+                if record is not None:
+                    records.append(record)
+            return records
         finally:
             conn.close()
 
 
-def _log_crash(task: asyncio.Task[list[DeployRecord]]) -> None:
-    if not task.cancelled() and (exc := task.exception()) is not None:
-        logger.error("Deploy run crashed: %s", type(exc).__name__, exc_info=exc)
+async def _run(batch_id: str, approved_ids: list[int]) -> list[DeployRecord]:
+    try:
+        return await deploy_approved(batch_id, approved_ids)
+    except Exception as exc:
+        logger.exception("Deploy run for batch %s crashed", batch_id)
+        record_missing(approved_ids, f"deploy run crashed ({type(exc).__name__})")
+        return []
 
 
 def start_deploy(batch_id: str, approved_ids: list[int]) -> asyncio.Task[list[DeployRecord]]:
-    """Run ``deploy_approved`` as a task that finishes even if the HTTP request is cancelled (client gone)."""
-    task = _keep(deploy_approved(batch_id, approved_ids))
-    task.add_done_callback(_log_crash)
-    return task
+    """Deploy in the background (the approval page returns at once). A crash leaves a ``failed`` row per ticked
+    verdict that has none."""
+    return _keep(_run(batch_id, approved_ids))

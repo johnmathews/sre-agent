@@ -2,6 +2,8 @@
 
 import ast
 import asyncio
+import logging
+import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Iterator
@@ -183,11 +185,28 @@ async def _post(
     client: httpx.AsyncClient, batch_id: str, token: str, ids: list[int | str], headers: dict[str, str] | None = None
 ) -> httpx.Response:
     body = [("token", token)] + [("verdict_id", str(i)) for i in ids]
-    return await client.post(
+    resp = await client.post(
         f"/upgrades/batches/{batch_id}",
-        content=httpx.QueryParams(body).__str__(),
+        content=str(httpx.QueryParams(body)),
         headers={**FORM, **(headers if headers is not None else _auth())},
     )
+    await _drain()
+    return resp
+
+
+async def _drain() -> None:
+    """Wait for the background deploys (and the delayed verifications they schedule) to finish."""
+    while deploy._background_tasks:
+        await asyncio.gather(*list(deploy._background_tasks))
+        await asyncio.sleep(0)  # let the done-callbacks remove finished tasks from the set
+
+
+def _usable(settings: Any, batch_id: str, token: str) -> bool:
+    conn = _conn(settings)
+    try:
+        return store.check_batch(conn, batch_id, token, datetime.now(UTC)) == "ok"
+    finally:
+        conn.close()
 
 
 def _deploys(settings: Any) -> list[Any]:
@@ -214,7 +233,7 @@ def _assert_security_headers(resp: httpx.Response) -> None:
     assert resp.headers["Cache-Control"] == "no-store"
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Content-Security-Policy"] == (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
     assert resp.headers["Referrer-Policy"] == "no-referrer"
 
@@ -364,15 +383,45 @@ async def test_post_deploys_ticked_items_only(
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 200
     _assert_security_headers(resp)
+    assert f"Approved by {EMAIL}. Deploying 1 update(s); results arrive by email." in resp.text
+    assert "prometheus" in resp.text and "openwebui" not in resp.text
     assert fake_wud.triggered == ["prometheus"]
     assert _decisions(mock_settings) == {up: True, need: False}
     deploys = _deploys(mock_settings)
     assert [(d.verdict_id, d.outcome) for d in deploys] == [(up, "pending_verify")]
-    assert EMAIL in resp.text
-    assert "prometheus" in resp.text and "openwebui" in resp.text
-    await _settle()
     verify_mock.assert_awaited_once_with(deploys[0].id)
     assert not deploy._background_tasks  # finished tasks are released
+
+
+@pytest.mark.integration
+async def test_post_returns_before_the_deploys_finish(
+    client: httpx.AsyncClient, mock_settings: Any, verify_mock: AsyncMock
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    release = asyncio.Event()
+    fake = FakeWud()
+    fake.set("prometheus")
+
+    async def blocking_trigger(c: Any, wud_id: str) -> None:
+        await release.wait()
+        fake.triggered.append(c.name)
+
+    with (
+        patch.object(wud, "get_container", side_effect=fake.get_container),
+        patch.object(wud, "trigger_deploy", side_effect=blocking_trigger),
+    ):
+        resp = await client.post(
+            f"/upgrades/batches/{bid}",
+            content=str(httpx.QueryParams([("token", token), ("verdict_id", str(up))])),
+            headers={**FORM, **_auth()},
+        )
+        assert resp.status_code == 200
+        assert fake.triggered == [] and _decisions(mock_settings) == {up: True}
+        release.set()
+        await _drain()
+    assert fake.triggered == ["prometheus"]
+    assert [d.outcome for d in _deploys(mock_settings)] == ["pending_verify"]
 
 
 @pytest.mark.integration
@@ -462,7 +511,6 @@ async def test_post_skips_item_when_upstream_moved(
     outcomes = {d.verdict_id: (d.outcome, d.detail) for d in _deploys(mock_settings)}
     assert outcomes[moved] == ("skipped", "upstream moved since review; re-reviewed next run")
     assert outcomes[fine][0] == "pending_verify"
-    assert "upstream moved since review" in resp.text
     assert _metric("skipped") == before + 1
 
 
@@ -479,6 +527,21 @@ async def test_post_skips_superseded_verdict(
     assert fake_wud.triggered == []
     [d] = _deploys(mock_settings)
     assert (d.verdict_id, d.outcome, d.detail) == (old, "skipped", "superseded by a newer review")
+
+
+@pytest.mark.integration
+async def test_dry_run_rows_and_holds_do_not_supersede_a_live_link(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    live = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [live])
+    _verdict(mock_settings, "prometheus", candidate=NEWER)  # a dry run: saved, never batched
+    held = _verdict(mock_settings, "prometheus", "hold", details={}, candidate=NEWER)
+    _batch(mock_settings, [held])
+    resp = await _post(client, bid, token, [live])
+    assert resp.status_code == 200
+    assert fake_wud.triggered == ["prometheus"]
+    assert [(d.verdict_id, d.outcome) for d in _deploys(mock_settings)] == [(live, "pending_verify")]
 
 
 @pytest.mark.integration
@@ -509,10 +572,89 @@ async def test_post_trigger_failure_is_failed_and_others_continue(
     outcomes = {d.verdict_id: (d.outcome, d.detail) for d in _deploys(mock_settings)}
     assert outcomes[bad] == ("failed", "WUD deploy trigger failed (WudError)")
     assert outcomes[good][0] == "pending_verify"
-    assert "secret detail" not in resp.text
     assert _metric("failed") == before + 1
-    await _settle()
     assert verify_mock.await_count == 1  # only the triggered deploy is verified
+
+
+@pytest.mark.integration
+async def test_unexpected_crash_in_one_item_does_not_stop_the_next(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    bad = _verdict(mock_settings, "prometheus")
+    good = _verdict(mock_settings, "openwebui")
+    bid, token = _batch(mock_settings, [bad, good])
+    real = fake_wud.trigger_deploy
+
+    async def trigger(c: Any, wud_id: str) -> None:
+        if c.name == "prometheus":
+            raise RuntimeError("bug")
+        await real(c, wud_id)
+
+    with patch.object(wud, "trigger_deploy", side_effect=trigger):
+        await _post(client, bid, token, [bad, good])
+    outcomes = {d.verdict_id: (d.outcome, d.detail) for d in _deploys(mock_settings)}
+    assert outcomes[bad] == ("failed", "deploy crashed (RuntimeError)")
+    assert outcomes[good][0] == "pending_verify"
+    assert fake_wud.triggered == ["openwebui"]
+
+
+@pytest.mark.integration
+async def test_record_failure_after_a_trigger_leaves_a_late_failed_row(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    vid = _verdict(mock_settings, "prometheus")
+    bid, token = _batch(mock_settings, [vid])
+    real_save = store.save_deploy
+
+    def flaky_save(conn: Any, **kwargs: Any) -> int:
+        if kwargs["outcome"] == "pending_verify":
+            raise sqlite3.OperationalError("database is locked")
+        return real_save(conn, **kwargs)
+
+    with patch.object(store, "save_deploy", side_effect=flaky_save):
+        await _post(client, bid, token, [vid])
+    assert fake_wud.triggered == ["prometheus"]
+    [d] = _deploys(mock_settings)
+    assert (d.outcome, d.detail) == ("failed", "deploy recorded late (OperationalError)")
+    verify_mock.assert_not_awaited()
+
+
+@pytest.mark.integration
+async def test_background_crash_leaves_a_failed_row_per_ticked_verdict(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    a = _verdict(mock_settings, "prometheus")
+    b = _verdict(mock_settings, "openwebui")
+    c = _verdict(mock_settings, "grafana", "needs_you")
+    bid, token = _batch(mock_settings, [a, b, c])
+    before = _metric("failed")
+    with patch.object(deploy, "_load_containers", side_effect=RuntimeError("boom")):
+        resp = await _post(client, bid, token, [a, b])
+    assert resp.status_code == 200
+    assert fake_wud.triggered == []
+    rows = sorted((d.verdict_id, d.outcome, d.detail) for d in _deploys(mock_settings))
+    assert rows == [
+        (a, "failed", "deploy run crashed (RuntimeError)"),
+        (b, "failed", "deploy run crashed (RuntimeError)"),
+    ]
+    assert _metric("failed") == before + 2
+    assert not _usable(mock_settings, bid, token)
+
+
+@pytest.mark.integration
+async def test_crash_after_consume_leaves_a_failed_row_per_ticked_verdict(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    a = _verdict(mock_settings, "prometheus")
+    b = _verdict(mock_settings, "openwebui")
+    bid, token = _batch(mock_settings, [a, b])
+    with patch.object(deploy, "record_decisions", side_effect=RuntimeError("boom")):
+        resp = await _post(client, bid, token, [a, b])
+    assert resp.status_code == 500
+    _assert_security_headers(resp)
+    assert fake_wud.triggered == []
+    rows = sorted((d.verdict_id, d.outcome, d.detail) for d in _deploys(mock_settings))
+    assert rows == [(a, "failed", "approval crashed (RuntimeError)"), (b, "failed", "approval crashed (RuntimeError)")]
 
 
 @pytest.mark.integration
@@ -553,6 +695,7 @@ async def test_post_rejects_verdict_id_from_another_batch(
     _assert_security_headers(resp)
     assert fake_wud.triggered == []
     assert _deploys(mock_settings) == [] and _decisions(mock_settings) == {}
+    assert _usable(mock_settings, bid, token)  # a rejected request does not spend the link
 
 
 @pytest.mark.integration
@@ -566,6 +709,17 @@ async def test_post_rejects_a_hold_verdict(
     assert resp.status_code == 400
     assert fake_wud.triggered == []
     assert _deploys(mock_settings) == [] and _decisions(mock_settings) == {}
+    assert _usable(mock_settings, bid, token)
+
+
+@pytest.mark.integration
+async def test_post_wrong_token_is_403_even_with_bad_ids(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    assert (await _post(client, bid, "guess", ["abc", 99999])).status_code == 403
+    assert _usable(mock_settings, bid, token)
 
 
 @pytest.mark.integration
@@ -578,9 +732,7 @@ async def test_post_rejects_non_integer_ids_before_consuming(
     resp = await _post(client, bid, token, [up, bad])
     assert resp.status_code == 400
     assert fake_wud.triggered == []
-    conn = _conn(mock_settings)
-    assert store.check_batch(conn, bid, token, datetime.now(UTC)) == "ok"
-    conn.close()
+    assert _usable(mock_settings, bid, token)
 
 
 @pytest.mark.integration
@@ -683,21 +835,49 @@ def test_main_app_serves_the_upgrade_routes() -> None:
 FORBIDDEN = {"src.upgrades.deploy", "src.upgrades.wud", "src.upgrades.verify", "src.upgrades.job", "src.api.upgrades"}
 
 
+def _package_of(path: Path) -> list[str]:
+    """The package a module's relative imports resolve against (for ``__init__.py``, the package itself)."""
+    return list(path.relative_to(REPO).with_suffix("").parts)[:-1]
+
+
 def _imported_modules(path: Path) -> set[str]:
+    """Every module an AST import names, with relative imports resolved against the file's package."""
     tree = ast.parse(path.read_text(), filename=str(path))
+    package = _package_of(path)
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            found.add(node.module)
-            found.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[: len(package) - node.level + 1] if node.level else []
+            module = ".".join([*base, *(node.module.split(".") if node.module else [])])
+            if module:
+                found.add(module)
+            found.update(f"{module}.{alias.name}" if module else alias.name for alias in node.names)
     return found
 
 
+def test_relative_imports_are_resolved() -> None:
+    pkg = REPO / "src" / "agent" / "tools"
+    fake = pkg / "_probe_does_not_exist.py"
+    tree_text = "from ...upgrades import deploy\nfrom ..upgrades_x import y\nfrom . import z\n"
+    with patch.object(Path, "read_text", return_value=tree_text):
+        found = _imported_modules(fake)
+    assert "src.upgrades.deploy" in found
+    assert "src.agent.upgrades_x.y" in found
+    assert "src.agent.tools.z" in found
+
+
+AGENT_SURFACE = [
+    *sorted((REPO / "src" / "agent").rglob("*.py")),
+    REPO / "src" / "api" / "mcp_server.py",
+    REPO / "src" / "memory" / "tools.py",
+]
+
+
 def test_deploy_is_not_an_agent_or_mcp_tool() -> None:
-    sources = [*sorted((REPO / "src" / "agent").rglob("*.py")), REPO / "src" / "api" / "mcp_server.py"]
-    assert len(sources) > 5
+    sources = AGENT_SURFACE
+    assert len(sources) > 5 and all(p.exists() for p in sources)
     for path in sources:
         hits = _imported_modules(path) & FORBIDDEN
         assert not hits, f"{path.relative_to(REPO)} imports {sorted(hits)}"
@@ -712,10 +892,65 @@ def test_agent_and_mcp_do_not_load_the_deploy_stack_transitively() -> None:
         "import importlib, pkgutil, sys\n"
         "import src.agent.tools as tools\n"
         "for m in pkgutil.iter_modules(tools.__path__): importlib.import_module(f'src.agent.tools.{m.name}')\n"
-        "import src.agent.mcp_tools, src.api.mcp_server\n"
+        "import src.agent.mcp_tools, src.api.mcp_server, src.memory.tools\n"
         f"bad = sorted(set(sys.modules) & set({sorted(FORBIDDEN)!r}))\n"
         "print(bad)\n"
         "sys.exit(1 if bad else 0)\n"
     )
     result = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The link token never reaches uvicorn's access log
+# ---------------------------------------------------------------------------
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("10.0.0.15:53412", "GET", path, "1.1", 200),
+        None,
+    )
+
+
+def test_access_log_redacts_the_approval_token() -> None:
+    from src.api.upgrades import RedactApprovalToken
+
+    record = _access_record("/upgrades/batches/AbC-123_x?token=s3cr3t-T0ken_value&x=1")
+    assert RedactApprovalToken().filter(record) is True  # redact, never drop
+    message = record.getMessage()
+    assert "s3cr3t" not in message
+    assert message == '10.0.0.15:53412 - "GET /upgrades/batches/AbC-123_x?token=REDACTED&x=1 HTTP/1.1" 200'
+
+    record = _access_record("/upgrades/batches/AbC?x=1&token=abc")
+    RedactApprovalToken().filter(record)
+    assert record.getMessage().endswith('"GET /upgrades/batches/AbC?x=1&token=REDACTED HTTP/1.1" 200')
+
+    other = _access_record("/conversations?token=keep")
+    RedactApprovalToken().filter(other)
+    assert "token=keep" in other.getMessage()
+
+
+def test_access_log_filter_is_installed_once() -> None:
+    from src.api.upgrades import RedactApprovalToken, install_access_log_redaction
+
+    install_access_log_redaction()
+    install_access_log_redaction()
+    filters = [f for f in logging.getLogger("uvicorn.access").filters if isinstance(f, RedactApprovalToken)]
+    assert len(filters) == 1
+
+
+def test_uvicorn_logging_config_keeps_the_filter() -> None:
+    import logging.config
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    from src.api.upgrades import RedactApprovalToken
+
+    logging.config.dictConfig(LOGGING_CONFIG)
+    assert any(isinstance(f, RedactApprovalToken) for f in logging.getLogger("uvicorn.access").filters)

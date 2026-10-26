@@ -509,7 +509,8 @@ warning naming the missing settings. Code: `src/upgrades/`, approval endpoint `s
   build"). `min_age` (default 72 h) counts from the advisor's own first sighting of the candidate digest, with 1 h
   of slack (eligible at `first_seen + min_age - 1 h`): the daily runs start seconds apart, and without it the run
   three days later could land just short of 72 h and hold the candidate another whole day. If no release matched
-  and any registry tag lookup failed, the item is an error, not an "unreleased build".
+  and any registry tag lookup failed, the item is an error, not an "unreleased build". When the watched tag is major-only (`1`, `v3`), only releases of that major are considered, before the
+  10-lookup cap, so a maintained back-branch is not crowded out by newer majors.
 - Forced `needs_you`: a major version (or a `0.x` minor) change, a candidate not newer than the running version, an
   unknown running version, a failed review, and an ambiguous or unparseable model answer (anything but exactly one
   JSON object).

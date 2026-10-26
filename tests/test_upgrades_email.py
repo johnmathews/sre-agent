@@ -96,5 +96,31 @@ async def test_scheduler_registers_advisor_job_only_when_configured(mock_setting
 async def test_scheduled_advisor_job_swallows_and_counts_errors() -> None:
     from unittest.mock import AsyncMock, patch
 
-    with patch("src.report.scheduler.run_advisor", AsyncMock(side_effect=RuntimeError("boom"))):
+    from prometheus_client import REGISTRY
+
+    labels = {"status": "error"}
+    before = REGISTRY.get_sample_value("sre_assistant_upgrade_runs_total", labels) or 0.0
+    with patch("src.upgrades.job.run_advisor", AsyncMock(side_effect=RuntimeError("boom"))):
         await sched_mod._scheduled_advisor_job()  # must not raise
+    assert REGISTRY.get_sample_value("sre_assistant_upgrade_runs_total", labels) == before + 1
+
+
+def test_public_base_url_must_be_https() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.config import Settings
+
+    base = {
+        "openai_api_key": "k",
+        "user_timezone": "UTC",
+        "prometheus_url": "http://prom.test",
+        "grafana_url": "http://grafana.test",
+        "grafana_service_account_token": "t",
+    }
+    with pytest.raises(ValidationError, match="must start with https://"):
+        Settings(_env_file=None, upgrade_advisor_public_base_url="http://example.com", **base)  # type: ignore[call-arg]
+    ok = Settings(_env_file=None, upgrade_advisor_public_base_url="https://example.com", **base)  # type: ignore[call-arg]
+    assert ok.upgrade_advisor_public_base_url == "https://example.com"
+    empty = Settings(_env_file=None, upgrade_advisor_public_base_url="", **base)  # type: ignore[call-arg]
+    assert empty.upgrade_advisor_public_base_url == ""

@@ -218,3 +218,98 @@ async def test_yesterdays_deploys_trigger_an_email(env: Any, mocks: dict[str, Ma
     assert summary.outcome_containers
     body = mocks["send"].call_args.args[0]
     assert "alpha: verified with warnings" in body
+
+
+async def test_unreadable_allowlist_path_aborts_with_email(
+    env: Any, mocks: dict[str, MagicMock], tmp_path: Path
+) -> None:
+    env.upgrade_advisor_config_path = str(tmp_path)  # a directory -> IsADirectoryError
+    summary = await run_advisor(now=NOW)
+    assert summary.aborted == "IsADirectoryError"
+    assert mocks["send"].call_args.args[2] == "Upgrade advisor could not run: IsADirectoryError"
+
+
+async def _ready(env: Any) -> None:
+    conn = store.connect(env.upgrade_advisor_db_path)
+    store.first_seen(conn, "alpha", NEW, NOW - timedelta(days=5))
+    conn.close()
+
+
+async def test_email_send_failure_counts_error_and_not_last_success(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    mocks["send"].return_value = False
+    err = _metric("sre_assistant_upgrade_runs_total", {"status": "error"})
+    ok = _metric("sre_assistant_upgrade_runs_total", {"status": "success"})
+    last = _metric("sre_assistant_upgrade_last_success_timestamp")
+    summary = await run_advisor(now=NOW)
+    assert summary.aborted == "EmailNotSent"
+    assert _metric("sre_assistant_upgrade_runs_total", {"status": "error"}) == err + 1
+    assert _metric("sre_assistant_upgrade_runs_total", {"status": "success"}) == ok
+    assert _metric("sre_assistant_upgrade_last_success_timestamp") == last
+
+
+async def test_email_not_configured_counts_error(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    err = _metric("sre_assistant_upgrade_runs_total", {"status": "error"})
+    last = _metric("sre_assistant_upgrade_last_success_timestamp")
+    with patch("src.upgrades.job.is_email_configured", return_value=False):
+        summary = await run_advisor(now=NOW)
+    assert summary.aborted == "EmailNotSent"
+    assert _metric("sre_assistant_upgrade_runs_total", {"status": "error"}) == err + 1
+    assert _metric("sre_assistant_upgrade_last_success_timestamp") == last
+
+
+async def test_verify_pending_failure_is_reported_in_the_email(env: Any, mocks: dict[str, MagicMock]) -> None:
+    mocks["get"].return_value = _wud(available=False)
+    with patch("src.upgrades.job.verify.verify_pending", AsyncMock(side_effect=RuntimeError("secret"))):
+        summary = await run_advisor(now=NOW)
+    assert [(i.container, i.error) for i in summary.items] == [("deploy verification", "RuntimeError")]
+    body = mocks["send"].call_args.args[0]
+    assert "deploy verification" in body
+    assert "RuntimeError" in body
+    assert "secret" not in body
+
+
+async def test_model_hold_keeps_its_summary_as_reason(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    mocks["review"].return_value = Review(verdict="hold", summary="regression reported upstream")
+    summary = await run_advisor(now=NOW)
+    assert summary.items[0].verdict == "hold"
+    assert summary.items[0].hold_reason == "regression reported upstream"
+    assert summary.batch_id is None
+
+
+async def test_update_without_digests_is_an_error_item(env: Any, mocks: dict[str, MagicMock]) -> None:
+    mocks["get"].return_value = WudContainer(
+        id="abcdef123456",
+        name="alpha",
+        running_digest=None,
+        candidate_digest=None,
+        update_available=True,
+        update_kind="digest",
+    )
+    summary = await run_advisor(now=NOW)
+    assert summary.items[0].error == "WUD reported an update without digests"
+    mocks["review"].assert_not_called()
+
+
+async def test_same_github_repo_lists_releases_once(env: Any, mocks: dict[str, MagicMock]) -> None:
+    text = _allow(["alpha", "beta"]).replace("org/beta", "org/alpha")
+    Path(env.upgrade_advisor_config_path).write_text(text)
+    conn = store.connect(env.upgrade_advisor_db_path)
+    for n in ("alpha", "beta"):
+        store.first_seen(conn, n, NEW, NOW - timedelta(days=5))
+    conn.close()
+    await run_advisor(now=NOW)
+    assert mocks["list"].await_count == 1
+
+
+async def test_two_consecutive_runs_make_two_verdicts_and_batches(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    first = await run_advisor(now=NOW)
+    second = await run_advisor(now=NOW + timedelta(days=1))
+    assert first.batch_id and second.batch_id and first.batch_id != second.batch_id
+    conn = store.connect(env.upgrade_advisor_db_path)
+    ids = {first.items[0].verdict_id, second.items[0].verdict_id}
+    conn.close()
+    assert len(ids) == 2

@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     cf_access_aud: str = ""
     upgrade_advisor_github_token: str = ""  # optional; empty = anonymous GitHub API
 
+    @field_validator("upgrade_advisor_public_base_url")
+    @classmethod
+    def _validate_advisor_base_url(cls, value: str) -> str:
+        """The approve link carries a bearer token, so it must be https."""
+        if value and not value.startswith("https://"):
+            raise ValueError("UPGRADE_ADVISOR_PUBLIC_BASE_URL must start with https://")
+        return value
+
     @field_validator("user_timezone")
     @classmethod
     def _validate_user_timezone(cls, value: str) -> str:

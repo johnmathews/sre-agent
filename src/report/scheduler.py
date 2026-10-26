@@ -16,8 +16,6 @@ from src.config import get_settings
 from src.observability.metrics import REPORT_DURATION, REPORTS_TOTAL, UPGRADE_RUNS_TOTAL
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
-from src.upgrades.config import is_advisor_configured
-from src.upgrades.job import run_advisor
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +53,8 @@ async def _scheduled_report_job() -> None:
 
 async def _scheduled_advisor_job() -> None:
     """Run the Upgrade Advisor; an unexpected exception is logged and counted, never raised into the scheduler."""
+    from src.upgrades.job import run_advisor  # lazy: the weekly report path must not import the advisor stack
+
     try:
         await run_advisor()
     except Exception:
@@ -65,6 +65,8 @@ async def _scheduled_advisor_job() -> None:
 def start_scheduler() -> None:
     """Start the APScheduler if the report and/or advisor cron expression is configured."""
     global _scheduler  # noqa: PLW0603
+
+    from src.upgrades.config import is_advisor_configured  # lazy, see _scheduled_advisor_job
 
     settings = get_settings()
     advisor_cron = settings.upgrade_advisor_cron

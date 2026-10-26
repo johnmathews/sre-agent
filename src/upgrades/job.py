@@ -7,8 +7,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
-from pydantic import BaseModel, ValidationError
-from yaml import YAMLError
+from pydantic import BaseModel
 
 from src.config import get_settings
 from src.observability.metrics import UPGRADE_LAST_SUCCESS, UPGRADE_RUNS_TOTAL, UPGRADE_VERDICTS_TOTAL
@@ -45,15 +44,18 @@ class RunSummary(BaseModel):
     approve_url: str | None = None
     outcomes: list[DeployRecord] = []
     outcome_containers: dict[int, str] = {}  # deploy id -> container name
-    aborted: str | None = None  # exception class name when the run could not start
+    aborted: str | None = None  # class name (or EmailNotSent) when the run aborted or a required email was not sent
 
 
-async def _send(subject: str, markdown: str, html_body: str) -> None:
+async def _send(subject: str, markdown: str, html_body: str) -> bool:
+    """Send the email; ``False`` (logged at error level) when it was not configured or not sent."""
     if not is_email_configured():
-        logger.warning("Upgrade advisor email not configured; NOT sent: %s", subject)
-        return
+        logger.error("Upgrade advisor email not configured; NOT sent: %s", subject)
+        return False
     if not await asyncio.to_thread(send_report_email, markdown, html_body, subject):
         logger.error("Upgrade advisor email failed to send: %s", subject)
+        return False
+    return True
 
 
 class _ReleaseCache:
@@ -80,12 +82,12 @@ async def _review_one(
 ) -> ItemResult | None:
     """Review one container; ``None`` when nothing is pending."""
     record = await wud.get_container(c)
-    if (
-        not record.update_available
-        or not record.candidate_digest
-        or not record.running_digest
-        or record.candidate_digest == record.running_digest
-    ):
+    if not record.update_available:
+        return None
+    if not record.candidate_digest or not record.running_digest:
+        logger.error("WUD reported an update without digests for %s", c.name)
+        return ItemResult(container=c.name, error="WUD reported an update without digests")
+    if record.candidate_digest == record.running_digest:
         return None
     running: str = record.running_digest
     candidate: str = record.candidate_digest
@@ -151,7 +153,13 @@ async def _review_one(
         details=result.model_dump(mode="json"),
         now=now,
     )
-    return ItemResult(container=c.name, verdict=result.verdict, review=result, verdict_id=vid)
+    return ItemResult(
+        container=c.name,
+        verdict=result.verdict,
+        review=result,
+        hold_reason=result.summary if result.verdict == "hold" else None,
+        verdict_id=vid,
+    )
 
 
 def _abort_metric() -> None:
@@ -169,23 +177,24 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
         raise ValueError(msg)
     try:
         containers = load_allowlist(settings.upgrade_advisor_config_path)
-    except (FileNotFoundError, YAMLError, ValidationError, ValueError) as exc:
+    except Exception as exc:
         kind = type(exc).__name__
-        logger.error("Upgrade advisor allowlist could not be loaded: %s: %s", kind, exc)  # noqa: TRY400
+        logger.exception("Upgrade advisor allowlist could not be loaded: %s", kind)
         _abort_metric()
         if send_email:
             await _send(*upgrade_email.render_abort(kind))
         return RunSummary(aborted=kind)
 
+    items: list[ItemResult] = []
     if send_email:
         try:
             await verify.verify_pending()
-        except Exception:
+        except Exception as exc:
             logger.exception("verify_pending failed; continuing with the review")
+            items.append(ItemResult(container="deploy verification", error=type(exc).__name__))
 
     min_age = timedelta(hours=settings.upgrade_advisor_min_age_hours)
     cache = _ReleaseCache()
-    items: list[ItemResult] = []
     conn = store.connect(settings.upgrade_advisor_db_path)
     try:
         for c in containers:
@@ -215,8 +224,10 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
     finally:
         conn.close()
 
-    if send_email and (summary.items or summary.outcomes):
-        await _send(*upgrade_email.render(summary))
+    if send_email and (summary.items or summary.outcomes) and not await _send(*upgrade_email.render(summary)):
+        _abort_metric()
+        summary.aborted = "EmailNotSent"
+        return summary
     UPGRADE_RUNS_TOTAL.labels(status="success").inc()
     UPGRADE_LAST_SUCCESS.set_to_current_time()
     logger.info("Upgrade advisor run finished in %.1fs: %d items", time.monotonic() - started, len(items))

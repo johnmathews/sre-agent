@@ -33,10 +33,38 @@ the current behaviour is in `docs/architecture.md` ("Upgrade Advisor"). Decision
 - **Shutdown (R27).** Wait 5 s for in-flight deploys (inside Docker's 10 s stop timeout). An interrupted trigger whose
   running digest is unchanged is "not deployed (interrupted by shutdown)", without PBS restore advice.
 - **PyJWT floor (R25).** `pyjwt>=2.10.1` for CVE-2024-53861.
+- **No re-review after a digest mismatch.** After a digest mismatch, the running digest is not re-reviewed on the
+  next run; the immediate mismatch email (with the latest PBS backup) is the signal.
+
+## Final-review fixes (R30 to R33)
+- **Token in the fragment (R30).** The link is `.../upgrades/batches/{id}#token=...`. Browsers never send a fragment,
+  so no nginx, Traefik, uvicorn or Cloudflare log line, and nothing in Loki, can hold the token. GET serves a launcher
+  whose one inline script (pinned by hash in the CSP) POSTs the token to `.../{id}/view`; that checks the link without
+  writing and renders the review page, whose Approve form posts to `.../{id}` as before. Cost: approval needs
+  JavaScript. The uvicorn access-log redaction stays as defence in depth for a hand-made `?token=` link.
+- **Approver allowlist (R31).** `UPGRADE_ADVISOR_APPROVER_EMAILS` (comma-separated). A security review then put the
+  JWT check before any config-state answer, so unauthenticated callers only ever see the generic denied page; a
+  signed-in user sees "Approval is not configured on this server" when no approver is listed. Emails compare as NFKC
+  plus casefold on both sides, and any non-ASCII address never matches (NFKC alone would fold a full-width address
+  into ASCII and let a different identity match). The home-server repo must add the setting before the first approval.
+- **Deploy row before the trigger (R32).** Each deploy is written as `triggering` with the pre-deploy digest before
+  WUD is asked, then settled with a structured `trigger_state` (`triggered`, `trigger_error`, `interrupted`). This
+  replaces R28's match on the detail string. After the security review: a `trigger_error` is verified after the
+  normal delay (a deploy WUD finishes after our client timed out must be seen); a successful trigger always schedules
+  verification even if its settle write failed; the reaper for rows left by a hard kill waits for twice the trigger
+  timeout and handles each row on its own. Unchanged pre-deploy digest after an unconfirmed trigger means "not
+  deployed", without restore advice.
+- **Minors (R33), plus two from the final review.** The scheduler's lazy import sits inside its try; failures after
+  the review loop abort with an email; `min_age` has 1 h of slack for cron jitter; error items show our own cleaned
+  messages for WUD, registry and GitHub errors (class name only for anything else); `verify_pending` runs once at
+  startup; the last-success time is persisted (`advisor_state`) and seeds the gauge at startup; a release lookup
+  where nothing matched and a tag lookup failed is an error, not "unreleased"; test and doc guest ids are placeholders.
+
 
 ## Security model decision
 Cloudflare Access here is one wildcard application, so the JWT proves only a signed-in user. The single-use token is
-the endpoint-specific factor, hence hashing at rest and log redaction.
+the endpoint-specific factor, hence hashing at rest, keeping it out of every URL (R30), and the approver allowlist
+(R31) as a second check on who is signed in.
 
 ## Not done
 Rollout (allowlist, WUD credentials and API access on the hosts, Access policy, `.env`) is a separate operator step

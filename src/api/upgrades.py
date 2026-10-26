@@ -16,6 +16,7 @@ import hashlib
 import html
 import logging
 import re
+import unicodedata
 from datetime import UTC, datetime
 from urllib.parse import parse_qsl, quote
 
@@ -141,9 +142,26 @@ def _approval_unconfigured() -> HTMLResponse:
     )
 
 
+def normalise_email(value: str) -> str | None:
+    """Comparable form of an email (same on both sides): trimmed, NFKC-normalised, case-folded. Anything non-ASCII,
+    before or after normalising, is ``None`` and never matches: NFKC alone would fold e.g. a full-width address
+    into an ASCII one, letting a distinct identity match a listed approver."""
+    stripped = value.strip()
+    if not stripped.isascii():
+        return None
+    folded = unicodedata.normalize("NFKC", stripped).casefold()
+    return folded if folded.isascii() else None
+
+
+def _approver_entries() -> tuple[frozenset[str], int]:
+    """``(normalised approvers, number of non-empty entries dropped as non-ASCII)``."""
+    entries = [part for part in get_settings().upgrade_advisor_approver_emails.split(",") if part.strip()]
+    kept = [normalise_email(part) for part in entries]
+    return frozenset(k for k in kept if k is not None), sum(k is None for k in kept)
+
+
 def _approvers() -> frozenset[str]:
-    raw = get_settings().upgrade_advisor_approver_emails
-    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    return _approver_entries()[0]
 
 
 def missing_approval_settings() -> list[str]:
@@ -158,9 +176,17 @@ def missing_approval_settings() -> list[str]:
 
 
 def warn_if_approval_unconfigured() -> None:
-    """At startup: when the advisor runs but approval cannot work, say which settings are missing (names only)."""
+    """At startup: when the advisor runs but approval cannot work, say which settings are missing (names only), and
+    how many approver entries were dropped as non-ASCII (a count, never the entries)."""
     if not is_advisor_configured():
         return
+    _, dropped = _approver_entries()
+    if dropped:
+        logger.warning(
+            "UPGRADE_ADVISOR_APPROVER_EMAILS: %d %s ignored (not ASCII; such an address never matches)",
+            dropped,
+            "entry" if dropped == 1 else "entries",
+        )
     missing = missing_approval_settings()
     if missing:
         logger.warning(
@@ -170,17 +196,21 @@ def warn_if_approval_unconfigured() -> None:
 
 
 async def _authorise(request: Request) -> str | HTMLResponse:
-    """The approver's email, or the page to answer with: 404 unconfigured advisor, 403 approval unconfigured,
-    no valid Access sign-in, or a signed-in user who is not an approver."""
+    """The approver's email, or the page to answer with, in this order: 404 when the advisor is off; the generic
+    denied page without a valid Access sign-in (also when CF_ACCESS_* are missing: verification then denies, and
+    the startup warning names them); 403 "approval not configured" for a signed-in user when no approver is
+    listed; 403 for a signed-in user who is not an approver. Unauthenticated callers never learn the config state."""
     if not is_advisor_configured():
         return _not_found()
-    if missing_approval_settings():
-        return _approval_unconfigured()
     try:
         email = await verify_access_jwt(request.headers.get(JWT_HEADER))
     except AccessDenied:
         return _denied()
-    if email.strip().lower() not in _approvers():
+    approvers = _approvers()
+    if not approvers:
+        return _approval_unconfigured()
+    normalised = normalise_email(email)
+    if normalised is None or normalised not in approvers:
         logger.warning("Upgrade approval refused: %s is not an approver", clean_text(email))
         return _not_an_approver(email)
     return email

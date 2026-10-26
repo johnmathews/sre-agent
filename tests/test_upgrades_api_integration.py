@@ -503,23 +503,95 @@ async def test_approver_match_ignores_case_and_whitespace(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("setting", ["upgrade_advisor_approver_emails", "cf_access_team_domain", "cf_access_aud"])
-async def test_approval_not_configured_page(
-    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock, setting: str
+async def test_empty_approver_list_shows_the_not_configured_page_after_sign_in(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
 ) -> None:
     up = _verdict(mock_settings)
     bid, token = _batch(mock_settings, [up])
-    setattr(mock_settings, setting, " " if setting == "upgrade_advisor_approver_emails" else "")
+    mock_settings.upgrade_advisor_approver_emails = " , "
     resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
     assert resp.status_code == 403
     _assert_security_headers(resp)
     assert "Approval is not configured on this server" in resp.text
-    assert (await _view(client, bid, token)).status_code == 403
+    assert "Approval is not configured on this server" in (await _view(client, bid, token)).text
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 403
     assert "Approval is not configured on this server" in resp.text
     assert fake_wud.triggered == [] and _deploys(mock_settings) == []
     assert _usable(mock_settings, bid, token)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("setting", ["", "upgrade_advisor_approver_emails", "cf_access_team_domain", "cf_access_aud"])
+async def test_unauthenticated_callers_never_see_the_config_state(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock, setting: str
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    if setting:
+        setattr(mock_settings, setting, "")
+    for resp in (
+        await client.get(f"/upgrades/batches/{bid}"),
+        await _view(client, bid, token, headers={}),
+        await _post(client, bid, token, [up], headers={}),
+    ):
+        assert resp.status_code == 403
+        assert "valid Cloudflare Access sign-in" in resp.text
+        assert "not configured" not in resp.text
+    assert fake_wud.triggered == [] and _usable(mock_settings, bid, token)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("cf_setting", ["cf_access_team_domain", "cf_access_aud"])
+async def test_missing_access_settings_deny_even_a_signed_token(
+    client: httpx.AsyncClient, mock_settings: Any, cf_setting: str
+) -> None:
+    bid, _ = _batch(mock_settings, [_verdict(mock_settings)])
+    setattr(mock_settings, cf_setting, "")
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    assert resp.status_code == 403
+    assert "valid Cloudflare Access sign-in" in resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "email",
+    [
+        "\uff41\uff44\uff4d\uff49\uff4e@example.com",  # full-width "admin": NFKC would fold it to ASCII
+        "\u0430dmin@example.com",  # Cyrillic a
+        "admin@example.com\u200b",  # zero-width space
+        "ADMİN@example.com",  # dotted capital I
+    ],
+)
+async def test_unicode_look_alike_emails_never_match(client: httpx.AsyncClient, mock_settings: Any, email: str) -> None:
+    bid, _ = _batch(mock_settings, [_verdict(mock_settings)])
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth(SIGNER.token(email=email)))
+    assert resp.status_code == 403
+    assert "not allowed to approve" in resp.text
+
+
+@pytest.mark.integration
+async def test_non_ascii_approver_entries_are_dropped_with_a_warning(
+    client: httpx.AsyncClient, mock_settings: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    from src.api.upgrades import warn_if_approval_unconfigured
+
+    bid, _ = _batch(mock_settings, [_verdict(mock_settings)])
+    mock_settings.upgrade_advisor_approver_emails = "\uff41\uff44\uff4d\uff49\uff4e@example.com, other@example.com"
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    assert "not allowed to approve" in resp.text  # the full-width entry does not admit admin@example.com
+    caplog.set_level("WARNING")
+    warn_if_approval_unconfigured()
+    [record] = [r for r in caplog.records if "not ASCII" in r.getMessage()]
+    assert "1 entry" in record.getMessage() and "example.com" not in record.getMessage()
+
+
+def test_normalise_email_is_the_same_on_both_sides() -> None:
+    from src.api.upgrades import normalise_email
+
+    assert normalise_email("  Admin@Example.COM ") == normalise_email("admin@example.com") == "admin@example.com"
+    assert normalise_email("\uff41dmin@example.com") is None
+    assert normalise_email("\u0430dmin@example.com") is None
 
 
 def test_missing_approval_settings_are_named(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:

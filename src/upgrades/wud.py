@@ -96,7 +96,7 @@ async def get_container(c: AdvisedContainer) -> WudContainer:
                 update_kind=_dig(record, "updateKind", "kind"),
             )
         except (KeyError, ValidationError) as exc:
-            raise _fail(f"WUD returned a malformed record for {_where(c)}: {exc!r}") from exc
+            raise _fail(f"WUD returned a malformed record for {_where(c)}: {_clean(repr(exc))}") from exc
     raise _fail(f"WUD does not list {_where(c)}")
 
 

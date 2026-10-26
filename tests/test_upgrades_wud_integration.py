@@ -177,6 +177,29 @@ class TestRobustness:
         assert not target.called
 
     @respx.mock
+    async def test_trigger_redirect_is_not_followed(self) -> None:
+        path = "/api/containers/abc123def456/triggers/dockercompose/deploy"
+        first = respx.post(f"{WUD_URL}{path}").mock(
+            return_value=httpx.Response(302, headers={"location": "http://evil.example.com/x"})
+        )
+        target = respx.post("http://evil.example.com/x").mock(return_value=httpx.Response(200, json={}))
+        with pytest.raises(WudError, match="302"):
+            await trigger_deploy(_container(), "abc123def456")
+        assert first.call_count == 1
+        assert not target.called
+
+    @respx.mock
+    async def test_malformed_record_message_is_bounded_and_single_line(self) -> None:
+        # a list is not a valid str|None digest, so model construction fails
+        record = _record("prometheus", image={"digest": {"value": ["x\ny\r\n" * 100]}})
+        respx.get(f"{WUD_URL}/api/containers").mock(return_value=httpx.Response(200, json=[record]))
+        with pytest.raises(WudError, match="malformed") as exc:
+            await get_container(_container())
+        text = str(exc.value)
+        assert "\n" not in text and "\r" not in text
+        assert len(text) < 200 + 120
+
+    @respx.mock
     async def test_duplicate_names_are_ambiguous(self) -> None:
         respx.get(f"{WUD_URL}/api/containers").mock(
             return_value=httpx.Response(200, json=[_record("prometheus"), _record("prometheus")])
@@ -213,10 +236,12 @@ class TestRobustness:
             await get_container(_container())
 
     async def test_invalid_url_raises_wud_error(self) -> None:
+        # The allowlist now rejects this URL; model_copy skips validation to test the client's own guard.
+        bad = _container().model_copy(update={"wud_url": "not a url"})
         with pytest.raises(WudError):
-            await get_container(_container(wud_url="not a url"))
+            await get_container(bad)
         with pytest.raises(WudError):
-            await trigger_deploy(_container(wud_url="not a url"), "abc123def456")
+            await trigger_deploy(bad, "abc123def456")
 
     @respx.mock
     async def test_trailing_slash_wud_url(self) -> None:

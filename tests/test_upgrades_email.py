@@ -3,6 +3,8 @@
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 import src.report.scheduler as sched_mod
 from src.upgrades.email import render, render_abort
 from src.upgrades.job import ItemResult, RunSummary
@@ -125,7 +127,7 @@ async def test_start_scheduler_seeds_last_success_from_the_store(mock_settings: 
 
 
 async def test_seeding_failure_is_logged_not_raised(
-    mock_settings: Any, tmp_path: Any, caplog: "pytest.LogCaptureFixture"
+    mock_settings: Any, tmp_path: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     mock_settings.report_schedule_cron = ""
     mock_settings.upgrade_advisor_cron = ""

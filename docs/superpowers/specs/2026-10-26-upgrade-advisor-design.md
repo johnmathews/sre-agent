@@ -1,7 +1,7 @@
 # Upgrade Advisor — Design
 
 **Date:** 2026-10-26
-**Status:** approved 2026-10-26, pending implementation
+**Status:** implemented 2026-10-26 (see journal/261026-upgrade-advisor.md for deviations)
 **Repos:** `sre-agent` (primary), `sre-webapp` (approval page, if built there), `home-server`
 (Ansible: WUD on two more hosts)
 

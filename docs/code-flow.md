@@ -404,6 +404,52 @@ Each collector runs independently. If a collector raises (e.g., Prometheus is do
 `asyncio.gather(return_exceptions=True)` catches it and stores `None` for that section. The report is always produced,
 with "data unavailable" placeholders for failed sections.
 
+## Upgrade Advisor Flows
+
+### Daily job
+
+```
+_scheduled_advisor_job()  (APScheduler, UPGRADE_ADVISOR_CRON; exceptions logged + runs_total{error})
+  -> run_advisor()
+       load_allowlist()                     # failure -> abort email, error run
+       verify.verify_pending()              # skipped on dry run
+       for each container (a failure is an error item; the loop continues):
+         wud.get_container()                # no update / same digest -> nothing
+         update_kind != "digest"            -> hold
+         store.first_seen()                 # starts the min-age clock (also on dry run)
+         releases.release_for_digest() x2, releases_between(), regression_issues()
+         review.gate()                      # unreleased build / too new -> hold
+         review.review()                    # code rules, else model; fails closed to needs_you
+         store.save_verdict()               # not on dry run
+       store.create_batch(upgrade + needs_you ids, 48 h) -> approve URL
+       email.render() -> send_report_email  # not sent -> error run ("EmailNotSent")
+       runs_total{success}, last_success_timestamp
+```
+
+### Approve flow
+
+```
+GET  /upgrades/batches/{id}?token=...   verify Access JWT -> check_batch (no write) -> render (superseded items unticked)
+POST /upgrades/batches/{id}
+  -> verify_access_jwt -> read bounded form -> check_batch -> parse ids -> validate_selection
+  -> consume_batch (atomic, single use) -> record_decisions -> start_deploy (background task) -> "deploying N" page
+background: deploy_approved()  # one at a time, under a lock
+  per verdict: latest verdict? -> WUD candidate == reviewed digest? -> not already running?
+               -> trigger_deploy -> save pending_verify -> _verify_later(delay)
+               otherwise skipped / failed with the reason
+```
+
+### Verify flow
+
+```
+verify_deploy(id)   # after the delay, or from verify_pending() at the next daily run
+  -> WUD running digest == approved?   (no -> digest_mismatch; interrupted + unchanged -> "not deployed")
+  -> readiness URL 2xx?                (no -> failed)
+  -> Loki error burst vs baseline?     (burst -> failed; Loki unavailable -> warning only)
+  -> finish_deploy() compare-and-set   (loser discards: no second email or metric)
+  -> deploys_total{outcome}; failed / mismatch -> email with latest PBS backup time
+```
+
 ## Health Check Flow
 
 `GET /health` checks each dependency:

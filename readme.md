@@ -35,6 +35,7 @@ Ansible playbooks) to answer operational questions, explain alerts, correlate ch
   - [Phase 5: Evaluation Framework](#phase-5-evaluation-framework)
   - [Phase 6: Weekly Reliability Report](#phase-6-weekly-reliability-report)
   - [Phase 7: Agent Memory Store](#phase-7-agent-memory-store)
+  - [Phase 8: Upgrade Advisor](#phase-8-upgrade-advisor)
 - [Repository Structure](#repository-structure)
 - [Non-Goals](#non-goals)
 - [License](#license)
@@ -719,6 +720,16 @@ or on-demand via `POST /report`.
 in future narratives. Incidents can be recorded and searched across sessions. Metric baselines enable anomaly
 detection. All features degrade gracefully when `MEMORY_DB_PATH` is not set.
 
+### Phase 8: Upgrade Advisor
+
+- Daily review of pending third-party image updates (found by What's Up Docker) for a short allowlist
+- Claude judges each one against release notes and this deployment's context; one emailed batch, one single-use link
+- Approved updates deploy through WUD and are verified (digest, readiness, error logs)
+- **Deliverable:** the "container image stale" chore becomes one click. See
+  [docs/architecture.md](docs/architecture.md#upgrade-advisor); optional, off unless configured.
+
+**Phase 8 complete** (2026-10-26). Rollout (allowlist, WUD credentials, Access policy) is an operator step.
+
 ### Deployment
 
 The agent runs as Docker containers on the Infra VM, deployed via the existing
@@ -777,8 +788,10 @@ sre-agent/
 │   │   ├── generator.py          # Direct API collectors + LLM narrative + markdown formatter
 │   │   ├── email.py              # SMTP email delivery (STARTTLS)
 │   │   └── scheduler.py          # APScheduler cron-based report scheduling
+│   ├── upgrades/                 # Upgrade Advisor (allowlist, WUD/registry/GitHub clients, review, deploy, verify)
 │   └── api/
-│       └── main.py               # FastAPI application
+│       ├── main.py               # FastAPI application
+│       └── upgrades.py           # Upgrade approval page (GET) and guarded deploy (POST)
 ├── scripts/
 │   ├── ingest_runbooks.py        # Rebuild Chroma vector store
 │   ├── run_eval.py               # Eval framework entry point

@@ -1,12 +1,18 @@
-"""The Upgrade Advisor's approval page (GET) and guarded deploy (POST).
+"""The Upgrade Advisor's approval pages and guarded deploy.
 
-Served behind the webapp's ``/api/`` prefix, so the form action is relative. GET never changes state (mail scanners
-open links); only the POST deploys, and only after the Cloudflare Access JWT verifies, the selection is valid and the
-single-use batch token is consumed. The deploys then run in the background and report by email. Every response
-carries ``no-store`` and a locked-down CSP, all model or remote text is escaped, and the link token is redacted from
-uvicorn's access log.
+The emailed link is ``.../upgrades/batches/{id}#token=...``: the token lives in the URL fragment, which browsers never
+send, so no request URL (and therefore no nginx, Traefik, uvicorn or Cloudflare log line) ever carries it. GET serves
+a tiny launcher page whose one hash-pinned inline script moves the fragment token into a form and POSTs it to
+``.../{id}/view``, which checks the link (no write) and renders the review page. Its Approve form POSTs to ``.../{id}``,
+which deploys only after the Access JWT verifies, the signed-in email is a listed approver, the selection is valid and
+the single-use batch token is consumed; the deploys then run in the background and report by email.
+
+Served behind the webapp's ``/api/`` prefix, so every form action is relative. Every response carries ``no-store`` and
+a locked-down CSP, and all model or remote text is escaped.
 """
 
+import base64
+import hashlib
 import html
 import logging
 import re
@@ -39,6 +45,23 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
 }
+# The launcher page's only script: move the fragment token into the form, drop the fragment from the address bar and
+# history, and submit. The CSP pins this exact text by hash, so no other script can run on the page.
+LAUNCH_SCRIPT = (
+    '(function(){var f=document.getElementById("approval-launch");'
+    "var m=/^#token=([A-Za-z0-9_%-]{1,512})$/.exec(location.hash);"
+    'history.replaceState(null,"",location.pathname+location.search);'
+    'if(!m){document.getElementById("launch-status").textContent="This link has no approval token.";return;}'
+    "f.elements.token.value=decodeURIComponent(m[1]);f.submit();})();"
+)
+LAUNCH_SCRIPT_HASH = base64.b64encode(hashlib.sha256(LAUNCH_SCRIPT.encode()).digest()).decode()
+LAUNCH_HEADERS = {
+    **SECURITY_HEADERS,
+    "Content-Security-Policy": (
+        f"default-src 'none'; script-src 'sha256-{LAUNCH_SCRIPT_HASH}'; style-src 'unsafe-inline'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+}
 _BATCH_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _VERDICT_ID_RE = re.compile(r"[0-9]{1,18}")
 _LABELS = {"upgrade": "Recommended", "needs_you": "Needs you", "hold": "Held"}
@@ -50,6 +73,8 @@ _STYLE = (
 
 e = html.escape
 
+# Defence in depth: no route puts the token in a URL any more (it travels in the fragment and in POST bodies), but a
+# hand-edited or old-style ``?token=`` link would still be redacted from uvicorn's access log.
 ACCESS_LOGGER = "uvicorn.access"
 _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]*")
 
@@ -87,13 +112,13 @@ class _BadForm(Exception):
         self.message = message
 
 
-def _page(status: int, title: str, body: str) -> HTMLResponse:
+def _page(status: int, title: str, body: str, headers: dict[str, str] = SECURITY_HEADERS) -> HTMLResponse:
     document = (
         f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{e(title)}</title><style>{_STYLE}</style></head><body><h1>{e(title)}</h1>{body}</body></html>"
     )
-    return HTMLResponse(document, status_code=status, headers=SECURITY_HEADERS)
+    return HTMLResponse(document, status_code=status, headers=headers)
 
 
 def _not_found() -> HTMLResponse:
@@ -220,7 +245,7 @@ def _review_body(batch_id: str, token: str, verdicts: list[VerdictRecord], super
     return (
         signed_in
         + "<p>Ticked updates are deployed one at a time when you press the button. This link works once.</p>"
-        + f'<form method="post" action="{e(quote(batch_id, safe=""), quote=True)}">'
+        + f'<form method="post" action="../{e(quote(batch_id, safe=""), quote=True)}">'
         + f'<input type="hidden" name="token" value="{e(token, quote=True)}">'
         + items
         + '<button type="submit">Deploy ticked updates</button></form>'
@@ -265,13 +290,40 @@ def _parse_ids(raw_ids: list[str]) -> list[int]:
     return ids
 
 
+def _launch_body(batch_id: str) -> str:
+    action = e(quote(batch_id, safe=""), quote=True) + "/view"
+    return (
+        '<p id="launch-status">Opening the approval page&hellip;</p>'
+        f'<form id="approval-launch" method="post" action="{action}">'
+        '<input type="hidden" name="token" value=""></form>'
+        "<noscript><p>This page needs JavaScript: the approval token is in the link's #fragment, which only a script"
+        " on this page can read and send.</p></noscript>"
+        f"<script>{LAUNCH_SCRIPT}</script>"
+    )
+
+
 @router.get("/upgrades/batches/{batch_id}")
-async def show_batch(batch_id: str, request: Request) -> HTMLResponse:
-    """Render the batch for review. Never changes state."""
+async def launch_batch(batch_id: str, request: Request) -> HTMLResponse:
+    """Serve the launcher that POSTs the fragment token to ``{batch_id}/view``. Reads no token and touches no state."""
     email = await _authorise(request)
     if isinstance(email, HTMLResponse):
         return email
-    token = request.query_params.get("token", "")
+    if not _BATCH_ID_RE.fullmatch(batch_id):
+        return _state_page("invalid")
+    return _page(200, "Upgrade approval", _launch_body(batch_id), headers=LAUNCH_HEADERS)
+
+
+@router.post("/upgrades/batches/{batch_id}/view")
+async def view_batch(batch_id: str, request: Request) -> HTMLResponse:
+    """Check the posted token (no write) and render the batch for review."""
+    email = await _authorise(request)
+    if isinstance(email, HTMLResponse):
+        return email
+    try:
+        token, _ = await _read_form(request)
+    except _BadForm as exc:
+        logger.warning("Upgrade batch %s: view rejected: %s", clean_text(batch_id), exc.message)
+        return _page(exc.status, "Bad request", f"<p>{e(exc.message)}.</p>")
     try:
         conn = store.connect(get_settings().upgrade_advisor_db_path)
         try:

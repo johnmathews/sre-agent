@@ -152,12 +152,17 @@ async def test_approve_url_uses_public_base_and_token(env: Any, mocks: dict[str,
     parts = urlsplit(summary.approve_url)
     assert f"{parts.scheme}://{parts.netloc}" == "https://advisor.example.com"
     assert parts.path == f"/upgrades/batches/{summary.batch_id}"
-    token = parse_qs(parts.query)["token"][0]
+    assert parts.query == ""  # the token is in the fragment, which browsers never send
+    assert parts.fragment.startswith("token=")
+    token = parse_qs(parts.fragment)["token"][0]
     conn = store.connect(env.upgrade_advisor_db_path)
     assert summary.batch_id is not None
     assert store.check_batch(conn, summary.batch_id, token, NOW) == "ok"
     conn.close()
-    assert summary.approve_url in mocks["send"].call_args.args[0]
+    markdown, html_body, _ = mocks["send"].call_args.args
+    assert summary.approve_url in markdown
+    for body in (markdown, html_body):
+        assert "#token=" in body and "?token=" not in body and "&token=" not in body
 
 
 async def test_too_new_candidate_is_held_before_review(env: Any, mocks: dict[str, MagicMock]) -> None:

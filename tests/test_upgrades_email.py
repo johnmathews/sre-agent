@@ -28,7 +28,7 @@ def _summary() -> RunSummary:
             ItemResult(container="gamma", verdict="hold", hold_reason="unreleased build"),
             ItemResult(container="delta", error="WudError"),
         ],
-        approve_url="https://example.com/upgrades/batches/b1?token=T%2Bx",
+        approve_url="https://example.com/upgrades/batches/b1#token=T%2Bx",
         outcomes=[_deploy(1, "ok", "digest matches; warning: loki skipped <x>"), _deploy(2, "failed", "readiness")],
         outcome_containers={1: "alpha", 2: "beta"},
     )
@@ -40,7 +40,7 @@ def test_email_subject_counts_and_lists_hold_reasons() -> None:
     assert "gamma" in markdown
     assert "unreleased build" in markdown
     assert "WudError" in markdown
-    assert "https://example.com/upgrades/batches/b1?token=T%2Bx" in markdown
+    assert "https://example.com/upgrades/batches/b1#token=T%2Bx" in markdown
     assert "unreleased build" in html_body
     assert "Held" in html_body
 

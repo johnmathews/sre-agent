@@ -2,7 +2,10 @@
 
 import ast
 import asyncio
+import base64
+import hashlib
 import logging
+import re
 import sqlite3
 import subprocess
 import sys
@@ -11,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urljoin
 
 import httpx
 import pytest
@@ -245,8 +249,31 @@ async def _settle() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET
+# GET: the launcher page (the token stays in the fragment; R30)
 # ---------------------------------------------------------------------------
+
+LAUNCH_CSP_RE = re.compile(
+    r"default-src 'none'; script-src 'sha256-([A-Za-z0-9+/=]+)'; style-src 'unsafe-inline'; form-action 'self'; "
+    r"base-uri 'none'; frame-ancestors 'none'"
+)
+
+
+async def _view(
+    client: httpx.AsyncClient, batch_id: str, token: str, headers: dict[str, str] | None = None
+) -> httpx.Response:
+    return await client.post(
+        f"/upgrades/batches/{batch_id}/view",
+        content=str(httpx.QueryParams([("token", token)])),
+        headers={**FORM, **(headers if headers is not None else _auth())},
+    )
+
+
+def _dump(settings: Any) -> str:
+    conn = _conn(settings)
+    try:
+        return "\n".join(conn.iterdump())
+    finally:
+        conn.close()
 
 
 @pytest.mark.integration
@@ -254,49 +281,98 @@ async def test_get_without_access_header_is_403(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud
 ) -> None:
     bid, token = _batch(mock_settings, [_verdict(mock_settings)])
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token})
+    resp = await client.get(f"/upgrades/batches/{bid}")
     assert resp.status_code == 403
     _assert_security_headers(resp)
+    resp = await _view(client, bid, token, headers={})
+    assert resp.status_code == 403
     assert "patch release" not in resp.text
-    conn = _conn(mock_settings)
-    assert store.check_batch(conn, bid, token, datetime.now(UTC)) == "ok"
-    conn.close()
+    assert _usable(mock_settings, bid, token)
 
 
 @pytest.mark.integration
 async def test_get_with_invalid_jwt_is_403(client: httpx.AsyncClient, mock_settings: Any) -> None:
     bid, token = _batch(mock_settings, [_verdict(mock_settings)])
-    resp = await client.get(
-        f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth(SIGNER.token(aud=["other"]))
-    )
-    assert resp.status_code == 403
+    bad = _auth(SIGNER.token(aud=["other"]))
+    assert (await client.get(f"/upgrades/batches/{bid}", headers=bad)).status_code == 403
+    assert (await _view(client, bid, token, headers=bad)).status_code == 403
 
 
 @pytest.mark.integration
-async def test_get_renders_the_review_form(client: httpx.AsyncClient, mock_settings: Any) -> None:
+async def test_get_serves_a_launcher_that_posts_the_fragment_token(
+    client: httpx.AsyncClient, mock_settings: Any
+) -> None:
+    bid, token = _batch(mock_settings, [_verdict(mock_settings)])
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    assert resp.status_code == 200
+    page = resp.text
+    assert f'<form id="approval-launch" method="post" action="{bid}/view">' in page
+    assert '<input type="hidden" name="token" value="">' in page
+    assert "<noscript>" in page
+    assert token not in page and "patch release" not in page  # nothing about the batch before the token is checked
+    [script] = re.findall(r"<script>(.*?)</script>", page, flags=re.DOTALL)
+    assert "location.hash" in script and "history.replaceState" in script and ".submit()" in script
+    csp = LAUNCH_CSP_RE.fullmatch(resp.headers["Content-Security-Policy"])
+    assert csp is not None
+    assert csp.group(1) == base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+
+
+@pytest.mark.integration
+async def test_get_never_reads_a_token_query_param(client: httpx.AsyncClient, mock_settings: Any) -> None:
+    bid, token = _batch(mock_settings, [_verdict(mock_settings)])
+    plain = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    with_query = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    assert plain.status_code == with_query.status_code == 200
+    assert plain.text == with_query.text
+    assert token not in with_query.text
+
+
+@pytest.mark.integration
+async def test_get_rejects_a_malformed_batch_id(client: httpx.AsyncClient, mock_settings: Any) -> None:
+    resp = await client.get("/upgrades/batches/" + "x" * 65, headers=_auth())
+    assert resp.status_code == 403
+    assert "<form" not in resp.text
+
+
+def test_relative_form_actions_resolve_under_the_api_prefix() -> None:
+    base = "https://sre.example.com/api/upgrades/batches/AbC-123_x"
+    assert urljoin(base, "AbC-123_x/view") == base + "/view"
+    assert urljoin(base + "/view", "../AbC-123_x") == base
+
+
+# ---------------------------------------------------------------------------
+# POST .../view: the review page (check only, no writes)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_view_renders_the_review_form(client: httpx.AsyncClient, mock_settings: Any) -> None:
     up = _verdict(mock_settings, "prometheus", "upgrade")
     need = _verdict(mock_settings, "openwebui", "needs_you", summary="major version")
     bid, token = _batch(mock_settings, [up, need])
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await _view(client, bid, token)
     assert resp.status_code == 200
     _assert_security_headers(resp)
     page = resp.text
     assert f'<input type="checkbox" name="verdict_id" value="{up}" checked>' in page
     assert f'<input type="checkbox" name="verdict_id" value="{need}">' in page
-    assert f'<form method="post" action="{bid}">' in page
+    assert f'<form method="post" action="../{bid}">' in page
     assert f'<input type="hidden" name="token" value="{token}">' in page
     assert "fixes a crash" in page and "none known" in page and "major version" in page
     assert '<a href="https://github.com/example/prometheus/releases/tag/v3.1.1" rel="noreferrer noopener">' in page
-    assert "<button" in page
+    assert "<button" in page and "<script" not in page
 
 
 @pytest.mark.integration
-async def test_get_marks_superseded_verdicts_unticked(client: httpx.AsyncClient, mock_settings: Any) -> None:
+async def test_view_marks_superseded_verdicts_unticked(client: httpx.AsyncClient, mock_settings: Any) -> None:
     old = _verdict(mock_settings, "prometheus", "upgrade")
     current = _verdict(mock_settings, "openwebui", "upgrade")
     bid, token = _batch(mock_settings, [old, current])
     _verdict(mock_settings, "prometheus", "hold", summary="regression reported", details={})  # a newer review
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await _view(client, bid, token)
     assert resp.status_code == 200
     page = resp.text
     assert f'<input type="checkbox" name="verdict_id" value="{old}">' in page  # unticked
@@ -307,16 +383,17 @@ async def test_get_marks_superseded_verdicts_unticked(client: httpx.AsyncClient,
 
 
 @pytest.mark.integration
-async def test_get_twice_changes_nothing(
+async def test_get_and_view_write_nothing(
     client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
 ) -> None:
     bid, token = _batch(mock_settings, [_verdict(mock_settings)])
+    before = _dump(mock_settings)
     for _ in range(2):
-        resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
-        assert resp.status_code == 200
+        assert (await client.get(f"/upgrades/batches/{bid}", headers=_auth())).status_code == 200
+        assert (await _view(client, bid, token)).status_code == 200
+    assert (await _view(client, bid, "guess")).status_code == 403
+    assert _dump(mock_settings) == before
     assert fake_wud.triggered == []
-    assert _deploys(mock_settings) == []
-    assert _decisions(mock_settings) == {}
     conn = _conn(mock_settings)
     try:
         assert store.consume_batch(conn, bid, token, datetime.now(UTC)) == "ok"
@@ -325,40 +402,41 @@ async def test_get_twice_changes_nothing(
 
 
 @pytest.mark.integration
-async def test_get_hold_only_batch_has_no_form_button(client: httpx.AsyncClient, mock_settings: Any) -> None:
+async def test_view_hold_only_batch_has_no_form_button(client: httpx.AsyncClient, mock_settings: Any) -> None:
     held = _verdict(mock_settings, verdict="hold", summary="unreleased build", details={})
     bid, token = _batch(mock_settings, [held])
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await _view(client, bid, token)
     assert resp.status_code == 200
     assert "unreleased build" in resp.text
     assert "<form" not in resp.text and "<button" not in resp.text and 'type="checkbox"' not in resp.text
 
 
 @pytest.mark.integration
-async def test_get_wrong_token_is_403(client: httpx.AsyncClient, mock_settings: Any) -> None:
+async def test_view_wrong_or_missing_token_is_403(client: httpx.AsyncClient, mock_settings: Any) -> None:
     bid, _ = _batch(mock_settings, [_verdict(mock_settings)])
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": "guess"}, headers=_auth())
+    resp = await _view(client, bid, "guess")
     assert resp.status_code == 403
     _assert_security_headers(resp)
-    resp = await client.get("/upgrades/batches/unknown-batch", params={"token": "guess"}, headers=_auth())
-    assert resp.status_code == 403
+    assert (await _view(client, "unknown-batch", "guess")).status_code == 403
+    assert (await _view(client, bid, "")).status_code == 403
+    resp = await client.post(f"/upgrades/batches/{bid}/view", json={"token": "x"}, headers=_auth())
+    assert resp.status_code == 415
 
 
 @pytest.mark.integration
-async def test_get_used_or_expired_batch_is_410(client: httpx.AsyncClient, mock_settings: Any) -> None:
+async def test_view_used_or_expired_batch_is_410(client: httpx.AsyncClient, mock_settings: Any) -> None:
     bid, token = _batch(mock_settings, [_verdict(mock_settings)])
     conn = _conn(mock_settings)
     store.consume_batch(conn, bid, token, datetime.now(UTC))
     conn.close()
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await _view(client, bid, token)
     assert resp.status_code == 410
     _assert_security_headers(resp)
 
     old_bid, old_token = _batch(
         mock_settings, [_verdict(mock_settings, "openwebui")], now=datetime.now(UTC) - timedelta(hours=49)
     )
-    resp = await client.get(f"/upgrades/batches/{old_bid}", params={"token": old_token}, headers=_auth())
-    assert resp.status_code == 410
+    assert (await _view(client, old_bid, old_token)).status_code == 410
 
 
 @pytest.mark.integration
@@ -375,7 +453,7 @@ async def test_page_escapes_model_text(client: httpx.AsyncClient, mock_settings:
         },
     )
     bid, token = _batch(mock_settings, [vid])
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await _view(client, bid, token)
     page = resp.text
     assert "<script>" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
@@ -400,6 +478,9 @@ async def test_a_signed_in_non_approver_is_denied_everywhere(
     resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
     assert resp.status_code == 403
     _assert_security_headers(resp)
+    assert "not allowed to approve" in resp.text
+    resp = await _view(client, bid, token)
+    assert resp.status_code == 403
     assert "not allowed to approve" in resp.text and "patch release" not in resp.text
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 403
@@ -415,6 +496,8 @@ async def test_approver_match_ignores_case_and_whitespace(
     up = _verdict(mock_settings)
     bid, token = _batch(mock_settings, [up])
     mock_settings.upgrade_advisor_approver_emails = " other@example.com ,  ADMIN@Example.COM ,"
+    assert (await client.get(f"/upgrades/batches/{bid}", headers=_auth())).status_code == 200
+    assert (await _view(client, bid, token)).status_code == 200
     assert (await _post(client, bid, token, [up])).status_code == 200
     assert fake_wud.triggered == ["prometheus"]
 
@@ -431,6 +514,7 @@ async def test_approval_not_configured_page(
     assert resp.status_code == 403
     _assert_security_headers(resp)
     assert "Approval is not configured on this server" in resp.text
+    assert (await _view(client, bid, token)).status_code == 403
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 403
     assert "Approval is not configured on this server" in resp.text
@@ -1036,9 +1120,10 @@ async def test_routes_404_when_advisor_not_configured(
     up = _verdict(mock_settings)
     bid, token = _batch(mock_settings, [up])
     mock_settings.upgrade_advisor_public_base_url = ""
-    resp = await client.get(f"/upgrades/batches/{bid}", params={"token": token}, headers=_auth())
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
     assert resp.status_code == 404
     _assert_security_headers(resp)
+    assert (await _view(client, bid, token)).status_code == 404
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 404
     assert fake_wud.triggered == []
@@ -1051,6 +1136,7 @@ def test_main_app_serves_the_upgrade_routes() -> None:
     paths = {(getattr(r, "path", ""), m) for r in app.routes for m in getattr(r, "methods", set())}
     assert ("/upgrades/batches/{batch_id}", "GET") in paths
     assert ("/upgrades/batches/{batch_id}", "POST") in paths
+    assert ("/upgrades/batches/{batch_id}/view", "POST") in paths
 
 
 # ---------------------------------------------------------------------------

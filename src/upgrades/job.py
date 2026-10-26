@@ -222,7 +222,8 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
             batch_id, token = store.create_batch(conn, batchable, now, BATCH_TTL)
             base = settings.upgrade_advisor_public_base_url.rstrip("/")
             summary.batch_id = batch_id
-            summary.approve_url = f"{base}/upgrades/batches/{batch_id}?token={quote(token, safe='')}"
+            # The token goes in the fragment: browsers never send it, so it never reaches a request log.
+            summary.approve_url = f"{base}/upgrades/batches/{batch_id}#token={quote(token, safe='')}"
         summary.outcomes = store.deploys_since(conn, now - timedelta(hours=24))
         for deploy in summary.outcomes:
             verdict = store.get_verdict(conn, deploy.verdict_id)

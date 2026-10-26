@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from src.upgrades.config import AdvisedContainer, is_advisor_configured, load_allowlist
@@ -81,3 +82,53 @@ def test_advisor_configured_when_all_set(mock_settings: Any) -> None:
     assert is_advisor_configured() is True
     mock_settings.upgrade_advisor_wud_password = ""
     assert is_advisor_configured() is False
+
+
+def _with(**changes: Any) -> str:
+    """CONTRACT_YAML with the given top-level keys replaced (or added) in the single entry."""
+    data = yaml.safe_load(CONTRACT_YAML)
+    data["containers"][0].update(changes)
+    return yaml.safe_dump(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("unknown_key", "x"),
+        ("context_files", ["/etc/passwd"]),
+        ("context_files", ["/app/upgrades/context/../x"]),
+        ("context_files", ["relative/path.yml"]),
+        ("context_files", ["/app/upgrades/contextual/x"]),
+        ("wud_url", "ftp://x"),
+        ("wud_url", "not a url"),
+        ("readiness_url", "file:///etc/passwd"),
+        ("name", "Bad Name"),
+        ("name", "-lead"),
+        ("host", "a/b"),
+        ("registry", "reg istry"),
+        ("registry", "reg/istry"),
+        ("repository", "Prom/Prometheus"),
+        ("repository", "prom//prometheus"),
+        ("tag", "-v3"),
+        ("tag", "v3 x"),
+        ("github_repo", "prometheus"),
+        ("github_repo", "a/b/c"),
+        ("pbs_guest", "CT115"),
+        ("pbs_guest", "LXC 115"),
+        ("release_tag_format", "v1"),
+        ("release_tag_format", "{release}-{other}"),
+        ("release_tag_format", "{release.__class__}"),
+        ("release_tag_format", "{"),
+    ],
+)
+def test_allowlist_rejects_invalid_value(tmp_path: Path, field: str, value: Any) -> None:
+    with pytest.raises(ValidationError):
+        load_allowlist(_write(tmp_path, _with(**{field: value})))
+
+
+def test_allowlist_accepts_registry_port_and_release_prefix(tmp_path: Path) -> None:
+    text = _with(registry="ghcr.example.com:5000", release_tag_format="v{release}")
+    item = load_allowlist(_write(tmp_path, text))[0]
+    assert item.registry == "ghcr.example.com:5000"
+    assert item.release_tag_format == "v{release}"
+    assert item.wud_url == "http://10.0.0.15:3010"

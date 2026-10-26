@@ -1,28 +1,72 @@
 """Allowlist loader and enablement gate for the Upgrade Advisor."""
 
-from pathlib import Path
+import string
+from pathlib import Path, PurePosixPath
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import AfterValidator, AnyHttpUrl, BaseModel, ConfigDict, StringConstraints, field_validator
 
 from src.config import get_settings
+
+CONTEXT_ROOT = PurePosixPath("/app/upgrades/context")
+
+
+def _http_url(value: str) -> str:
+    """Validate as an http(s) URL with a host; return the original string unchanged."""
+    AnyHttpUrl(value)
+    return value
+
+
+HttpUrlStr = Annotated[str, AfterValidator(_http_url)]
+Name = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}$")]
+Registry = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.-]+(:[0-9]+)?$")]
+Repository = Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$")]
+Tag = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")]
+GithubRepo = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+PbsGuest = Annotated[str, StringConstraints(pattern=r"^(CT|VM) [0-9]+$")]
 
 
 class AdvisedContainer(BaseModel):
     """One container the advisor may review (and, after approval, deploy)."""
 
-    name: str
-    host: str
-    wud_url: str
-    registry: str
-    repository: str
-    tag: str
-    github_repo: str
+    model_config = ConfigDict(extra="forbid")
+
+    name: Name
+    host: Name
+    wud_url: HttpUrlStr
+    registry: Registry
+    repository: Repository
+    tag: Tag
+    github_repo: GithubRepo
     release_tag_format: str = "{release}"
-    readiness_url: str
-    pbs_guest: str
+    readiness_url: HttpUrlStr
+    pbs_guest: PbsGuest
     context_files: list[str]
     auto_deploy: bool = False
+
+    @field_validator("context_files")
+    @classmethod
+    def _context_files_under_root(cls, value: list[str]) -> list[str]:
+        for entry in value:
+            path = PurePosixPath(entry)
+            if not path.is_absolute() or ".." in path.parts or not path.is_relative_to(CONTEXT_ROOT):
+                msg = f"context file {entry!r} must be absolute, free of '..', and under {CONTEXT_ROOT}/"
+                raise ValueError(msg)
+        return value
+
+    @field_validator("release_tag_format")
+    @classmethod
+    def _release_tag_format_fields(cls, value: str) -> str:
+        try:
+            fields = [name for _, name, _, _ in string.Formatter().parse(value) if name is not None]
+        except ValueError as exc:
+            msg = f"release_tag_format is not a valid format string: {exc}"
+            raise ValueError(msg) from exc
+        if fields.count("release") < 1 or any(f != "release" for f in fields):
+            msg = "release_tag_format must contain {release} and no other {...} field"
+            raise ValueError(msg)
+        return value
 
     @field_validator("auto_deploy")
     @classmethod

@@ -1,19 +1,27 @@
 """SQLite store for Upgrade Advisor verdicts, approval batches and deploys.
 
-Datetimes are stored as ISO-8601 UTC strings and returned as timezone-aware UTC
-datetimes. Naive datetimes are rejected. Batch tokens are stored only as a
-SHA-256 hash; the raw token exists only in the emailed link.
+Datetimes are stored as fixed-width ISO-8601 UTC strings (microseconds), so SQL string
+comparison orders them correctly, and returned as timezone-aware UTC datetimes. Naive
+datetimes are rejected. Batch tokens are stored only as a SHA-256 hash; the raw token
+exists only in the emailed link. Batch membership lives in ``verdicts.batch_id`` alone.
 """
 
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, get_args
+
+from pydantic import ValidationError
 
 from src.upgrades.models import Batch, DeployOutcome, DeployRecord, Verdict, VerdictRecord
+
+logger = logging.getLogger(__name__)
+
 
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS first_seen (
@@ -30,7 +38,7 @@ CREATE TABLE IF NOT EXISTS verdicts (
     candidate_digest  TEXT NOT NULL,
     running_version   TEXT,
     candidate_version TEXT,
-    verdict           TEXT NOT NULL,
+    verdict           TEXT NOT NULL CHECK (verdict IN ('upgrade','hold','needs_you')),
     summary           TEXT NOT NULL,
     details           TEXT NOT NULL,
     created_at        TEXT NOT NULL,
@@ -42,23 +50,23 @@ CREATE INDEX IF NOT EXISTS idx_verdicts_batch ON verdicts(batch_id);
 CREATE TABLE IF NOT EXISTS batches (
     id          TEXT PRIMARY KEY,
     token_hash  TEXT NOT NULL,
-    verdict_ids TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
     used_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
-    verdict_id INTEGER PRIMARY KEY,
+    verdict_id INTEGER NOT NULL PRIMARY KEY REFERENCES verdicts(id),
     approved   INTEGER NOT NULL,
     decided_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS deploys (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    verdict_id     INTEGER NOT NULL,
+    verdict_id     INTEGER NOT NULL REFERENCES verdicts(id),
     started_at     TEXT NOT NULL,
-    outcome        TEXT NOT NULL,
+    outcome        TEXT NOT NULL
+        CHECK (outcome IN ('pending_verify','ok','failed','digest_mismatch','skipped')),
     running_digest TEXT,
     detail         TEXT NOT NULL
 );
@@ -73,6 +81,7 @@ def connect(path: str) -> sqlite3.Connection:
     """Open the store (WAL mode) and create the schema idempotently."""
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA_SQL)
     return conn
@@ -82,7 +91,7 @@ def _to_str(value: datetime) -> str:
     if value.tzinfo is None:
         msg = "naive datetime not allowed; pass a timezone-aware datetime"
         raise ValueError(msg)
-    return value.astimezone(UTC).isoformat()
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _from_str(value: str) -> datetime:
@@ -91,6 +100,29 @@ def _from_str(value: str) -> datetime:
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _require_aware(value: datetime) -> None:
+    if value.tzinfo is None:
+        msg = "naive datetime not allowed; pass a timezone-aware datetime"
+        raise ValueError(msg)
+
+
+def _check_choice(name: str, value: str, allowed: tuple[str, ...]) -> None:
+    if value not in allowed:
+        msg = f"invalid {name} {value!r}; expected one of {allowed}"
+        raise ValueError(msg)
+
+
+def _parse_rows[T](rows: list[sqlite3.Row], build: Callable[[sqlite3.Row], T], kind: str) -> list[T]:
+    """Build a model from each row; a row that fails is logged with its id and skipped."""
+    out: list[T] = []
+    for row in rows:
+        try:
+            out.append(build(row))
+        except (ValidationError, ValueError, TypeError) as exc:
+            logger.error("skipping unreadable %s row id=%s: %r", kind, row["id"], exc)  # noqa: TRY400
+    return out
 
 
 def first_seen(conn: sqlite3.Connection, container: str, digest: str, now: datetime) -> datetime:
@@ -120,6 +152,8 @@ def save_verdict(
     now: datetime,
 ) -> int:
     """Insert a verdict and return its id."""
+    _check_choice("verdict", verdict, get_args(Verdict))
+    created_at = _to_str(now)
     with conn:
         cur = conn.execute(
             "INSERT INTO verdicts (container, running_digest, candidate_digest, running_version,"
@@ -133,7 +167,7 @@ def save_verdict(
                 verdict,
                 summary,
                 json.dumps(details),
-                _to_str(now),
+                created_at,
             ),
         )
     assert cur.lastrowid is not None  # noqa: S101 - set after INSERT
@@ -165,26 +199,40 @@ def latest_verdict(conn: sqlite3.Connection, container: str, digest: str) -> Ver
     return _row_to_verdict(row) if row else None
 
 
-def create_batch(conn: sqlite3.Connection, verdict_ids: list[int], token: str, now: datetime, ttl: timedelta) -> str:
-    """Create an approval batch (storing only the token's SHA-256) and link its verdicts."""
+def create_batch(conn: sqlite3.Connection, verdict_ids: list[int], now: datetime, ttl: timedelta) -> tuple[str, str]:
+    """Create an approval batch and link its verdicts; returns ``(batch_id, token)``.
+
+    The token is generated here and only its SHA-256 is stored. Linking only succeeds for
+    verdicts that exist and are not yet in a batch; otherwise nothing is written and
+    ValueError is raised.
+    """
+    if not verdict_ids:
+        msg = "a batch needs at least one verdict"
+        raise ValueError(msg)
+    created_at, expires_at = _to_str(now), _to_str(now + ttl)
     batch_id = secrets.token_urlsafe(16)
+    token = secrets.token_urlsafe(32)
     with conn:
         conn.execute(
-            "INSERT INTO batches (id, token_hash, verdict_ids, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (batch_id, _hash_token(token), json.dumps(verdict_ids), _to_str(now), _to_str(now + ttl)),
+            "INSERT INTO batches (id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (batch_id, _hash_token(token), created_at, expires_at),
         )
-        conn.executemany("UPDATE verdicts SET batch_id = ? WHERE id = ?", [(batch_id, vid) for vid in verdict_ids])
-    return batch_id
+        for vid in verdict_ids:
+            cur = conn.execute("UPDATE verdicts SET batch_id = ? WHERE id = ? AND batch_id IS NULL", (batch_id, vid))
+            if cur.rowcount != 1:
+                msg = f"verdict {vid} does not exist or is already in a batch"
+                raise ValueError(msg)
+    return batch_id, token
 
 
 def get_batch(conn: sqlite3.Connection, batch_id: str) -> Batch | None:
-    """Fetch a batch by id, or None."""
+    """Fetch a batch by id (members derived from the verdicts), or None."""
     row = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if row is None:
         return None
     return Batch(
         id=row["id"],
-        verdict_ids=json.loads(row["verdict_ids"]),
+        verdict_ids=[v.id for v in get_batch_verdicts(conn, batch_id)],
         created_at=_from_str(row["created_at"]),
         expires_at=_from_str(row["expires_at"]),
         used_at=_from_str(row["used_at"]) if row["used_at"] else None,
@@ -192,32 +240,67 @@ def get_batch(conn: sqlite3.Connection, batch_id: str) -> Batch | None:
 
 
 def get_batch_verdicts(conn: sqlite3.Connection, batch_id: str) -> list[VerdictRecord]:
-    """Verdicts linked to a batch, in id order."""
+    """Verdicts linked to a batch, in id order (unreadable rows are logged and skipped)."""
     rows = conn.execute("SELECT * FROM verdicts WHERE batch_id = ? ORDER BY id", (batch_id,)).fetchall()
-    return [_row_to_verdict(r) for r in rows]
+    return _parse_rows(rows, _row_to_verdict, "verdict")
+
+
+def assert_batch_members(conn: sqlite3.Connection, batch_id: str, verdict_ids: list[int]) -> None:
+    """Raise ValueError unless every id is a verdict of the batch."""
+    rows = conn.execute("SELECT id FROM verdicts WHERE batch_id = ?", (batch_id,)).fetchall()
+    outsiders = sorted(set(verdict_ids) - {r["id"] for r in rows})
+    if outsiders:
+        msg = f"verdicts {outsiders} are not part of batch {batch_id}"
+        raise ValueError(msg)
+
+
+def _batch_state(conn: sqlite3.Connection, batch_id: str, token: str, now: datetime) -> ConsumeResult:
+    """Why a batch cannot be consumed (or ok if nothing is wrong right now). Read-only."""
+    row = conn.execute("SELECT token_hash, expires_at, used_at FROM batches WHERE id = ?", (batch_id,)).fetchone()
+    if row is None or not hmac.compare_digest(row["token_hash"], _hash_token(token)):
+        return "invalid"
+    if row["used_at"]:
+        return "used"  # used wins over expired
+    if row["expires_at"] <= _to_str(now):
+        return "expired"
+    return "ok"
+
+
+def check_batch(conn: sqlite3.Connection, batch_id: str, token: str, now: datetime) -> ConsumeResult:
+    """Same verdict as ``consume_batch`` without writing anything (for the GET page)."""
+    _require_aware(now)
+    return _batch_state(conn, batch_id, token, now)
 
 
 def consume_batch(conn: sqlite3.Connection, batch_id: str, token: str, now: datetime) -> ConsumeResult:
     """Atomically mark a batch used. Returns ok, invalid (unknown id or wrong token), used or expired."""
-    row = conn.execute("SELECT token_hash, expires_at FROM batches WHERE id = ?", (batch_id,)).fetchone()
-    if row is None or not hmac.compare_digest(row["token_hash"], _hash_token(token)):
-        return "invalid"
-    if _from_str(row["expires_at"]) <= now:
-        # Report "used" in preference to "expired" if both apply.
-        used = conn.execute("SELECT used_at FROM batches WHERE id = ?", (batch_id,)).fetchone()["used_at"]
-        return "used" if used else "expired"
+    now_str = _to_str(now)
     with conn:
-        cur = conn.execute("UPDATE batches SET used_at = ? WHERE id = ? AND used_at IS NULL", (_to_str(now), batch_id))
-    return "ok" if cur.rowcount == 1 else "used"
+        cur = conn.execute(
+            "UPDATE batches SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ? AND token_hash = ?",
+            (now_str, batch_id, now_str, _hash_token(token)),
+        )
+    if cur.rowcount == 1:
+        return "ok"
+    state = _batch_state(conn, batch_id, token, now)
+    # The gate failed, so "ok" here can only mean a concurrent consumer won the race.
+    return "used" if state == "ok" else state
 
 
 def record_decision(conn: sqlite3.Connection, verdict_id: int, approved: bool, now: datetime) -> None:  # noqa: FBT001
-    """Record the approve/reject decision for a verdict; a repeat call overwrites."""
+    """Record the approve/reject decision for a verdict.
+
+    Repeating the same decision is a no-op; a different one raises ValueError.
+    """
     with conn:
         conn.execute(
-            "INSERT OR REPLACE INTO decisions (verdict_id, approved, decided_at) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO decisions (verdict_id, approved, decided_at) VALUES (?, ?, ?)",
             (verdict_id, int(approved), _to_str(now)),
         )
+        row = conn.execute("SELECT approved FROM decisions WHERE verdict_id = ?", (verdict_id,)).fetchone()
+        if row["approved"] != int(approved):
+            msg = f"verdict {verdict_id} already has the opposite decision recorded"
+            raise ValueError(msg)
 
 
 def save_deploy(
@@ -230,10 +313,12 @@ def save_deploy(
     detail: str,
 ) -> int:
     """Insert a deploy record and return its id."""
+    _check_choice("outcome", outcome, get_args(DeployOutcome))
+    started_at = _to_str(now)
     with conn:
         cur = conn.execute(
             "INSERT INTO deploys (verdict_id, started_at, outcome, running_digest, detail) VALUES (?, ?, ?, ?, ?)",
-            (verdict_id, _to_str(now), outcome, running_digest, detail),
+            (verdict_id, started_at, outcome, running_digest, detail),
         )
     assert cur.lastrowid is not None  # noqa: S101 - set after INSERT
     return cur.lastrowid
@@ -243,6 +328,7 @@ def update_deploy(
     conn: sqlite3.Connection, deploy_id: int, outcome: DeployOutcome, running_digest: str | None, detail: str
 ) -> None:
     """Update a deploy's outcome after verification. Raises LookupError if the id is unknown."""
+    _check_choice("outcome", outcome, get_args(DeployOutcome))
     with conn:
         cur = conn.execute(
             "UPDATE deploys SET outcome = ?, running_digest = ?, detail = ? WHERE id = ?",
@@ -265,19 +351,23 @@ def _row_to_deploy(row: sqlite3.Row) -> DeployRecord:
 
 
 def pending_verifications(conn: sqlite3.Connection) -> list[DeployRecord]:
-    """Deploys still awaiting verification, oldest first."""
+    """Deploys still awaiting verification, oldest first (unreadable rows are logged and skipped)."""
     rows = conn.execute("SELECT * FROM deploys WHERE outcome = 'pending_verify' ORDER BY id").fetchall()
-    return [_row_to_deploy(r) for r in rows]
+    return _parse_rows(rows, _row_to_deploy, "deploy")
 
 
 def deploys_since(conn: sqlite3.Connection, since: datetime) -> list[DeployRecord]:
-    """Deploys started at or after `since`, oldest first."""
-    rows = conn.execute("SELECT * FROM deploys ORDER BY id").fetchall()
-    return [d for d in (_row_to_deploy(r) for r in rows) if d.started_at >= since.astimezone(UTC)]
+    """Deploys started at or after `since`, oldest first (unreadable rows are logged and skipped)."""
+    rows = conn.execute(
+        "SELECT * FROM deploys WHERE started_at >= ? ORDER BY started_at, id", (_to_str(since),)
+    ).fetchall()
+    return _parse_rows(rows, _row_to_deploy, "deploy")
 
 
 __all__ = [
     "ConsumeResult",
+    "assert_batch_members",
+    "check_batch",
     "connect",
     "consume_batch",
     "create_batch",

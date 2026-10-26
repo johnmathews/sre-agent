@@ -34,3 +34,4 @@ test-results/
 
 # Claude Code workspace-local config
 .claude/
+.superpowers/

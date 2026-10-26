@@ -151,3 +151,33 @@ def test_allowlist_accepts_registry_port_and_release_prefix(tmp_path: Path) -> N
     assert item.registry == "ghcr.example.com:5000"
     assert item.release_tag_format == "v{release}"
     assert item.wud_url == "http://10.0.0.15:3010"
+
+
+def test_release_tag_format_accepts_version(tmp_path: Path) -> None:
+    text = CONTRACT_YAML.replace('"{release}"', '"{version}"')
+    assert load_allowlist(_write(tmp_path, text))[0].release_tag_format == "{version}"
+
+
+@pytest.mark.parametrize("fmt", ["{other}", "{release}{version}", "{version:x}", "{release}-{version}", "plain", "{}"])
+def test_release_tag_format_rejects_bad_fields(tmp_path: Path, fmt: str) -> None:
+    text = CONTRACT_YAML.replace('"{release}"', f"'{fmt}'")
+    with pytest.raises(ValidationError):
+        load_allowlist(_write(tmp_path, text))
+
+
+def test_wud_trigger_defaults_to_deploy_and_accepts_advise(tmp_path: Path) -> None:
+    assert load_allowlist(_write(tmp_path, CONTRACT_YAML))[0].wud_trigger == "deploy"
+    text = CONTRACT_YAML.replace("    auto_deploy: false", "    wud_trigger: advise\n    auto_deploy: false")
+    assert load_allowlist(_write(tmp_path, text))[0].wud_trigger == "advise"
+
+
+@pytest.mark.parametrize("trigger", ["../x", "Advise", "", "-a", "a/b", "a" * 33])
+def test_wud_trigger_rejects_bad_names(tmp_path: Path, trigger: str) -> None:
+    text = CONTRACT_YAML.replace("    auto_deploy: false", f"    wud_trigger: '{trigger}'\n    auto_deploy: false")
+    with pytest.raises(ValidationError):
+        load_allowlist(_write(tmp_path, text))
+
+
+def test_wud_url_accepts_bare_service_hostname(tmp_path: Path) -> None:
+    text = CONTRACT_YAML.replace("http://10.0.0.15:3010", "http://wud:3000")
+    assert load_allowlist(_write(tmp_path, text))[0].wud_url == "http://wud:3000"

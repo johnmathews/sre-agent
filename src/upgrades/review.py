@@ -31,13 +31,14 @@ MAX_RELEASE_BODY_CHARS = 15_000
 MAX_PROMPT_CHARS = 120_000
 RETRY_BUDGET_SECONDS = 120.0
 RETRY_INITIAL_DELAY = 15.0
+MIN_CALL_TIMEOUT = 10.0
 MAJOR_RISK = "Major version change"
 
 _SYSTEM_TEXT = (
     "You are an SRE assistant reviewing a pending container image update for a home server. "
     "You have no tools. Answer with exactly one JSON object and nothing else."
 )
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 class Candidate(BaseModel):
@@ -129,22 +130,29 @@ def build_prompt(c: Candidate, context: dict[str, str]) -> str:
 
 
 def parse_review(text: str) -> Review | None:
-    """The first JSON object in ``text`` (fenced or bare), validated; anything else -> ``None``."""
-    fenced = _FENCE_RE.search(text)
-    for source in ([fenced.group(1)] if fenced else []) + [text]:
-        decoder = json.JSONDecoder()
-        for match in re.finditer(r"\{", source):
-            try:
-                obj, _ = decoder.raw_decode(source, match.start())
-            except ValueError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            try:
-                return Review.model_validate(obj)
-            except ValidationError:
-                return None
-    return None
+    """The answer's single top-level JSON object (bare or in one ```json fence), validated.
+
+    Fails closed (``None``) on anything else: prose around it, a second object, no object, invalid shape.
+    """
+    stripped = text.strip()
+    fenced = _FENCE_RE.fullmatch(stripped)
+    body = fenced.group(1).strip() if fenced else stripped
+    if not body.startswith("{"):
+        return None
+    try:
+        obj, end = json.JSONDecoder().raw_decode(body)
+    except ValueError:
+        return None
+    if body[end:].strip() or not isinstance(obj, dict):
+        return None
+    try:
+        return Review.model_validate(obj)
+    except ValidationError:
+        return None
+
+
+def _padded(version: tuple[int, ...]) -> tuple[int, ...]:
+    return version + (0,) * (4 - len(version))
 
 
 def _needs_you(summary: str, **extra: list[str]) -> Review:
@@ -178,14 +186,15 @@ async def _ask_model(prompt: str) -> str:
     delay = RETRY_INITIAL_DELAY
     attempt = 0
     while True:
+        remaining = deadline - time.monotonic()
         attempt += 1
         try:
             llm = create_llm(settings, temperature=0)
-            response = await llm.ainvoke(messages)
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=max(remaining, MIN_CALL_TIMEOUT))
             return _response_text(response.content)
         except Exception as exc:
             remaining = deadline - time.monotonic()
-            if _is_retryable_llm_error(exc) and remaining > 0:
+            if (_is_retryable_llm_error(exc) or isinstance(exc, TimeoutError)) and remaining > 0:
                 sleep_for = min(delay, remaining)
                 logger.warning(
                     "Upgrade review LLM call failed (attempt %d, %s), retrying in %.0fs",
@@ -195,6 +204,8 @@ async def _ask_model(prompt: str) -> str:
                 )
                 await asyncio.sleep(sleep_for)
                 delay *= 2
+                if deadline - time.monotonic() <= 0:
+                    raise
                 continue
             raise
 
@@ -221,20 +232,24 @@ async def review(c: Candidate) -> Review:
         running, candidate = c.running_release, c.candidate_release
         if running is None:
             return _needs_you("running version unknown, e.g. a dev build")
+        if candidate is None:
+            return _needs_you("candidate version unknown")
+        if _padded(candidate.version) <= _padded(running.version):
+            return _needs_you("candidate is not newer than the running version")
         try:
             prompt = build_prompt(c, _load_context(c.container.context_files))
-            parsed = parse_review(await _ask_model(prompt))
+            answer = await _ask_model(prompt)
+            excerpt = clean_text(answer)
+            parsed = parse_review(answer)
         except Exception as exc:
             logger.exception("upgrade review failed for %s", c.container.name)
             result = _needs_you(f"review failed: {type(exc).__name__}: {clean_text(str(exc))}")
         else:
             if parsed is None:
-                logger.error("upgrade review for %s was not parseable", c.container.name)
+                logger.error("upgrade review for %s was not parseable: %s", c.container.name, excerpt)
                 result = _needs_you("the model's answer could not be parsed; please review manually")
             else:
                 result = _finalize(parsed)
-        if candidate is None:
-            return result if result.verdict == "needs_you" else _needs_you("candidate version unknown")
         if is_major(running.version, candidate.version):
             result = _force_major(result)
         return result

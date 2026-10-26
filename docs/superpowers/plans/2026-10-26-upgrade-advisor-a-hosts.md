@@ -40,7 +40,7 @@ Env read by `sre-agent` (Part B's `Settings`):
 
 ```
 UPGRADE_ADVISOR_CONFIG_PATH=/app/upgrades/allowlist.yml
-UPGRADE_ADVISOR_DB_PATH=/app/upgrades/advisor.db
+UPGRADE_ADVISOR_DB_PATH=/app/upgrades/state/advisor.db
 UPGRADE_ADVISOR_CRON=0 7 * * *
 UPGRADE_ADVISOR_MIN_AGE_HOURS=72
 UPGRADE_ADVISOR_PUBLIC_BASE_URL=https://sre.<primary_domain_name>/api

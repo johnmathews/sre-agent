@@ -510,7 +510,7 @@ warning naming the missing settings. Code: `src/upgrades/`, approval endpoint `s
   of slack (eligible at `first_seen + min_age - 1 h`): the daily runs start seconds apart, and without it the run
   three days later could land just short of 72 h and hold the candidate another whole day. If no release matched
   and any registry tag lookup failed, the item is an error, not an "unreleased build". When the watched tag is major-only (`1`, `v3`), only releases of that major are considered, before the
-  10-lookup cap, so a maintained back-branch is not crowded out by newer majors.
+  10-lookup cap, so a maintained back-branch is not crowded out by newer majors (leading zeros do not count as a major tag). If that major has no release, a warning is logged and all releases are used. `list_releases` fetches up to four pages of 30 (stopping on a short page or at 120), each its own size-capped request; a later-page failure keeps the earlier pages.
 - Forced `needs_you`: a major version (or a `0.x` minor) change, a candidate not newer than the running version, an
   unknown running version, a failed review, and an ambiguous or unparseable model answer (anything but exactly one
   JSON object).

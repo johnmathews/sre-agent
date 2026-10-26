@@ -21,7 +21,9 @@ TIMEOUT_SECONDS = 30.0
 MAX_DIGEST_LOOKUPS = 10
 MAX_ISSUES = 10
 _VERSION_RE = re.compile(r"v?([0-9]{1,9}(?:\.[0-9]{1,9}){0,3})")
-_MAJOR_TAG_RE = re.compile(r"v?([0-9]{1,9})")
+_MAJOR_TAG_RE = re.compile(r"v?(0|[1-9][0-9]{0,8})")
+PAGE_SIZE = 30
+MAX_PAGES = 4
 _REPO_ADAPTER: TypeAdapter[str] = TypeAdapter(GithubRepo)
 
 
@@ -128,14 +130,36 @@ def _parse_release(record: Any) -> Release | None:
         return None
 
 
-async def list_releases(github_repo: str, limit: int = 100) -> list[Release]:
-    """Stable, published releases of ``github_repo`` as GitHub lists them (newest first)."""
-    _check_repo(github_repo)
-    what = f"releases of {github_repo}"
-    records = _json(await _github_get(f"/repos/{github_repo}/releases", {"per_page": limit}, what), what)
+async def _release_page(github_repo: str, page: int) -> list[Any]:
+    """One bounded page of GitHub release records (raises ReleaseLookupError on any failure)."""
+    what = f"releases of {github_repo} (page {page})"
+    params: dict[str, str | int] = {"per_page": PAGE_SIZE, "page": page}
+    records = _json(await _github_get(f"/repos/{github_repo}/releases", params, what), what)
     if not isinstance(records, list):
         raise _fail(f"GitHub returned an unexpected payload for {what}")
-    return [r for r in map(_parse_release, records) if r is not None]
+    return records
+
+
+async def list_releases(github_repo: str, limit: int = 120) -> list[Release]:
+    """Stable, published releases of ``github_repo``, newest first, at most ``limit`` collected.
+
+    Pages of 30 are fetched (at most 4) so each response stays under the size cap. A failure on page 1 raises; on a
+    later page it is logged and the releases collected so far are returned.
+    """
+    _check_repo(github_repo)
+    found: list[Release] = []
+    for page in range(1, MAX_PAGES + 1):
+        try:
+            records = await _release_page(github_repo, page)
+        except ReleaseLookupError:
+            if page == 1:
+                raise
+            logger.warning("releases of %s: page %d failed; using the %d so far", github_repo, page, len(found))
+            break
+        found.extend(r for r in map(_parse_release, records) if r is not None)
+        if len(records) < PAGE_SIZE or len(found) >= limit:
+            break
+    return found[:limit]
 
 
 async def release_for_digest(c: AdvisedContainer, digest: str, releases: list[Release]) -> Release | None:
@@ -150,7 +174,13 @@ async def release_for_digest(c: AdvisedContainer, digest: str, releases: list[Re
     major_tag = _MAJOR_TAG_RE.fullmatch(c.tag)
     if major_tag is not None:
         major = int(major_tag.group(1))
-        releases = [r for r in releases if r.version[0] == major]
+        scoped = [r for r in releases if r.version[0] == major]
+        if scoped:
+            releases = scoped
+        else:
+            logger.warning(
+                "no release of major %d found for %s (tag %s); falling back to all releases", major, c.name, c.tag
+            )
     newest_first = sorted(releases, key=lambda r: r.published_at, reverse=True)[:MAX_DIGEST_LOOKUPS]
     failed = 0
     for release in newest_first:

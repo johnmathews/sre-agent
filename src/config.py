@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     upgrade_advisor_wud_password: str = ""
     cf_access_team_domain: str = ""
     cf_access_aud: str = ""
+    # Comma-separated Cloudflare Access emails allowed to approve (case-insensitive); empty = approval disabled
+    upgrade_advisor_approver_emails: str = ""
     upgrade_advisor_github_token: str = ""  # optional; empty = anonymous GitHub API
 
     @field_validator("upgrade_advisor_public_base_url")

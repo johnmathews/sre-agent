@@ -34,6 +34,7 @@ from src.agent.history import (
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
 from src.api.upgrades import router as upgrades_router
+from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
 from src.observability.metrics import (
     APP_INFO,
@@ -224,6 +225,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 credentials_check = asyncio.create_task(keep_fresh(settings.claude_credentials_check_interval_s))
 
         start_scheduler()
+        warn_if_approval_unconfigured()
         yield
         stop_scheduler()
         # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.

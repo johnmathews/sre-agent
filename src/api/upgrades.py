@@ -104,6 +104,63 @@ def _denied() -> HTMLResponse:
     return _page(403, "Access denied", "<p>This page needs a valid Cloudflare Access sign-in.</p>")
 
 
+def _not_an_approver(email: str) -> HTMLResponse:
+    return _page(403, "Access denied", f"<p>{e(email)} is not allowed to approve upgrades.</p>")
+
+
+def _approval_unconfigured() -> HTMLResponse:
+    return _page(
+        403,
+        "Approval not configured",
+        "<p>Approval is not configured on this server; nothing can be approved here. See the sre-agent logs.</p>",
+    )
+
+
+def _approvers() -> frozenset[str]:
+    raw = get_settings().upgrade_advisor_approver_emails
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def missing_approval_settings() -> list[str]:
+    """Names (never values) of the settings approval needs that are empty."""
+    s = get_settings()
+    missing = [] if _approvers() else ["UPGRADE_ADVISOR_APPROVER_EMAILS"]
+    if not s.cf_access_team_domain:
+        missing.append("CF_ACCESS_TEAM_DOMAIN")
+    if not s.cf_access_aud:
+        missing.append("CF_ACCESS_AUD")
+    return missing
+
+
+def warn_if_approval_unconfigured() -> None:
+    """At startup: when the advisor runs but approval cannot work, say which settings are missing (names only)."""
+    if not is_advisor_configured():
+        return
+    missing = missing_approval_settings()
+    if missing:
+        logger.warning(
+            "Upgrade Advisor approval is not configured (missing: %s); every approval request is refused",
+            ", ".join(missing),
+        )
+
+
+async def _authorise(request: Request) -> str | HTMLResponse:
+    """The approver's email, or the page to answer with: 404 unconfigured advisor, 403 approval unconfigured,
+    no valid Access sign-in, or a signed-in user who is not an approver."""
+    if not is_advisor_configured():
+        return _not_found()
+    if missing_approval_settings():
+        return _approval_unconfigured()
+    try:
+        email = await verify_access_jwt(request.headers.get(JWT_HEADER))
+    except AccessDenied:
+        return _denied()
+    if email.strip().lower() not in _approvers():
+        logger.warning("Upgrade approval refused: %s is not an approver", clean_text(email))
+        return _not_an_approver(email)
+    return email
+
+
 def _state_page(state: str) -> HTMLResponse:
     if state == "invalid":
         return _page(403, "Link not valid", "<p>This approval link is not valid.</p>")
@@ -211,12 +268,9 @@ def _parse_ids(raw_ids: list[str]) -> list[int]:
 @router.get("/upgrades/batches/{batch_id}")
 async def show_batch(batch_id: str, request: Request) -> HTMLResponse:
     """Render the batch for review. Never changes state."""
-    if not is_advisor_configured():
-        return _not_found()
-    try:
-        email = await verify_access_jwt(request.headers.get(JWT_HEADER))
-    except AccessDenied:
-        return _denied()
+    email = await _authorise(request)
+    if isinstance(email, HTMLResponse):
+        return email
     token = request.query_params.get("token", "")
     try:
         conn = store.connect(get_settings().upgrade_advisor_db_path)
@@ -246,12 +300,9 @@ async def approve_batch(batch_id: str, request: Request) -> HTMLResponse:
     Order: JWT, form, link check (no write), ids, selection, single-use consume, decisions, background deploy.
     Nothing is consumed until the request is known to be valid.
     """
-    if not is_advisor_configured():
-        return _not_found()
-    try:
-        email = await verify_access_jwt(request.headers.get(JWT_HEADER))
-    except AccessDenied:
-        return _denied()
+    email = await _authorise(request)
+    if isinstance(email, HTMLResponse):
+        return email
     safe_batch = clean_text(batch_id)
     safe_email = clean_text(email)
 

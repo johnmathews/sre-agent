@@ -62,6 +62,7 @@ def _env(mock_settings: Any, tmp_path: Path) -> Iterator[None]:
     mock_settings.upgrade_advisor_verify_delay_seconds = 0
     mock_settings.cf_access_team_domain = TEAM
     mock_settings.cf_access_aud = AUD
+    mock_settings.upgrade_advisor_approver_emails = EMAIL
     from src.upgrades import access
 
     access._jwks_cache.clear()
@@ -382,6 +383,84 @@ async def test_page_escapes_model_text(client: httpx.AsyncClient, mock_settings:
     assert 'href="javascript:' not in page and 'href="http://example.com/plain"' not in page
     assert "javascript:alert(1)" in page  # shown as text, not a link
     assert 'href="https://example.com/&quot;&gt;&lt;script&gt;x&lt;/script&gt;"' in page
+
+
+# ---------------------------------------------------------------------------
+# Approvers (R31)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_a_signed_in_non_approver_is_denied_everywhere(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    mock_settings.upgrade_advisor_approver_emails = "someone-else@example.com"
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    assert resp.status_code == 403
+    _assert_security_headers(resp)
+    assert "not allowed to approve" in resp.text and "patch release" not in resp.text
+    resp = await _post(client, bid, token, [up])
+    assert resp.status_code == 403
+    assert "not allowed to approve" in resp.text
+    assert fake_wud.triggered == [] and _deploys(mock_settings) == [] and _decisions(mock_settings) == {}
+    assert _usable(mock_settings, bid, token)
+
+
+@pytest.mark.integration
+async def test_approver_match_ignores_case_and_whitespace(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    mock_settings.upgrade_advisor_approver_emails = " other@example.com ,  ADMIN@Example.COM ,"
+    assert (await _post(client, bid, token, [up])).status_code == 200
+    assert fake_wud.triggered == ["prometheus"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("setting", ["upgrade_advisor_approver_emails", "cf_access_team_domain", "cf_access_aud"])
+async def test_approval_not_configured_page(
+    client: httpx.AsyncClient, mock_settings: Any, fake_wud: FakeWud, verify_mock: AsyncMock, setting: str
+) -> None:
+    up = _verdict(mock_settings)
+    bid, token = _batch(mock_settings, [up])
+    setattr(mock_settings, setting, " " if setting == "upgrade_advisor_approver_emails" else "")
+    resp = await client.get(f"/upgrades/batches/{bid}", headers=_auth())
+    assert resp.status_code == 403
+    _assert_security_headers(resp)
+    assert "Approval is not configured on this server" in resp.text
+    resp = await _post(client, bid, token, [up])
+    assert resp.status_code == 403
+    assert "Approval is not configured on this server" in resp.text
+    assert fake_wud.triggered == [] and _deploys(mock_settings) == []
+    assert _usable(mock_settings, bid, token)
+
+
+def test_missing_approval_settings_are_named(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    from src.api.upgrades import missing_approval_settings, warn_if_approval_unconfigured
+
+    assert missing_approval_settings() == []
+    mock_settings.upgrade_advisor_approver_emails = ","
+    mock_settings.cf_access_aud = ""
+    assert missing_approval_settings() == ["UPGRADE_ADVISOR_APPROVER_EMAILS", "CF_ACCESS_AUD"]
+    caplog.set_level("WARNING")
+    warn_if_approval_unconfigured()
+    [record] = [r for r in caplog.records if "not configured" in r.getMessage()]
+    assert record.levelname == "WARNING"
+    assert "UPGRADE_ADVISOR_APPROVER_EMAILS, CF_ACCESS_AUD" in record.getMessage()
+    assert TEAM not in record.getMessage()
+
+
+def test_no_approval_warning_when_the_advisor_is_off(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    from src.api.upgrades import warn_if_approval_unconfigured
+
+    mock_settings.upgrade_advisor_public_base_url = ""
+    mock_settings.upgrade_advisor_approver_emails = ""
+    caplog.set_level("WARNING")
+    warn_if_approval_unconfigured()
+    assert not [r for r in caplog.records if "not configured" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------
@@ -941,9 +1020,11 @@ def test_app_shutdown_waits_for_deploys(mock_settings: Any) -> None:
     with (
         patch.object(main, "build_agent", return_value=MagicMock()),
         patch.object(main, "wait_for_deploys", new_callable=AsyncMock, return_value=0) as waited,
+        patch.object(main, "warn_if_approval_unconfigured") as warned,
     ):
         with TestClient(main.app):
             waited.assert_not_awaited()
+            warned.assert_called_once_with()
         waited.assert_awaited_once_with(main.SHUTDOWN_DEPLOY_WAIT_SECONDS)
     assert main.SHUTDOWN_DEPLOY_WAIT_SECONDS <= 5.0  # Docker's default stop timeout is 10 s
 

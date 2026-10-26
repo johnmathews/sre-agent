@@ -118,6 +118,7 @@ def mock_settings() -> Generator[Any]:
             "upgrade_advisor_wud_password": "",
             "cf_access_team_domain": "",
             "cf_access_aud": "",
+            "upgrade_advisor_approver_emails": "",
             "upgrade_advisor_github_token": "",
         },
     )()

@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS deploys (
         CHECK (trigger_state IS NULL OR trigger_state IN ('triggering','triggered','trigger_error','interrupted'))
 );
 CREATE INDEX IF NOT EXISTS idx_deploys_started ON deploys(started_at);
+
+CREATE TABLE IF NOT EXISTS advisor_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    last_success_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_deploys_outcome ON deploys(outcome);
 """
 
@@ -472,6 +477,23 @@ def deploys_since(conn: sqlite3.Connection, since: datetime) -> list[DeployRecor
     return _parse_rows(rows, _row_to_deploy, "deploy")
 
 
+def get_last_success(conn: sqlite3.Connection) -> datetime | None:
+    """When the last real (non-dry) advisor run completed, or None if none has."""
+    row = conn.execute("SELECT last_success_at FROM advisor_state WHERE id = 1").fetchone()
+    return _from_str(row["last_success_at"]) if row else None
+
+
+def set_last_success(conn: sqlite3.Connection, at: datetime) -> None:
+    """Record the completion time of a successful run (one row, overwritten)."""
+    value = _to_str(at)
+    with conn:
+        conn.execute(
+            "INSERT INTO advisor_state (id, last_success_at) VALUES (1, ?)"
+            " ON CONFLICT(id) DO UPDATE SET last_success_at = excluded.last_success_at",
+            (value,),
+        )
+
+
 __all__ = [
     "ConsumeResult",
     "assert_batch_members",
@@ -486,6 +508,7 @@ __all__ = [
     "get_batch",
     "get_batch_verdicts",
     "get_deploy",
+    "get_last_success",
     "get_verdict",
     "latest_verdict",
     "latest_verdict_for_container",
@@ -493,6 +516,7 @@ __all__ = [
     "record_decision",
     "save_deploy",
     "save_verdict",
+    "set_last_success",
     "settle_trigger",
     "triggering_deploys",
     "update_deploy",

@@ -169,6 +169,18 @@ async def _review_one(
     )
 
 
+def _persist_last_success(db_path: str, at: datetime) -> None:
+    """Store the success time so a restart can seed the gauge; failure is logged, the run still counts."""
+    try:
+        conn = store.connect(db_path)
+        try:
+            store.set_last_success(conn, at)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Could not persist the advisor's last successful run time")
+
+
 def _abort_metric() -> None:
     UPGRADE_RUNS_TOTAL.labels(status="error").inc()
 
@@ -237,6 +249,9 @@ async def run_advisor(now: datetime | None = None, send_email: bool = True) -> R
         summary.aborted = "EmailNotSent"
         return summary
     UPGRADE_RUNS_TOTAL.labels(status="success").inc()
-    UPGRADE_LAST_SUCCESS.set_to_current_time()
+    finished = datetime.now(UTC)
+    UPGRADE_LAST_SUCCESS.set(finished.timestamp())
+    if send_email:  # a dry run is not a run the staleness alert should count after a restart
+        _persist_last_success(settings.upgrade_advisor_db_path, finished)
     logger.info("Upgrade advisor run finished in %.1fs: %d items", time.monotonic() - started, len(items))
     return summary

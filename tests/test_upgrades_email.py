@@ -93,6 +93,47 @@ async def test_scheduler_registers_advisor_job_only_when_configured(mock_setting
         sched_mod.stop_scheduler()
 
 
+def _configure_advisor(mock_settings: Any, db_path: str) -> None:
+    mock_settings.upgrade_advisor_config_path = "/etc/allow.yml"
+    mock_settings.upgrade_advisor_db_path = db_path
+    mock_settings.upgrade_advisor_wud_username = "u"
+    mock_settings.upgrade_advisor_wud_password = "p"
+    mock_settings.upgrade_advisor_public_base_url = "https://example.com"
+
+
+async def test_start_scheduler_seeds_last_success_from_the_store(mock_settings: Any, tmp_path: Any) -> None:
+    from datetime import UTC, datetime
+
+    from prometheus_client import REGISTRY
+
+    from src.observability.metrics import UPGRADE_LAST_SUCCESS
+    from src.upgrades import store
+
+    db = str(tmp_path / "advisor.db")
+    conn = store.connect(db)
+    store.set_last_success(conn, datetime(2026, 10, 25, 7, 0, tzinfo=UTC))
+    conn.close()
+    UPGRADE_LAST_SUCCESS.set(0)
+    mock_settings.report_schedule_cron = ""
+    mock_settings.upgrade_advisor_cron = ""  # seeding does not depend on the schedule
+    sched_mod.start_scheduler()  # not configured: nothing seeded
+    assert REGISTRY.get_sample_value("sre_assistant_upgrade_last_success_timestamp") == 0
+    _configure_advisor(mock_settings, db)
+    sched_mod.start_scheduler()
+    expected = datetime(2026, 10, 25, 7, 0, tzinfo=UTC).timestamp()
+    assert REGISTRY.get_sample_value("sre_assistant_upgrade_last_success_timestamp") == expected
+
+
+async def test_seeding_failure_is_logged_not_raised(
+    mock_settings: Any, tmp_path: Any, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    mock_settings.report_schedule_cron = ""
+    mock_settings.upgrade_advisor_cron = ""
+    _configure_advisor(mock_settings, str(tmp_path / "missing-dir" / "advisor.db"))
+    sched_mod.start_scheduler()
+    assert any(r.levelname == "ERROR" and "last successful run" in r.getMessage() for r in caplog.records)
+
+
 async def test_scheduled_advisor_job_swallows_and_counts_errors() -> None:
     from unittest.mock import AsyncMock, patch
 

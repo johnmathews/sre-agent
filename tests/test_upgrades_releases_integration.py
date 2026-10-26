@@ -196,6 +196,28 @@ async def test_release_for_digest_skips_tag_with_registry_error(
     assert "v1.4.0" in caplog.text
 
 
+async def test_release_for_digest_raises_when_no_match_and_a_lookup_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
+        if tag == "v1.4.0":
+            raise RegistryError("registry unreachable")
+        return {OTHER}
+
+    monkeypatch.setattr("src.upgrades.releases.tag_digests", fake_digests)
+    releases = [_release("v1.3.0", 5, (1, 3, 0)), _release("v1.4.0", 9, (1, 4, 0))]
+    with pytest.raises(RegistryError, match=r"no release of app matched .* 1 of 2 tag lookups failed"):
+        await release_for_digest(_container(), DIGEST, releases)
+
+
+async def test_release_for_digest_raises_when_every_lookup_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
+        raise RegistryError("registry unreachable")
+
+    monkeypatch.setattr("src.upgrades.releases.tag_digests", fake_digests)
+    releases = [_release("v1.3.0", 5, (1, 3, 0)), _release("v1.4.0", 9, (1, 4, 0))]
+    with pytest.raises(RegistryError, match="2 of 2 tag lookups failed"):
+        await release_for_digest(_container(), DIGEST, releases)
+
+
 @respx.mock
 async def test_regression_issues_builds_query_and_returns_title_and_url() -> None:
     route = respx.get(SEARCH_URL).mock(

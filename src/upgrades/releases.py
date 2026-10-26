@@ -138,17 +138,30 @@ async def list_releases(github_repo: str, limit: int = 30) -> list[Release]:
 
 
 async def release_for_digest(c: AdvisedContainer, digest: str, releases: list[Release]) -> Release | None:
-    """The release whose image tag currently resolves to ``digest`` (newest first, at most 10 registry lookups)."""
-    newest_first = sorted(releases, key=lambda r: r.published_at, reverse=True)
-    for release in newest_first[:MAX_DIGEST_LOOKUPS]:
+    """The release whose image tag currently resolves to ``digest`` (newest first, at most 10 registry lookups).
+
+    ``None`` means every looked-up tag answered and none matched (an unreleased build). If nothing matched and any
+    lookup failed, the answer is unknown, so ``RegistryError`` is raised instead of reporting "unreleased".
+    """
+    newest_first = sorted(releases, key=lambda r: r.published_at, reverse=True)[:MAX_DIGEST_LOOKUPS]
+    failed = 0
+    for release in newest_first:
         image_tag = c.release_tag_format.format(release=release.tag)
         try:
             digests = await tag_digests(c.registry, c.repository, image_tag)
         except RegistryError as exc:
+            failed += 1
             logger.warning("skipping %s for %s: %s", image_tag, c.name, clean_text(str(exc)))
             continue
         if digest in digests:
             return release
+    if failed:
+        msg = (
+            f"no release of {c.name} matched {digest[:19]} and {failed} of {len(newest_first)} tag lookups failed;"
+            " cannot tell whether it is released"
+        )
+        logger.error(msg)
+        raise RegistryError(msg)
     return None
 
 

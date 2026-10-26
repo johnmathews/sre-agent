@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from src.config import get_settings
-from src.observability.metrics import REPORT_DURATION, REPORTS_TOTAL, UPGRADE_RUNS_TOTAL
+from src.observability.metrics import REPORT_DURATION, REPORTS_TOTAL, UPGRADE_LAST_SUCCESS, UPGRADE_RUNS_TOTAL
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
 
@@ -62,6 +62,23 @@ async def _scheduled_advisor_job() -> None:
         logger.exception("Scheduled upgrade advisor run failed")
 
 
+def _seed_advisor_last_success(db_path: str) -> None:
+    """Set the advisor's last-success gauge from the store, so a restart does not reset it to 0 (and page)."""
+    from src.upgrades import store  # lazy, see _scheduled_advisor_job
+
+    try:
+        conn = store.connect(db_path)
+        try:
+            last = store.get_last_success(conn)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Could not read the advisor's last successful run time; the gauge starts at 0")
+        return
+    if last is not None:
+        UPGRADE_LAST_SUCCESS.set(last.timestamp())
+
+
 def start_scheduler() -> None:
     """Start the APScheduler if the report and/or advisor cron expression is configured."""
     global _scheduler  # noqa: PLW0603
@@ -69,6 +86,8 @@ def start_scheduler() -> None:
     from src.upgrades.config import is_advisor_configured  # lazy, see _scheduled_advisor_job
 
     settings = get_settings()
+    if is_advisor_configured():
+        _seed_advisor_last_success(settings.upgrade_advisor_db_path)
     advisor_cron = settings.upgrade_advisor_cron
     advisor_enabled = bool(advisor_cron) and is_advisor_configured()
     if advisor_cron and not advisor_enabled:

@@ -333,3 +333,30 @@ async def test_two_consecutive_runs_make_two_verdicts_and_batches(env: Any, mock
     ids = {first.items[0].verdict_id, second.items[0].verdict_id}
     conn.close()
     assert len(ids) == 2
+
+
+def _stored_last_success(env: Any) -> datetime | None:
+    conn = store.connect(env.upgrade_advisor_db_path)
+    try:
+        return store.get_last_success(conn)
+    finally:
+        conn.close()
+
+
+async def test_successful_run_persists_last_success(env: Any, mocks: dict[str, MagicMock]) -> None:
+    mocks["get"].return_value = _wud(available=False)
+    before = datetime.now(UTC)
+    await run_advisor(now=NOW)
+    stored = _stored_last_success(env)
+    assert stored is not None and stored >= before
+    assert _metric("sre_assistant_upgrade_last_success_timestamp") == stored.timestamp()
+
+
+async def test_dry_run_and_failed_runs_do_not_persist_last_success(env: Any, mocks: dict[str, MagicMock]) -> None:
+    await _ready(env)
+    await run_advisor(now=NOW, send_email=False)
+    assert _stored_last_success(env) is None
+    mocks["send"].return_value = False
+    summary = await run_advisor(now=NOW)
+    assert summary.aborted == "EmailNotSent"
+    assert _stored_last_success(env) is None

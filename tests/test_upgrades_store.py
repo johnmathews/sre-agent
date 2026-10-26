@@ -453,3 +453,14 @@ def test_trigger_state_defaults_to_none_and_is_validated(conn: sqlite3.Connectio
             " VALUES (?, 'x', 'triggering', '', 'bogus')",
             (vid,),
         )
+
+
+def test_last_success_is_a_single_row(conn: sqlite3.Connection) -> None:
+    assert store.get_last_success(conn) is None
+    store.set_last_success(conn, T0)
+    assert store.get_last_success(conn) == T0
+    store.set_last_success(conn, T0 + timedelta(days=1))
+    assert store.get_last_success(conn) == T0 + timedelta(days=1)
+    assert conn.execute("SELECT COUNT(*) FROM advisor_state").fetchone()[0] == 1
+    with pytest.raises(ValueError, match="naive"):
+        store.set_last_success(conn, datetime(2026, 1, 1))  # noqa: DTZ001

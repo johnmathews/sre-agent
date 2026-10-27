@@ -209,6 +209,17 @@ async def test_release_for_digest_raises_when_no_match_and_a_lookup_failed(monke
         await release_for_digest(_container(), DIGEST, releases)
 
 
+async def test_release_for_digest_missing_tag_counts_as_answered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tag_digests answers set() for a tag that does not exist: no match, not a failed lookup (an unreleased build)."""
+
+    async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
+        return set() if tag == "v1.4.0" else {OTHER}
+
+    monkeypatch.setattr("src.upgrades.releases.tag_digests", fake_digests)
+    releases = [_release("v1.3.0", 5, (1, 3, 0)), _release("v1.4.0", 9, (1, 4, 0))]
+    assert await release_for_digest(_container(), DIGEST, releases) is None
+
+
 async def test_release_for_digest_raises_when_every_lookup_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_digests(registry: str, repository: str, tag: str) -> set[str]:
         raise RegistryError("registry unreachable")

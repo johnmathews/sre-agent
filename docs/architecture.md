@@ -497,7 +497,8 @@ warning naming the missing settings. Code: `src/upgrades/`, approval endpoint `s
 - **Daily (cron, user timezone):** verify pending deploys, read What's Up Docker (WUD) for each allowlisted
   container, gate and review each pending update, save verdicts, create one batch, send one email.
 - **On approval (POST):** background, sequential deploys through WUD's API; each is verified
-  `UPGRADE_ADVISOR_VERIFY_DELAY_SECONDS` (default 300) later, and by the next daily run if the process restarted.
+  `UPGRADE_ADVISOR_VERIFY_DELAY_SECONDS` (default 300) after its WUD trigger returned (the row's `settled_at`; a
+  trigger can take up to 600 s), and by the next daily run if the process restarted.
 - **On startup** (advisor configured): `verify_pending()` once in the background, and the last-success gauge is
   seeded from the store (`advisor_state`), so a restart neither forgets pending deploys nor resets the gauge.
 - **Dry run:** `make advisor` / `python -m src.upgrades --dry-run`. Prints the result; sends no email, creates no
@@ -509,7 +510,10 @@ warning naming the missing settings. Code: `src/upgrades/`, approval endpoint `s
   build"). `min_age` (default 72 h) counts from the advisor's own first sighting of the candidate digest, with 1 h
   of slack (eligible at `first_seen + min_age - 1 h`): the daily runs start seconds apart, and without it the run
   three days later could land just short of 72 h and hold the candidate another whole day. If no release matched
-  and any registry tag lookup failed, the item is an error, not an "unreleased build". When the watched tag is major-only (`1`, `v3`), only releases of that major are considered, before the
+  and any registry tag lookup failed, the item is an error, not an "unreleased build". A tag the registry does not
+  have (404, e.g. CI still building, or a tag format the project never publishes) is an answer, not a failure: it
+  matches nothing. A 404 for an unknown repository (`NAME_UNKNOWN`) is still a failure, so a misconfigured entry
+  errors instead of holding every candidate as unreleased. When the watched tag is major-only (`1`, `v3`), only releases of that major are considered, before the
   10-lookup cap, so a maintained back-branch is not crowded out by newer majors (leading zeros do not count as a major tag). If that major has no release, a warning is logged and all releases are used. `list_releases` fetches up to four pages of 30 (stopping on a short page or at 120), each its own size-capped request; a later-page failure keeps the earlier pages.
 - Forced `needs_you`: a major version (or a `0.x` minor) change, a candidate not newer than the running version, an
   unknown running version, a failed review, and an ambiguous or unparseable model answer (anything but exactly one
@@ -527,7 +531,10 @@ generic denied page, so unauthenticated callers never learn the config state), t
 
 1. `GET /upgrades/batches/{id}` serves a launcher: one inline script, pinned by hash in the CSP, copies the token from
    the fragment into a form, clears the fragment with `history.replaceState` and POSTs it. It reads no token and
-   touches no state; without JavaScript a `<noscript>` note explains.
+   touches no state; without JavaScript a `<noscript>` note explains. Browsers keep a fragment across plain redirects
+   but not necessarily across an interactive Access sign-in, so the first click after the Access session expired can
+   arrive without the token. The page then says "This link has no approval token. If you just signed in, open the
+   link from the email again (nothing has been used up)": the second click, now signed in, carries it.
 2. `POST /upgrades/batches/{id}/view` (form: token) runs `check_batch` (no write; 403 invalid, 410 used/expired) and
    renders the review page. Superseded items are unticked and labelled.
 3. `POST /upgrades/batches/{id}` (the review page's Approve form, action `../{id}`) deploys. Order: bounded form,
@@ -538,10 +545,13 @@ Per ticked item a deploy happens only if it is still the newest verdict of its c
 including a hold, supersedes it), WUD still offers exactly the reviewed digest, and that digest is not already
 running; otherwise it is recorded `skipped`. A deploy row is written *before* WUD is asked (`outcome=triggering`,
 with the pre-deploy digest); if that write fails nothing is triggered. The row's `trigger_state` then records how the
-trigger ended: `triggered`, `trigger_error` (WUD error, our 600 s timeout, or a bug) or `interrupted` (shutdown).
+trigger ended: `triggered`, `trigger_error` (WUD error, our 600 s timeout, or a bug) or `interrupted` (shutdown),
+and `settled_at` when. The 600 s is a hard total deadline (`asyncio.timeout` around the request; httpx's own timeout
+is per operation and alone could be outlived by a slowly trickled answer).
 Every settled row becomes `pending_verify`; `triggered` and `trigger_error` are verified after the usual delay, even
 if the settle write failed. Shutdown waits 5 s for in-flight deploys (inside Docker's 10 s stop timeout); a
-`triggering` row older than twice the trigger timeout (a hard kill) is settled as `interrupted` by `verify_pending`.
+`triggering` row older than the trigger deadline plus 60 s of grace (a hard kill) is settled as `interrupted` by
+`verify_pending`, with `settled_at` = `started_at` + 600 s, the latest moment the trigger could have been running.
 
 ### Verification and email
 

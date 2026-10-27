@@ -440,7 +440,8 @@ POST /upgrades/batches/{id}        (Approve, action "../{id}")
 background: deploy_approved()  # one at a time, under a lock
   per verdict: latest verdict? -> WUD candidate == reviewed digest? -> not already running?
                -> save "triggering" row (pre-deploy digest; write fails -> failed, never triggered)
-               -> trigger_deploy -> settle_trigger: triggered | trigger_error | interrupted (shutdown)
+               -> trigger_deploy (hard 600 s deadline)
+               -> settle_trigger (+ settled_at): triggered | trigger_error | interrupted (shutdown)
                -> pending_verify -> _verify_later(delay)   # also when the settle write failed
                otherwise skipped / failed with the reason
 ```
@@ -449,8 +450,9 @@ background: deploy_approved()  # one at a time, under a lock
 
 ```
 verify_pending()    # daily run and startup
-  -> "triggering" rows started before now - 2 x TRIGGER_TIMEOUT -> settle as interrupted (each row on its own)
-  -> every pending_verify row older than the delay -> verify_deploy
+  -> "triggering" rows started before now - (TRIGGER_TIMEOUT + REAP_GRACE) -> settle as interrupted, settled_at =
+     started_at + TRIGGER_TIMEOUT (each row on its own)
+  -> every pending_verify row whose settled_at (else started_at) is older than the delay -> verify_deploy
 verify_deploy(id)   # after the delay, or from verify_pending()
   -> WUD running digest == approved?   (no -> digest_mismatch; trigger_state interrupted/trigger_error and still the
                                         pre-deploy digest -> failed "not deployed (...)", no restore advice)

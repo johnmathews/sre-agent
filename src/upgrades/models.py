@@ -40,6 +40,8 @@ class DeployRecord(BaseModel):
     running_digest: str | None
     detail: str
     trigger_state: TriggerState | None = None
+    # When the WUD trigger ended (settle_trigger); None while triggering and for rows that never reached the trigger.
+    settled_at: datetime | None = None
 
 
 class Batch(BaseModel):

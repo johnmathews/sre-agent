@@ -1,5 +1,6 @@
 """Client for What's Up Docker's API: detect pending updates and trigger a deploy."""
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -17,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 DOCKER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 GET_TIMEOUT_SECONDS = 30.0
-# WUD answers the trigger POST only after the deploy has finished.
+# WUD answers the trigger POST only after the deploy has finished. A hard total deadline: httpx's own timeout is per
+# operation, so without the asyncio.timeout a slowly trickled answer could outlive it (verify.py's reaper relies on it).
 TRIGGER_TIMEOUT_SECONDS = 600.0
 
 
@@ -120,8 +122,13 @@ async def trigger_deploy(c: AdvisedContainer, wud_id: str) -> None:
     base = f"{c.wud_url.rstrip('/')}/api/containers/{quote(wud_id, safe='')}"
     url = f"{base}/triggers/dockercompose/{quote(c.wud_trigger, safe='')}"
     try:
-        async with httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS, follow_redirects=False) as client:
+        async with (
+            asyncio.timeout(TRIGGER_TIMEOUT_SECONDS),
+            httpx.AsyncClient(auth=_auth(), timeout=TRIGGER_TIMEOUT_SECONDS, follow_redirects=False) as client,
+        ):
             response = await bounded_request(client, "POST", url)
+    except TimeoutError as exc:
+        raise _fail(f"WUD deploy request for {_where(c)} timed out after {TRIGGER_TIMEOUT_SECONDS:.0f} s") from exc
     except ResponseTooLarge as exc:
         raise _fail(f"WUD response too large for {_where(c)}") from exc
     except (httpx.HTTPError, httpx.InvalidURL) as exc:

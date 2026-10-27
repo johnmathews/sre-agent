@@ -115,10 +115,25 @@ def _digest_or_fail(value: object, where: str, what: str) -> str:
     return value
 
 
+def _error_codes(response: BoundedResponse) -> set[str]:
+    """The OCI distribution error codes in a body (``{"errors": [{"code": ...}]}``); empty if there are none."""
+    try:
+        body = response.json()
+    except ValueError:
+        return set()
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return set()
+    return {e["code"] for e in errors if isinstance(e, dict) and isinstance(e.get("code"), str)}
+
+
 async def tag_digests(registry: str, repository: str, tag: str) -> set[str]:
     """Digests ``registry/repository:tag`` resolves to: the index digest plus every platform manifest digest.
 
-    A single (non-index) manifest yields just its own digest.
+    A single (non-index) manifest yields just its own digest. A tag that does not exist (404, e.g. CI still building or
+    a tag format the project never publishes) yields an empty set: the registry answered, nothing matches. A 404 for an
+    unknown repository (``NAME_UNKNOWN``) is still an error, since every tag of a misconfigured entry would otherwise
+    look unreleased.
     """
     where = _where(registry, repository, tag)
     url = f"https://{registry}/v2/{repository}/manifests/{tag}"
@@ -139,6 +154,9 @@ async def tag_digests(registry: str, repository: str, tag: str) -> set[str]:
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise _fail(f"registry request failed for {where}: {_exc_text(exc)}") from exc
     _check_response(response, where)
+    if response.status_code == httpx.codes.NOT_FOUND and "NAME_UNKNOWN" not in _error_codes(response):
+        logger.info("registry has no %s (HTTP 404); treating it as unpublished", where)
+        return set()
     if not response.is_success:
         raise _fail(f"registry returned HTTP {response.status_code} for {where}")
     header_digest = response.headers.get("Docker-Content-Digest")

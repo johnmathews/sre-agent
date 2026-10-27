@@ -413,8 +413,8 @@ def test_a_triggering_row_settles_once(conn: sqlite3.Connection) -> None:
     )
     assert [d.id for d in store.triggering_deploys(conn)] == [did]
     assert store.pending_verifications(conn) == []
-    assert store.settle_trigger(conn, did, "triggered", "deploy triggered") is True
-    assert store.settle_trigger(conn, did, "interrupted", "too late") is False
+    assert store.settle_trigger(conn, did, "triggered", "deploy triggered", now=T0) is True
+    assert store.settle_trigger(conn, did, "interrupted", "too late", now=T0) is False
     deploy = store.get_deploy(conn, did)
     assert deploy is not None
     assert (deploy.outcome, deploy.trigger_state, deploy.detail, deploy.running_digest) == (
@@ -426,10 +426,47 @@ def test_a_triggering_row_settles_once(conn: sqlite3.Connection) -> None:
     assert store.triggering_deploys(conn) == []
     assert [d.id for d in store.pending_verifications(conn)] == [did]
     with pytest.raises(LookupError):
-        store.settle_trigger(conn, 999, "triggered", "")
+        store.settle_trigger(conn, 999, "triggered", "", now=T0)
     for bad in ("bogus", "triggering"):
         with pytest.raises(ValueError, match="trigger_state"):
-            store.settle_trigger(conn, did, bad, "")  # type: ignore[arg-type]
+            store.settle_trigger(conn, did, bad, "", now=T0)  # type: ignore[arg-type]
+
+
+def test_settling_records_when_the_trigger_ended(conn: sqlite3.Connection) -> None:
+    vid = _verdict(conn)
+    kw = {"verdict_id": vid, "now": T0, "running_digest": "sha256:old", "detail": "deploy triggering"}
+    did = store.save_deploy(conn, outcome="triggering", trigger_state="triggering", **kw)  # type: ignore[arg-type]
+    direct = store.save_deploy(conn, outcome="pending_verify", **kw)  # type: ignore[arg-type]
+    unsettled = store.get_deploy(conn, did)
+    assert unsettled is not None and unsettled.settled_at is None
+    ended = T0 + timedelta(minutes=10)
+    assert store.settle_trigger(conn, did, "triggered", "deploy triggered", now=ended)
+    assert not store.settle_trigger(conn, did, "interrupted", "too late", now=ended + timedelta(hours=1))
+    settled = store.get_deploy(conn, did)
+    assert settled is not None and settled.settled_at == ended  # the first settle wins; a late one changes nothing
+    never_triggered = store.get_deploy(conn, direct)
+    assert never_triggered is not None and never_triggered.settled_at is None
+    with pytest.raises(ValueError, match="naive"):
+        store.settle_trigger(conn, did, "triggered", "", now=datetime(2026, 10, 26))  # noqa: DTZ001
+
+
+def test_connect_adds_settled_at_to_an_existing_store(tmp_path: Path) -> None:
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE deploys (id INTEGER PRIMARY KEY AUTOINCREMENT, verdict_id INTEGER NOT NULL,"
+        " started_at TEXT NOT NULL, outcome TEXT NOT NULL, running_digest TEXT, detail TEXT NOT NULL,"
+        " trigger_state TEXT);"
+        "INSERT INTO deploys (verdict_id, started_at, outcome, running_digest, detail, trigger_state)"
+        " VALUES (1, '2026-10-26T06:00:00.000000+00:00', 'pending_verify', NULL, 'x', 'triggered');"
+    )
+    old.commit()
+    old.close()
+    for _ in range(2):  # idempotent: the second connect finds the column already there
+        conn = store.connect(path)
+        deploy = store.get_deploy(conn, 1)
+        assert deploy is not None and deploy.settled_at is None and deploy.started_at == T0
+        conn.close()
 
 
 def test_trigger_state_defaults_to_none_and_is_validated(conn: sqlite3.Connection) -> None:

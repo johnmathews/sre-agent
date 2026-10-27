@@ -102,10 +102,33 @@ async def test_tag_digests_token_response_without_token_raises() -> None:
         await tag_digests(REGISTRY, "team/app", "v1")
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {"errors": [{"code": "MANIFEST_UNKNOWN", "message": "manifest unknown"}]},
+    ],
+)
 @respx.mock
-async def test_tag_digests_404_raises_with_status() -> None:
-    respx.get(MANIFEST_URL).mock(return_value=httpx.Response(404))
+async def test_tag_digests_missing_tag_is_an_answer_with_no_digests(body: object) -> None:
+    """A release whose image tag was never published (or is still building) resolves to nothing, not an error."""
+    respx.get(MANIFEST_URL).mock(return_value=httpx.Response(404, json=body) if body else httpx.Response(404))
+    assert await tag_digests(REGISTRY, "team/app", "v1") == set()
+
+
+@respx.mock
+async def test_tag_digests_unknown_repository_still_raises() -> None:
+    """NAME_UNKNOWN is a misconfigured repository: every tag would look unreleased, so it stays an error."""
+    body = {"errors": [{"code": "NAME_UNKNOWN", "message": "repository name not known to registry"}]}
+    respx.get(MANIFEST_URL).mock(return_value=httpx.Response(404, json=body))
     with pytest.raises(RegistryError, match="404"):
+        await tag_digests(REGISTRY, "team/app", "v1")
+
+
+@respx.mock
+async def test_tag_digests_other_errors_still_raise_with_status() -> None:
+    respx.get(MANIFEST_URL).mock(return_value=httpx.Response(500))
+    with pytest.raises(RegistryError, match="500"):
         await tag_digests(REGISTRY, "team/app", "v1")
 
 

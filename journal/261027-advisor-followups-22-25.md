@@ -35,3 +35,19 @@ Four findings from the advisor's final review (`261026-upgrade-advisor.md`), fix
   (`needs_you`) would mislabel a transient outage, and the error item already says what failed.
 
 Verification: `make check` green (1421 tests).
+
+## Wrap-up (same session)
+
+- Deployed with `make sre-upgrade` from proxmox-setup at 22:06 CET. The live store gained `deploys.settled_at`,
+  and the dry run listed 6 items, all held as "too new", with no errors (confirmed).
+- The wrap-up doc audit corrected one pre-existing claim. A deploy whose settle write fails is not verified on
+  schedule: the scheduled `verify_deploy` skips a still-`triggering` row, and `verify_pending` reaps it later.
+  `architecture.md`, `code-flow.md` and `.env.example` now say so (branch `docs/advisor-settle-wording`).
+
+## What is deliberately not done
+
+- No race guard on the `settled_at` migration. Two processes opening an old-format store at once could both try the
+  `ALTER`. The live store is already migrated, and new stores get the column from `CREATE TABLE`, so the race can no
+  longer occur.
+- A 404 with no `NAME_UNKNOWN` body (empty or non-JSON) counts as "unpublished". A registry that answered that way for
+  an unknown repository would show as a daily "unreleased build" hold: visible in the email, not silent.

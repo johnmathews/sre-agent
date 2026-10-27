@@ -14,7 +14,7 @@ from prometheus_client import REGISTRY
 
 from src.upgrades import store
 from src.upgrades.models import DeployOutcome, TriggerState
-from src.upgrades.verify import INTERRUPTED_IN_FLIGHT, verify_deploy, verify_pending
+from src.upgrades.verify import INTERRUPTED_IN_FLIGHT, REAP_GRACE_SECONDS, verify_deploy, verify_pending
 from src.upgrades.wud import TRIGGER_TIMEOUT_SECONDS
 
 OLD = "sha256:" + "a" * 64
@@ -69,6 +69,7 @@ def _seed(
     running_digest: str | None = None,
     outcome: DeployOutcome = "pending_verify",
     trigger_state: TriggerState | None = None,
+    settled: datetime | None = None,
 ) -> int:
     conn = store.connect(settings.upgrade_advisor_db_path)
     vid = store.save_verdict(
@@ -87,11 +88,13 @@ def _seed(
         conn,
         verdict_id=vid,
         now=started or datetime.now(UTC),
-        outcome=outcome,
+        outcome="triggering" if settled else outcome,
         running_digest=running_digest,
         detail=detail,
-        trigger_state=trigger_state,
+        trigger_state="triggering" if settled else trigger_state,
     )
+    if settled:  # a trigger that ended at ``settled``, the way deploy._trigger records it
+        assert store.settle_trigger(conn, did, trigger_state or "triggered", detail, now=settled)
     conn.close()
     return did
 
@@ -436,7 +439,8 @@ async def test_trigger_error_but_new_image_running_verifies_normally(mock_settin
 @pytest.mark.integration
 @respx.mock
 async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_settings: Any, email: MagicMock) -> None:
-    long_ago = datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS + 60)
+    # reaped (past the trigger timeout plus grace) and due (its settle is past the 300 s verify delay)
+    long_ago = datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + 300 + 60)
     killed = _seed(
         mock_settings,
         started=long_ago,
@@ -447,7 +451,8 @@ async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_setting
     )
     in_flight = _seed(
         mock_settings,
-        started=datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS - 60),  # inside the margin
+        started=datetime.now(UTC)
+        - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + REAP_GRACE_SECONDS - 30),  # inside the margin
         outcome="triggering",
         detail="deploy triggering",
         running_digest=OLD,
@@ -460,7 +465,7 @@ async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_setting
     ]
     conn = store.connect(mock_settings.upgrade_advisor_db_path)
     try:
-        assert [d.id for d in store.triggering_deploys(conn)] == [in_flight]  # within 2 x the trigger timeout
+        assert [d.id for d in store.triggering_deploys(conn)] == [in_flight]  # within the trigger timeout plus grace
     finally:
         conn.close()
     assert email.call_args.args[2] == "Upgrade not deployed: prometheus on prometheus"
@@ -468,10 +473,50 @@ async def test_verify_pending_settles_a_trigger_left_by_a_hard_kill(mock_setting
 
 @pytest.mark.integration
 @respx.mock
+async def test_the_verify_delay_runs_from_when_the_trigger_returned(mock_settings: Any, email: MagicMock) -> None:
+    """A slow trigger started long ago but returned a minute ago: it is not verified until the delay has passed."""
+    now = datetime.now(UTC)
+    two_hours_ago = now - timedelta(hours=2)
+    just_returned = _seed(mock_settings, started=two_hours_ago, settled=now - timedelta(minutes=1))
+    returned_earlier = _seed(mock_settings, started=two_hours_ago, settled=now - timedelta(minutes=10))
+    _wud()
+    respx.get(READY).mock(return_value=httpx.Response(200))
+    _loki("0", "0")
+    results = await verify_pending()
+    assert [r.id for r in results] == [returned_earlier]
+    conn = store.connect(mock_settings.upgrade_advisor_db_path)
+    try:
+        assert [d.id for d in store.pending_verifications(conn)] == [just_returned]
+    finally:
+        conn.close()
+
+
+@pytest.mark.integration
+async def test_a_reaped_trigger_is_settled_at_the_latest_moment_it_could_have_run(
+    mock_settings: Any, email: MagicMock
+) -> None:
+    """The reaper cannot know when a killed trigger ended, only that the hard deadline bounds it."""
+    started = datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + REAP_GRACE_SECONDS + 60)
+    killed = _seed(mock_settings, started=started, outcome="triggering", running_digest=OLD, trigger_state="triggering")
+    with patch("src.upgrades.verify.verify_deploy", new_callable=AsyncMock):
+        await verify_pending()
+    conn = store.connect(mock_settings.upgrade_advisor_db_path)
+    try:
+        deploy = store.get_deploy(conn, killed)
+    finally:
+        conn.close()
+    assert deploy is not None
+    assert deploy.trigger_state == "interrupted"
+    assert deploy.settled_at == deploy.started_at + timedelta(seconds=TRIGGER_TIMEOUT_SECONDS)
+
+
+@pytest.mark.integration
+@respx.mock
 async def test_a_reaper_failure_does_not_stop_other_rows_or_pending_verifications(
     mock_settings: Any, email: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    long_ago = datetime.now(UTC) - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS + 60)
+    # reaped (past the trigger timeout plus grace) and due (its settle is past the 300 s verify delay)
+    long_ago = datetime.now(UTC) - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + 300 + 60)
     kw: dict[str, Any] = {"outcome": "triggering", "detail": "deploy triggering", "running_digest": OLD}
     broken = _seed(mock_settings, started=long_ago, trigger_state="triggering", **kw)
     reaped = _seed(mock_settings, started=long_ago, trigger_state="triggering", **kw)
@@ -481,10 +526,10 @@ async def test_a_reaper_failure_does_not_stop_other_rows_or_pending_verification
     _loki("0", "0")
     real = store.settle_trigger
 
-    def flaky(conn: Any, deploy_id: int, *args: Any) -> bool:
+    def flaky(conn: Any, deploy_id: int, *args: Any, **kwargs: Any) -> bool:
         if deploy_id == broken:
             raise RuntimeError("database is locked")
-        return real(conn, deploy_id, *args)
+        return real(conn, deploy_id, *args, **kwargs)
 
     with patch.object(store, "settle_trigger", side_effect=flaky):
         results = await verify_pending()

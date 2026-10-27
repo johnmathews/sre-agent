@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS deploys (
     running_digest TEXT,
     detail         TEXT NOT NULL,
     trigger_state  TEXT
-        CHECK (trigger_state IS NULL OR trigger_state IN ('triggering','triggered','trigger_error','interrupted'))
+        CHECK (trigger_state IS NULL OR trigger_state IN ('triggering','triggered','trigger_error','interrupted')),
+    settled_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deploys_started ON deploys(started_at);
 
@@ -99,7 +100,16 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA_SQL)
+    _add_missing_columns(conn)
     return conn
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring a store created before a column existed up to the schema (``CREATE TABLE IF NOT EXISTS`` never alters)."""
+    deploy_columns = {row["name"] for row in conn.execute("PRAGMA table_info(deploys)")}
+    if "settled_at" not in deploy_columns:  # added 2026-10-27: when the WUD trigger ended
+        with conn:
+            conn.execute("ALTER TABLE deploys ADD COLUMN settled_at TEXT")
 
 
 def _to_str(value: datetime) -> str:
@@ -383,18 +393,21 @@ def update_deploy(
         raise LookupError(msg)
 
 
-def settle_trigger(conn: sqlite3.Connection, deploy_id: int, trigger_state: TriggerState, detail: str) -> bool:
-    """Compare-and-set a ``triggering`` deploy to ``pending_verify`` with how its trigger ended.
+def settle_trigger(
+    conn: sqlite3.Connection, deploy_id: int, trigger_state: TriggerState, detail: str, *, now: datetime
+) -> bool:
+    """Compare-and-set a ``triggering`` deploy to ``pending_verify`` with how and when (``now``) its trigger ended.
 
     Returns True when this call made the change, False when the row was no longer ``triggering`` (already settled).
     Raises LookupError if the id is unknown, ValueError for a state that is not an end state.
     """
     _check_choice("trigger_state", trigger_state, SETTLED_TRIGGER_STATES)
+    settled_at = _to_str(now)
     with conn:
         cur = conn.execute(
-            "UPDATE deploys SET outcome = 'pending_verify', trigger_state = ?, detail = ?"
+            "UPDATE deploys SET outcome = 'pending_verify', trigger_state = ?, detail = ?, settled_at = ?"
             " WHERE id = ? AND outcome = 'triggering'",
-            (trigger_state, detail, deploy_id),
+            (trigger_state, detail, settled_at, deploy_id),
         )
         if cur.rowcount == 1:
             return True
@@ -436,6 +449,7 @@ def _row_to_deploy(row: sqlite3.Row) -> DeployRecord:
         running_digest=row["running_digest"],
         detail=row["detail"],
         trigger_state=row["trigger_state"],
+        settled_at=_from_str(row["settled_at"]) if row["settled_at"] else None,
     )
 
 

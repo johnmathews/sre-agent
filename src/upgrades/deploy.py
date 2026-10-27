@@ -164,10 +164,10 @@ def _save(
 
 
 def _settle(conn: sqlite3.Connection, deploy_id: int, state: TriggerState, detail: str) -> bool:
-    """Record how the trigger ended. On a DB error the row stays ``triggering`` and ``verify_pending`` settles it as
-    interrupted once ``TRIGGER_TIMEOUT_SECONDS`` have passed."""
+    """Record how and when the trigger ended. On a DB error the row stays ``triggering`` and ``verify_pending`` settles
+    it as interrupted once ``TRIGGER_TIMEOUT_SECONDS`` (plus a grace) have passed."""
     try:
-        return store.settle_trigger(conn, deploy_id, state, detail)
+        return store.settle_trigger(conn, deploy_id, state, detail, now=datetime.now(UTC))
     except Exception:
         logger.exception(
             "Could not record the trigger result (%s) of deploy %s; settled by a later run", state, deploy_id

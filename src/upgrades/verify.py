@@ -32,6 +32,9 @@ BASELINE_OFFSET = timedelta(hours=1)
 # trigger may or may not have taken effect).
 INTERRUPTED_IN_FLIGHT = "interrupted during deploy (shutdown); verified next run"
 NOT_DEPLOYED = "not deployed (interrupted by shutdown); approve again from the next email"
+# A ``triggering`` row is reaped once its trigger is past WUD's hard deadline (wud.TRIGGER_TIMEOUT_SECONDS) by this
+# much: the margin covers the settle write after the trigger returns, not the trigger itself.
+REAP_GRACE_SECONDS = 60.0
 
 
 class _LokiStatusError(Exception):
@@ -283,7 +286,11 @@ async def verify_deploy(deploy_id: int) -> DeployRecord:
 
 
 def _reap_stale_triggers(conn: sqlite3.Connection, cutoff: datetime) -> None:
-    """Settle ``triggering`` rows that started strictly before ``cutoff`` as interrupted (each row on its own)."""
+    """Settle ``triggering`` rows that started strictly before ``cutoff`` as interrupted (each row on its own).
+
+    When such a trigger really ended is unknown; the hard deadline bounds it, so the row is settled at
+    ``started_at + TRIGGER_TIMEOUT_SECONDS`` and the verify delay runs from there.
+    """
     try:
         triggering = store.triggering_deploys(conn)
     except Exception:
@@ -293,7 +300,8 @@ def _reap_stale_triggers(conn: sqlite3.Connection, cutoff: datetime) -> None:
         if stale.started_at >= cutoff:
             continue
         try:
-            if store.settle_trigger(conn, stale.id, "interrupted", INTERRUPTED_IN_FLIGHT):
+            ended_by = stale.started_at + timedelta(seconds=TRIGGER_TIMEOUT_SECONDS)
+            if store.settle_trigger(conn, stale.id, "interrupted", INTERRUPTED_IN_FLIGHT, now=ended_by):
                 logger.warning(
                     "deploy %s was left mid-trigger (process killed?); verifying it as interrupted", stale.id
                 )
@@ -302,21 +310,23 @@ def _reap_stale_triggers(conn: sqlite3.Connection, cutoff: datetime) -> None:
 
 
 async def verify_pending() -> list[DeployRecord]:
-    """Verify every pending deploy older than the verify delay (also picks up ones lost to a restart).
+    """Verify every pending deploy whose trigger ended more than the verify delay ago (also picks up ones lost to a
+    restart). The delay runs from ``settled_at``, when the trigger returned, not from ``started_at``: a trigger can take
+    up to ``TRIGGER_TIMEOUT_SECONDS``. Rows written before ``settled_at`` existed fall back to ``started_at``.
 
-    A ``triggering`` row older than twice WUD's trigger timeout belongs to a process that died mid-trigger (a hard
-    kill): it is settled as ``interrupted`` and verified like one. Younger ones may still be in flight and are left
-    alone; the margin keeps the reaper clear of a slow trigger that is about to return. A failure on one row is
-    logged and never stops the others or the pending verifications.
+    A ``triggering`` row older than WUD's hard trigger deadline plus ``REAP_GRACE_SECONDS`` belongs to a process that
+    died mid-trigger (a hard kill): it is settled as ``interrupted`` and verified like one once its delay has passed.
+    Younger ones may still be in flight and are left alone. A failure on one row is logged and never stops the others
+    or the pending verifications.
     """
     settings = get_settings()
     now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=settings.upgrade_advisor_verify_delay_seconds)
-    trigger_cutoff = now - timedelta(seconds=2 * TRIGGER_TIMEOUT_SECONDS)
+    trigger_cutoff = now - timedelta(seconds=TRIGGER_TIMEOUT_SECONDS + REAP_GRACE_SECONDS)
     conn = store.connect(settings.upgrade_advisor_db_path)
     try:
         _reap_stale_triggers(conn, trigger_cutoff)
-        due = [d for d in store.pending_verifications(conn) if d.started_at <= cutoff]
+        due = [d for d in store.pending_verifications(conn) if (d.settled_at or d.started_at) <= cutoff]
     finally:
         conn.close()
     results: list[DeployRecord] = []

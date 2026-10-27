@@ -312,6 +312,8 @@ async def test_get_serves_a_launcher_that_posts_the_fragment_token(
     assert token not in page and "patch release" not in page  # nothing about the batch before the token is checked
     [script] = re.findall(r"<script>(.*?)</script>", page, flags=re.DOTALL)
     assert "location.hash" in script and "history.replaceState" in script and ".submit()" in script
+    # An interactive Access sign-in can drop the #fragment: the no-token message sends the approver back to the email.
+    assert "If you just signed in, open the link from the email again" in script
     csp = LAUNCH_CSP_RE.fullmatch(resp.headers["Content-Security-Policy"])
     assert csp is not None
     assert csp.group(1) == base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
@@ -986,7 +988,9 @@ async def test_a_trigger_returning_after_the_reaper_is_still_verified(
         conn = _conn(mock_settings)
         try:
             [row] = store.triggering_deploys(conn)
-            assert store.settle_trigger(conn, row.id, "interrupted", verify.INTERRUPTED_IN_FLIGHT)
+            assert store.settle_trigger(
+                conn, row.id, "interrupted", verify.INTERRUPTED_IN_FLIGHT, now=datetime.now(UTC)
+            )
         finally:
             conn.close()
 

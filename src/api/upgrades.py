@@ -47,12 +47,14 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 # The launcher page's only script: move the fragment token into the form, drop the fragment from the address bar and
-# history, and submit. The CSP pins this exact text by hash, so no other script can run on the page.
+# history, and submit. The CSP pins this exact text by hash, so no other script can run on the page. An interactive
+# Cloudflare Access sign-in can drop the fragment, hence the "if you just signed in" hint.
 LAUNCH_SCRIPT = (
     '(function(){var f=document.getElementById("approval-launch");'
     "var m=/^#token=([A-Za-z0-9_%-]{1,512})$/.exec(location.hash);"
     'history.replaceState(null,"",location.pathname+location.search);'
-    'if(!m){document.getElementById("launch-status").textContent="This link has no approval token.";return;}'
+    'if(!m){document.getElementById("launch-status").textContent="This link has no approval token. If you just'
+    ' signed in, open the link from the email again (nothing has been used up).";return;}'
     "f.elements.token.value=decodeURIComponent(m[1]);f.submit();})();"
 )
 LAUNCH_SCRIPT_HASH = base64.b64encode(hashlib.sha256(LAUNCH_SCRIPT.encode()).digest()).decode()

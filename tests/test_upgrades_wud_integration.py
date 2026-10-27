@@ -1,8 +1,10 @@
 """Integration tests for the WUD client (mocked HTTP)."""
 
+import asyncio
 import base64
 import traceback
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -144,6 +146,19 @@ class TestTriggerDeploy:
             return_value=httpx.Response(502, text="bad gateway")
         )
         with pytest.raises(WudError, match="502"):
+            await trigger_deploy(_container(), "abc123def456")
+
+    async def test_trigger_has_a_hard_total_deadline(self) -> None:
+        """httpx's timeout is per operation, so a trickled answer could outlive it; the deadline is total."""
+
+        async def trickle(*_args: Any, **_kwargs: Any) -> None:
+            await asyncio.sleep(5)
+
+        with (
+            patch("src.upgrades.wud.TRIGGER_TIMEOUT_SECONDS", 0.05),
+            patch("src.upgrades.wud.bounded_request", side_effect=trickle),
+            pytest.raises(WudError, match=r"prometheus.*timed out"),
+        ):
             await trigger_deploy(_container(), "abc123def456")
 
     @respx.mock

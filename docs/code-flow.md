@@ -442,7 +442,8 @@ background: deploy_approved()  # one at a time, under a lock
                -> save "triggering" row (pre-deploy digest; write fails -> failed, never triggered)
                -> trigger_deploy (hard 600 s deadline)
                -> settle_trigger (+ settled_at): triggered | trigger_error | interrupted (shutdown)
-               -> pending_verify -> _verify_later(delay)   # also when the settle write failed
+               -> pending_verify -> _verify_later(delay)   # scheduled even if the settle write failed; it then skips the
+                                                           #   still-"triggering" row and verify_pending reaps it later
                otherwise skipped / failed with the reason
 ```
 

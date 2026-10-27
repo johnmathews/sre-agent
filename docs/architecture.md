@@ -548,8 +548,9 @@ with the pre-deploy digest); if that write fails nothing is triggered. The row's
 trigger ended: `triggered`, `trigger_error` (WUD error, our 600 s timeout, or a bug) or `interrupted` (shutdown),
 and `settled_at` when. The 600 s is a hard total deadline (`asyncio.timeout` around the request; httpx's own timeout
 is per operation and alone could be outlived by a slowly trickled answer).
-Every settled row becomes `pending_verify`; `triggered` and `trigger_error` are verified after the usual delay, even
-if the settle write failed. Shutdown waits 5 s for in-flight deploys (inside Docker's 10 s stop timeout); a
+Every settled row becomes `pending_verify`; `triggered` and `trigger_error` are verified after the usual delay. If
+the settle write failed, the row stays `triggering`: the scheduled verification skips it (with a warning), and a later
+`verify_pending` reaps it as `interrupted` (below) and verifies it then. Shutdown waits 5 s for in-flight deploys (inside Docker's 10 s stop timeout); a
 `triggering` row older than the trigger deadline plus 60 s of grace (a hard kill) is settled as `interrupted` by
 `verify_pending`, with `settled_at` = `started_at` + 600 s, the latest moment the trigger could have been running.
 

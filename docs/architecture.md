@@ -572,11 +572,17 @@ failing does not stop the others. An error item shows our own cleaned message fo
 
 ### Security model
 
-- Cloudflare Access is a single wildcard application here, so the Access JWT (RS256, audience and issuer checked,
-  JWKS cached, refetch on unknown key at most once a minute) proves only "a signed-in user". Two further factors:
+- The SRE host has its own Cloudflare Access application, whose AUD tag is `CF_ACCESS_AUD`. The Access JWT (RS256,
+  audience and issuer checked, JWKS cached, refetch on unknown key at most once a minute) proves only a sign-in that
+  the application's policy admitted, not who may deploy. Two further factors:
   the JWT email must be in `UPGRADE_ADVISOR_APPROVER_EMAILS` (compared trimmed, NFKC-normalised and case-folded on
   both sides; any non-ASCII address never matches, and non-ASCII configured entries are dropped with a startup
   warning), and the single-use token: 256-bit random, stored as a hash, consumed atomically, never logged.
+- Access completes a fresh sign-in at `/cdn-cgi/access/authorized` on the application's **first** domain, not on the
+  host the link named. So the SRE host must be that application's first domain. If a retired hostname stays first,
+  every new sign-in ends on a dead name before the approval page loads; a browser that already holds a session
+  never hits it. That happened in October 2026. Edit the application in place: a new one has a new AUD, and every
+  approval fails until `CF_ACCESS_AUD` changes.
 - The token travels only in the URL fragment and in POST bodies, never in a request URL, so no nginx, Traefik,
   uvicorn or Cloudflare log line (and so nothing in Loki) can hold it. uvicorn's access log still redacts a
   `?token=` value on these paths as defence in depth.

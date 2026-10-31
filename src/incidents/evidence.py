@@ -34,8 +34,8 @@ The sources
         Proxmox tasks started in the window (backups, migrations, guest stops and starts). A guest-level action
         explains an outage of everything on that guest.
     ``logins``
-        ``sudo`` and ``sshd`` journal lines on the host, only when the host ships them. A login just before the
-        failure suggests a manual action.
+        ``sudo`` and ``sshd`` journal lines on the host in the window. Skipped when the host shipped neither in the 7
+        days before the window ends. A login just before the failure suggests a manual action.
     ``deploys``
         What's Up Docker log lines on the host naming the container, plus Upgrade Advisor deploy rows for the
         container (read-only). A deploy just before the failure is the usual suspect.
@@ -103,6 +103,7 @@ LOGS_BEFORE_FAILURE = 15  # container log lines read just before the first faile
 LOGS_BEFORE_LOOKBACK = timedelta(hours=1)  # how far back to look for those lines
 LOGS_AFTER_PIVOT = timedelta(minutes=1)
 PROXMOX_TASK_LIMIT = 50
+LOGINS_LOOKBACK = timedelta(days=7)  # how far back to look for sshd or sudo lines before deciding a host ships none
 
 NO_HOST = "no host mapped for this check"
 
@@ -623,9 +624,12 @@ async def _proxmox_tasks(node: str, window: Window) -> Source:
 
 
 async def _logins(host: str, window: Window) -> Source:
-    services = await _loki_label_values("service_name", _selector(("hostname", "=", host)), window.start, window.end)
+    # Login lines are rare (a few sudo lines a week on an LXC), so look back further than the window.
+    host_selector = _selector(("hostname", "=", host))
+    services = await _loki_label_values("service_name", host_selector, window.end - LOGINS_LOOKBACK, window.end)
     if not _LOGIN_SERVICES.intersection(services):
-        return Source(name="logins", status="skipped", detail="host does not ship login logs")
+        detail = f"host shipped no sshd or sudo lines in the {LOGINS_LOOKBACK.days} days before the outage"
+        return Source(name="logins", status="skipped", detail=detail)
     query = _selector(("hostname", "=", host), ("service_name", "=~", "sudo|sshd"))
     entries = await _loki_lines(query, window.start, window.end, limit=LOKI_LIMIT, direction="forward")
     lines = [f"{format_hms(e.at)} {e.labels.get('service_name', '?')} {e.text}" for e in entries]

@@ -93,7 +93,7 @@ async def _check_logs(container: str, now: datetime) -> tuple[str | None, str | 
     """Return ``(failure, warning)``; Loki being unconfigured or unreachable is only a warning."""
     base_url = get_settings().loki_url
     if not base_url:
-        return None, "Loki not configured; error-log check skipped"
+        return None, "Loki not configured, error-log check skipped"
     try:
         current = await _loki_error_count(base_url, container, now)
     except (

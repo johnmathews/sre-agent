@@ -636,7 +636,8 @@ async def test_post_deploys_ticked_items_only(
     resp = await _post(client, bid, token, [up])
     assert resp.status_code == 200
     _assert_security_headers(resp)
-    assert f"Approved by {EMAIL}. Deploying 1 update(s); results arrive by email." in resp.text
+    assert f"Approved by {EMAIL}. Deploying 1 update(s):</p>" in resp.text
+    assert "<li>If a check fails then the advisor emails you immediately.</li>" in resp.text
     assert "prometheus" in resp.text and "openwebui" not in resp.text
     assert fake_wud.triggered == ["prometheus"]
     assert _decisions(mock_settings) == {up: True, need: False}

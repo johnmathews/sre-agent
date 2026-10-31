@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 import src.report.scheduler as sched_mod
-from src.upgrades.email import render, render_abort
+from src.upgrades.email import AFTER_APPROVAL, AFTER_APPROVAL_HEADING, RESULTS_HEADING, render, render_abort
 from src.upgrades.job import ItemResult, RunSummary
 from src.upgrades.models import DeployRecord
 from src.upgrades.review import Review
@@ -52,9 +52,41 @@ def test_email_escapes_html_and_flags_warnings() -> None:
     assert "<b>bump</b>" not in html_body
     assert "&lt;b&gt;bump&lt;/b&gt;" in html_body
     assert "&lt;x&gt;" in html_body
-    assert "alpha: verified with warnings" in markdown
+    assert "alpha: upgraded, verified with warnings" in markdown
     assert "Warning: loki skipped <x>" in markdown
-    assert "beta: failed" in markdown
+    assert "beta: upgrade failed" in markdown
+
+
+def test_email_explains_what_happens_after_approval() -> None:
+    _, markdown, html_body = render(_summary())
+    assert f"{AFTER_APPROVAL_HEADING}:" in markdown
+    for line in AFTER_APPROVAL:
+        assert f"- {line}" in markdown
+    assert "<li" in html_body and "the advisor emails you immediately." in html_body
+    assert f"## {RESULTS_HEADING}" in markdown
+
+
+def test_email_has_no_after_approval_note_without_an_approve_link() -> None:
+    summary = _summary()
+    summary.approve_url = None
+    _, markdown, _ = render(summary)
+    assert AFTER_APPROVAL_HEADING not in markdown
+
+
+@pytest.mark.parametrize(
+    ("outcome", "text"),
+    [
+        ("ok", "upgraded and verified"),
+        ("digest_mismatch", "running a different version than approved"),
+        ("skipped", "skipped, not deployed"),
+        ("pending_verify", "deployed, checks not run yet"),
+        ("triggering", "deploy still in progress"),
+    ],
+)
+def test_deploy_outcomes_are_shown_in_plain_words(outcome: str, text: str) -> None:
+    summary = RunSummary(items=[], outcomes=[_deploy(1, outcome, "")], outcome_containers={1: "alpha"})
+    _, markdown, _ = render(summary)
+    assert f"- alpha: {text}" in markdown
 
 
 def test_abort_email_names_only_the_exception_class() -> None:

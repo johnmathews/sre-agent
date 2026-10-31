@@ -260,6 +260,8 @@ async def test_loki_unconfigured_is_a_warning(mock_settings: Any, email: MagicMo
     result = await verify_deploy(did)
     assert result.outcome == "ok"
     assert "Loki not configured" in result.detail
+    # The email splits detail on "; ", so a warning must not contain it or its second half is dropped.
+    assert "warning: Loki not configured, error-log check skipped" in result.detail.split("; ")
 
 
 @pytest.mark.integration

@@ -236,7 +236,7 @@ async def test_yesterdays_deploys_trigger_an_email(env: Any, mocks: dict[str, Ma
     summary = await run_advisor(now=NOW)
     assert summary.outcome_containers
     body = mocks["send"].call_args.args[0]
-    assert "alpha: verified with warnings" in body
+    assert "alpha: upgraded, verified with warnings" in body
 
 
 async def test_unreadable_allowlist_path_aborts_with_email(

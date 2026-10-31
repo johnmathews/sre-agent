@@ -17,6 +17,24 @@ if TYPE_CHECKING:  # job imports this module; the types are only needed for anno
     from src.upgrades.job import ItemResult, RunSummary
 
 WARNING_PREFIX = "warning: "
+RESULTS_HEADING = "Results of approved upgrades (last 24 hours)"
+# Shown under the approve link and on the page after approving, so nobody waits for an email that only comes on failure.
+AFTER_APPROVAL_HEADING = "What happens after you approve"
+AFTER_APPROVAL = (
+    "The advisor deploys each approved upgrade then checks it a few minutes later.",
+    "If a check fails then the advisor emails you immediately.",
+    "The next advisor email lists the results.",
+)
+_LIST_STYLE = "margin: 4px 0; padding-left: 20px;"
+# Plain words for each deploy outcome; the raw codes stay in the store, logs and metrics.
+_OUTCOME_TEXT = {
+    "ok": "upgraded and verified",
+    "failed": "upgrade failed",
+    "digest_mismatch": "running a different version than approved",
+    "skipped": "skipped, not deployed",
+    "pending_verify": "deployed, checks not run yet",
+    "triggering": "deploy still in progress",
+}
 
 # A section is (heading, list of (title, detail lines)).
 _Section = tuple[str, list[tuple[str, list[str]]]]
@@ -36,8 +54,8 @@ def _outcome_entry(summary: "RunSummary", deploy: DeployRecord) -> tuple[str, li
     name = summary.outcome_containers.get(deploy.id, f"deploy {deploy.id}")
     warnings = [p[len(WARNING_PREFIX) :] for p in deploy.detail.split("; ") if p.startswith(WARNING_PREFIX)]
     if deploy.outcome == "ok" and warnings:
-        return f"{name}: verified with warnings", [f"Warning: {w}" for w in warnings]
-    return f"{name}: {deploy.outcome}", [deploy.detail] if deploy.detail else []
+        return f"{name}: upgraded, verified with warnings", [f"Warning: {w}" for w in warnings]
+    return f"{name}: {_OUTCOME_TEXT.get(deploy.outcome, deploy.outcome)}", [deploy.detail] if deploy.detail else []
 
 
 def _sections(summary: "RunSummary") -> list[_Section]:
@@ -50,7 +68,7 @@ def _sections(summary: "RunSummary") -> list[_Section]:
         ("Needs you", [(i.container, _review_lines(i)) for i in needs]),
         ("Held", [(i.container, [i.hold_reason or ""]) for i in held]),
         ("Errors", [(i.container, [i.error or ""]) for i in errors]),
-        ("Yesterday's deploys", [_outcome_entry(summary, d) for d in summary.outcomes]),
+        (RESULTS_HEADING, [_outcome_entry(summary, d) for d in summary.outcomes]),
     ]
     return [(heading, entries) for heading, entries in sections if entries]
 
@@ -64,7 +82,9 @@ def render(summary: "RunSummary") -> tuple[str, str, str]:
 
     md = [f"# {subject}", ""]
     if summary.approve_url:
-        md += [f"Approve: {summary.approve_url}", ""]
+        md += [f"Approve: {summary.approve_url}", "", f"{AFTER_APPROVAL_HEADING}:", ""]
+        md += [f"- {line}" for line in AFTER_APPROVAL]
+        md.append("")
     for heading, entries in sections:
         md += [f"## {heading}", ""]
         for title, lines in entries:
@@ -77,7 +97,10 @@ def render(summary: "RunSummary") -> tuple[str, str, str]:
     parts.append(f'<div style="{_HEADER_STYLE}">{e(subject)}</div>')
     if summary.approve_url:
         parts.append(
-            f'<div style="{_SECTION_STYLE}"><a href="{e(summary.approve_url, quote=True)}">Review and approve</a></div>'
+            f'<div style="{_SECTION_STYLE}"><a href="{e(summary.approve_url, quote=True)}">Review and approve</a>'
+            f'<p style="{_BULLET_STYLE}">{e(AFTER_APPROVAL_HEADING)}:</p><ul style="{_LIST_STYLE}">'
+            + "".join(f'<li style="{_BULLET_STYLE}">{e(line)}</li>' for line in AFTER_APPROVAL)
+            + "</ul></div>"
         )
     for heading, entries in sections:
         parts.append(f'<div style="{_SECTION_STYLE}"><h2 style="{_H2_STYLE}">{e(heading)}</h2>')

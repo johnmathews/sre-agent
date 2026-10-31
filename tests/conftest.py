@@ -120,6 +120,15 @@ def mock_settings() -> Generator[Any]:
             "cf_access_aud": "",
             "upgrade_advisor_approver_emails": "",
             "upgrade_advisor_github_token": "",
+            # Incident explainer (webhook disabled by default: empty token and DB path)
+            "incident_webhook_token": "",
+            "incident_db_path": "",
+            "incident_model": "claude-sonnet-5-5",
+            "incident_settle_seconds": 0.0,
+            "gatus_url": "http://gatus.test:8080",
+            "gatus_public_url": "https://status.example.com",
+            "pushover_app_token": "a-fake-pushover-app-token",
+            "pushover_user_key": "u-fake-pushover-user-key",
         },
     )()
     patch_sites = [
@@ -153,6 +162,7 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.access.get_settings",
         "src.upgrades.deploy.get_settings",
         "src.api.upgrades.get_settings",
+        "src.api.incidents.get_settings",
     ]
     with ExitStack() as stack:
         for site in patch_sites:

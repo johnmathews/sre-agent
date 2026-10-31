@@ -187,6 +187,16 @@ UPGRADE_DEPLOYS_TOTAL = Counter(
 )
 
 # ---------------------------------------------------------------------------
+# Incident explainer metrics
+# ---------------------------------------------------------------------------
+
+INCIDENT_EVENTS_TOTAL = Counter(
+    "sre_incident_events_total",
+    "Gatus webhook events received by POST /incidents/gatus",
+    labelnames=["event", "outcome"],
+)
+
+# ---------------------------------------------------------------------------
 # Cost pricing (USD per token) — GPT-4o-mini as default
 # ---------------------------------------------------------------------------
 

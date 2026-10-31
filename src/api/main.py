@@ -33,6 +33,8 @@ from src.agent.history import (
     search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.api.incidents import log_incident_explainer_status
+from src.api.incidents import router as incidents_router
 from src.api.upgrades import router as upgrades_router
 from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
@@ -226,6 +228,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         start_scheduler()
         warn_if_approval_unconfigured()
+        log_incident_explainer_status()
         start_startup_verification()
         yield
         stop_scheduler()
@@ -260,6 +263,8 @@ class TrailingSlashForMCP:
 app.add_middleware(TrailingSlashForMCP)
 # Upgrade Advisor approval page and guarded deploy (404 unless the advisor is configured).
 app.include_router(upgrades_router)
+# Gatus incident webhook (503 unless INCIDENT_WEBHOOK_TOKEN and INCIDENT_DB_PATH are set).
+app.include_router(incidents_router)
 
 
 # ---------------------------------------------------------------------------

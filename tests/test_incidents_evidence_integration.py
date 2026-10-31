@@ -461,7 +461,7 @@ class TestCollect:
         assert sources["deploys"].status == "ok"
         assert "no container" in sources["deploys"].detail
         loki_queries = [c.request.url.params.get("query", "") for c in routes["loki_range"].calls]
-        assert '{hostname="infra", service_name=~"wud|wud-advise"}' in loki_queries
+        assert '{hostname="infra", service_name=~"wud|wud-advise"} |= "[trigger."' in loki_queries
         prom_queries = [c.request.url.params["query"] for c in routes["prom"].calls]
         assert all("container_start_time_seconds" not in q for q in prom_queries)
 
@@ -671,3 +671,17 @@ class TestRestartGaps:
         restarts = _by_name(bundle)["restarts"]
         assert restarts.status == "ok", restarts.detail
         assert not any("no running container" in line for line in restarts.lines), restarts.lines
+
+
+@pytest.mark.integration
+class TestDeploysQuery:
+    """WUD's watcher logs a container's state change (`container: "local_dozzle"`) at every stop. Only a trigger line
+    (`[trigger.dockercompose.deploy] ...`) is a deploy, so the query keeps trigger lines naming the container."""
+
+    @respx.mock
+    async def test_wud_query_keeps_only_trigger_lines_for_the_container(self, settings: Any) -> None:
+        routes = _mock_all()
+        await collect(_incident(), NOW)
+        loki_queries = [c.request.url.params.get("query", "") for c in routes["loki_range"].calls]
+        wud = [q for q in loki_queries if "wud" in q]
+        assert wud == ['{hostname="infra", service_name=~"wud|wud-advise"} |= "[trigger." |= "dozzle"']

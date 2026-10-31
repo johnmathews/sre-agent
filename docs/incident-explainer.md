@@ -156,7 +156,7 @@ and the `gatus` detail names the fallback. The dry run passes its own window.
 | `restarts`       | when the container was not running (gaps in its cAdvisor series), whether it was recreated (its start time is its creation; a stop and start keeps it), and whether the host rebooted |
 | `proxmox_tasks`  | Proxmox tasks started in the window: type, guest, user, status                                       |
 | `logins`         | `sudo` and `sshd` lines, only on hosts that ship them; otherwise skipped                              |
-| `deploys`        | What's Up Docker lines naming the container, and Upgrade Advisor deploy rows read from its database read-only |
+| `deploys`        | What's Up Docker trigger lines (`[trigger.…]`, the only lines a deploy writes) naming the container, and Upgrade Advisor deploy rows read from its database read-only |
 
 `restarts` finds the gaps with a cAdvisor range query whose step is 30 s, raised for long windows so the query
 stays under Prometheus's point limit: `max(30, ceil(window_seconds / 2000))`, where `window_seconds` is the window

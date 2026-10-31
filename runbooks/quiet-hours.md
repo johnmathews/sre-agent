@@ -24,7 +24,7 @@ disables NFS/SMB shares during quiet hours to prevent any client I/O. Runs on sy
 - Systemd timers trigger four operations: pause, unpause, stop, start
 - Uses systemd templating: `docker-sleep@<operation>.timer` triggers `docker-sleep@<operation>.service`
 - `docker-sleep.sh` performs the actual container operations
-- Integrates with Uptime Kuma for monitoring awareness
+- The Uptime Kuma integration was removed on 2026-10-31 with Kuma's retirement (Gatus replaces Kuma)
 - Integrates with TrueNAS API to disable/enable NFS and SMB shares
 - SABnzbd plugin detects active downloads to avoid interrupting them
 
@@ -68,7 +68,6 @@ make <host> tags=sleep
 
 - Script: `/usr/local/bin/docker-sleep.sh`
 - TrueNAS shares script: `/usr/local/bin/truenas-shares.sh`
-- Uptime Kuma control: `/usr/local/bin/kumactl.py`
 - Container pause list: `/etc/sleep-hours/containers.pause.list`
 - Container stop list: `/etc/sleep-hours/containers.stop.list`
 - Timer units: `/etc/systemd/system/docker-sleep@*.timer`
@@ -77,5 +76,4 @@ make <host> tags=sleep
 ## Related Services
 
 - TrueNAS (NFS/SMB share control)
-- Uptime Kuma (monitoring awareness during quiet hours)
 - SABnzbd (busy detection plugin)

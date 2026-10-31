@@ -257,6 +257,15 @@ expose through the public Cloudflare tunnel without additional auth (OAuth).
 
 The assistant tracks its own reliability via Prometheus metrics, exposed at `GET /metrics`.
 
+### Logs
+
+uvicorn configures only its own loggers, so at startup the lifespan calls
+`src/observability/logs.py:configure_app_logging(LOG_LEVEL)`. It gives the `src` logger one stderr handler at
+`LOG_LEVEL` (default `INFO`), formatted `LEVEL:module: message`, so the app's INFO lines (for example
+`INFO:src.incidents.job: incident 2: explained push sent (request …)`) appear in `docker logs sre-agent`. Library
+loggers (`httpx`, `anthropic`, `langchain`) stay at Python's default of WARNING, which keeps per-request lines out.
+Before this, every `src.*` record went to Python's last-resort handler, which prints WARNING and above only.
+
 ### Metrics
 
 | Metric                                     | Type      | Labels                                                 |

@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # "now" in the user's local clock without having to guess the offset.
     user_timezone: str = "UTC"
 
+    # Level for the app's own loggers (src.*): DEBUG, INFO, WARNING, ERROR or CRITICAL. Library loggers stay at
+    # WARNING. src/observability/logs.py.
+    log_level: str = "INFO"
+
     # Proxmox Backup Server API (optional — empty string means not configured)
     pbs_url: str = ""
     pbs_api_token: str = ""

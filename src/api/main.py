@@ -38,6 +38,7 @@ from src.api.incidents import router as incidents_router
 from src.api.upgrades import router as upgrades_router
 from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
+from src.observability.logs import configure_app_logging
 from src.observability.metrics import (
     APP_INFO,
     COMPONENT_HEALTHY,
@@ -189,6 +190,7 @@ class ConversationSearchResult(BaseModel):
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Build the agent once at startup, tear down on shutdown."""
     settings = get_settings()
+    configure_app_logging(settings.log_level)
     active_model = settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_model
     APP_INFO.info({"version": "0.1.0", "model": active_model})
 

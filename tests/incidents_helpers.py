@@ -48,7 +48,7 @@ def make_sources() -> list[Source]:
             ],
         ),
         Source(name="container_logs", status="ok", lines=["10:06:12Z received SIGTERM, shutting down"]),
-        Source(name="restarts", status="ok", lines=["container started 10:09:30Z"]),
+        Source(name="restarts", status="ok", lines=["container created 10:09:30Z"]),
         Source(name="proxmox_tasks", status="ok", lines=[]),
         Source(name="logins", status="ok", lines=["10:05:58Z sshd: accepted publickey for admin"]),
         Source(name="deploys", status="unavailable", detail="Loki timed out after 10 s"),

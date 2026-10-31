@@ -21,6 +21,7 @@ GATUS_STATUSES = "http://gatus.test:8080/api/v1/endpoints/monitoring_dozzle/stat
 LOKI_RANGE = "http://loki.test:3100/loki/api/v1/query_range"
 LOKI_LABEL_VALUES = "http://loki.test:3100/loki/api/v1/label/service_name/values"
 PROM_QUERY = "http://prometheus.test:9090/api/v1/query"
+PROM_RANGE = "http://prometheus.test:9090/api/v1/query_range"
 PVE_TASKS = "https://proxmox.test:8006/api2/json/nodes/proxmox/tasks"
 
 FIRST_FAILURE = datetime(2026, 10, 27, 10, 6, 44, 928614, tzinfo=UTC)
@@ -230,6 +231,25 @@ def _prom_router(
     return route
 
 
+def _prom_range_router(*, absent: tuple[datetime, datetime] | None = None) -> Callable[[httpx.Request], httpx.Response]:
+    """cAdvisor's container series over the window, one sample per step, missing between ``absent`` (inclusive)."""
+
+    def route(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        start, end, step = float(params["start"]), float(params["end"]), float(params["step"].removesuffix("s"))
+        values: list[list[Any]] = []
+        t = start
+        while t <= end:
+            at = datetime.fromtimestamp(t, tz=UTC)
+            if absent is None or not absent[0] <= at <= absent[1]:
+                values.append([t, str(CONTAINER_STARTED.timestamp())])
+            t += step
+        result = [{"metric": {}, "values": values}] if values else []
+        return httpx.Response(200, json={"status": "success", "data": {"resultType": "matrix", "result": result}})
+
+    return route
+
+
 PVE_TASKS_BODY: dict[str, Any] = {
     "data": [
         {
@@ -295,6 +315,7 @@ def _mock_all(
     *,
     loki: Callable[[httpx.Request], httpx.Response] | None = None,
     prom: Callable[[httpx.Request], httpx.Response] | None = None,
+    prom_range: Callable[[httpx.Request], httpx.Response] | None = None,
 ) -> dict[str, respx.Route]:
     loki_route = loki or _loki_router()
     return {
@@ -302,6 +323,7 @@ def _mock_all(
         "loki_range": respx.get(LOKI_RANGE).mock(side_effect=loki_route),
         "loki_labels": respx.get(LOKI_LABEL_VALUES).mock(side_effect=loki_route),
         "prom": respx.get(PROM_QUERY).mock(side_effect=prom or _prom_router()),
+        "prom_range": respx.get(PROM_RANGE).mock(side_effect=prom_range or _prom_range_router()),
         "pve": respx.get(PVE_TASKS).mock(return_value=httpx.Response(200, json=PVE_TASKS_BODY)),
     }
 
@@ -342,7 +364,8 @@ class TestCollect:
 
         restarts = sources["restarts"].lines
         assert "container start time changed 1 time(s) in the window" in restarts
-        assert "container started 10:09:30Z" in restarts
+        assert "container created 10:09:30Z" in restarts
+        assert not any("no running container" in line for line in restarts)
         assert any(line.startswith("host not rebooted") for line in restarts)
 
         assert sources["proxmox_tasks"].lines == ["10:00:00Z vzdump guest=101 user=root@pam status=OK"]
@@ -594,3 +617,32 @@ class TestCollect:
         assert len(logs.lines) == evidence.MAX_LINES_PER_SOURCE
         assert '10:05:00Z [info] level=info msg="GET /healthcheck"' in logs.lines
         assert "more error/warn lines not shown" in logs.detail
+
+
+@pytest.mark.integration
+class TestRestartGaps:
+    """A stop and start of the same container keeps cAdvisor's start time; the gap in its series is the signal."""
+
+    @respx.mock
+    async def test_gap_in_the_cadvisor_series_is_reported(self, settings: Any) -> None:
+        created = datetime(2026, 10, 27, 9, 26, 15, tzinfo=UTC).timestamp()
+        absent = (datetime(2026, 10, 27, 10, 7, 0, tzinfo=UTC), datetime(2026, 10, 27, 10, 9, 30, tzinfo=UTC))
+        _mock_all(prom=_prom_router(start=created, changes=0.0), prom_range=_prom_range_router(absent=absent))
+        bundle = await collect(_incident(), NOW)
+
+        restarts = _by_name(bundle)["restarts"]
+        assert restarts.status == "ok"
+        assert any(line.startswith("cAdvisor saw no running container from 10:07:") for line in restarts.lines), (
+            restarts.lines
+        )
+        assert any("to 10:09:" in line for line in restarts.lines if "no running container" in line)
+        assert not any("not restarted" in line for line in restarts.lines)
+        assert any(line.startswith("container start time unchanged") for line in restarts.lines)
+
+    @respx.mock
+    async def test_no_samples_in_the_window_says_so(self, settings: Any) -> None:
+        everything = (datetime(2026, 10, 27, 0, 0, tzinfo=UTC), datetime(2026, 10, 28, 0, 0, tzinfo=UTC))
+        _mock_all(prom=_prom_router(start=None, changes=None), prom_range=_prom_range_router(absent=everything))
+        bundle = await collect(_incident(), NOW)
+        lines = _by_name(bundle)["restarts"].lines
+        assert any("no running container in the whole window" in line for line in lines), lines

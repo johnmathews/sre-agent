@@ -27,8 +27,9 @@ The sources
         The last lines the container wrote before the first failed check, and its error, warn and fatal lines in
         the window. These often name the cause directly.
     ``restarts``
-        From cAdvisor and node exporter: whether the container's start time changed in the window (and when it
-        started) and whether the host rebooted. This catches restarts when Docker events are missing.
+        From cAdvisor and node exporter: when the container was not running (gaps in its cAdvisor series), whether
+        it was recreated (its start time is its creation, which a stop and start keeps), and whether the host
+        rebooted. This catches stops and restarts when Docker events are missing.
     ``proxmox_tasks``
         Proxmox tasks started in the window (backups, migrations, guest stops and starts). A guest-level action
         explains an outage of everything on that guest.
@@ -70,6 +71,8 @@ from src.incidents.models import EvidenceBundle, Incident, Source, SourceStatus
 
 logger = logging.getLogger(__name__)
 
+# Step of the cAdvisor range query that finds when a container was not running.
+RESTART_STEP_SECONDS = 30
 SOURCE_NAMES: tuple[str, ...] = (
     "gatus",
     "docker_events",
@@ -515,6 +518,41 @@ async def _container_logs(host: str, container: str, window: Window) -> Source:
     return Source(name="container_logs", status="ok", detail="; ".join(notes), lines=[_log_line(e) for e in kept])
 
 
+def find_gaps(
+    timestamps: Iterable[float], start: datetime, end: datetime, step_s: int
+) -> list[tuple[datetime, datetime]]:
+    """The spans of ``[start, end]`` with no sample, given a series sampled every ``step_s`` seconds.
+
+    One missing sample is jitter, not a gap: a span counts only when it is longer than two steps. A gap runs from the
+    step after the last sample to the next sample (or from ``start``, or to ``end``).
+    """
+    step = timedelta(seconds=step_s)
+    points = sorted(datetime.fromtimestamp(t, tz=UTC) for t in timestamps)
+    if not points:
+        return [(start, end)]
+    gaps: list[tuple[datetime, datetime]] = []
+    if points[0] - start > 2 * step:
+        gaps.append((start, points[0]))
+    for prev, nxt in zip(points, points[1:], strict=False):
+        if nxt - prev > 2 * step:
+            gaps.append((prev + step, nxt))
+    if end - points[-1] > 2 * step:
+        gaps.append((points[-1] + step, end))
+    return gaps
+
+
+async def _prom_sample_times(query: str, start: datetime, end: datetime, step_s: int) -> list[float]:
+    """The timestamps at which a range query has a sample (any series)."""
+    params = {"query": query, "start": str(start.timestamp()), "end": str(end.timestamp()), "step": f"{step_s}s"}
+    body = await _query_prometheus("/api/v1/query_range", params)
+    if body.get("status") != "success":
+        raise _SourceError(f"Prometheus error: {str(body.get('error', 'unknown'))[:120]}")
+    times: set[float] = set()
+    for series in body.get("data", {}).get("result", []):
+        times.update(float(t) for t, _ in series.get("values", []))
+    return sorted(times)
+
+
 async def _restarts(host: str, container: str | None, window: Window) -> Source:
     window_seconds = max(60, int((window.end - window.start).total_seconds()))
     boot_query = f"max(node_boot_time_seconds{_selector(('hostname', '=', host))})"
@@ -522,19 +560,30 @@ async def _restarts(host: str, container: str | None, window: Window) -> Source:
     detail = ""
     if container is not None:
         series = f"container_start_time_seconds{_selector(('name', '=', container), ('hostname', '=', host))}"
-        started, changes, boot = await asyncio.gather(
+        started, changes, boot, samples = await asyncio.gather(
             _prom_value(f"max({series})", window.end),
             _prom_value(f"sum(changes({series}[{window_seconds}s]))", window.end),
             _prom_value(boot_query, window.end),
+            _prom_sample_times(f"max({series})", window.start, window.end, RESTART_STEP_SECONDS),
         )
+        # cAdvisor drops a stopped container's series, so a gap means the container was not running. Its start time
+        # is the container's creation: a recreate changes it, a stop and start of the same container does not.
+        gaps = find_gaps(samples, window.start, window.end, RESTART_STEP_SECONDS)
+        if gaps == [(window.start, window.end)]:
+            lines.append("cAdvisor saw no running container in the whole window")
+        else:
+            lines.extend(f"cAdvisor saw no running container from {format_hms(a)} to {format_hms(b)}" for a, b in gaps)
         if changes:
             lines.append(f"container start time changed {int(changes)} time(s) in the window")
         if started is None:
             lines.append(f"no cAdvisor series for {container} on {host}")
         elif window.start <= _from_epoch(started) <= window.end:
-            lines.append(f"container started {format_hms(_from_epoch(started))}")
+            lines.append(f"container created {format_hms(_from_epoch(started))}")
         else:
-            lines.append(f"container not restarted in the window (running since {_format_day(_from_epoch(started))})")
+            lines.append(
+                f"container start time unchanged since {_format_day(_from_epoch(started))}"
+                " (a recreate changes it; a stop and start does not)"
+            )
     else:
         boot = await _prom_value(boot_query, window.end)
         detail = "no container mapped; host reboot only"

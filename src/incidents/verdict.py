@@ -53,6 +53,9 @@ or a deploy).
 - A What's Up Docker or Upgrade Advisor deploy line in the window means a deploy.
 - A Proxmox task by a user (start, reboot or stop of a guest) means a person acted on the VM or LXC.
 - A change in the host's boot time means the host rebooted.
+- "cAdvisor saw no running container from A to B" means the container was not running then (stopped or
+  crashed). Its start time is the container's creation: a change means it was recreated, and an unchanged start
+  time does not rule out a stop and start.
 - No restart, no action and only connection errors means a network or transient problem that cleared by itself.
 
 Answer fields:

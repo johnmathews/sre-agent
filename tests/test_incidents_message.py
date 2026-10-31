@@ -132,7 +132,7 @@ def test_fallback_body_order() -> None:
         Source(name="gatus", status="ok", lines=["first failed check 10:06:44Z", "error: connection refused"]),
         Source(name="deploys", status="ok", lines=["10:05:00Z wud updated wiki"]),
         Source(name="proxmox_tasks", status="ok", lines=[]),
-        Source(name="restarts", status="ok", lines=["container started 10:09:30Z"]),
+        Source(name="restarts", status="ok", lines=["container created 10:09:30Z"]),
         Source(name="docker_events", status="ok", lines=["10:06:13Z die exitCode=137"]),
         Source(name="logins", status="unavailable", detail="Loki down"),
     ]
@@ -142,7 +142,7 @@ def test_fallback_body_order() -> None:
         "Down 11:06–11:09 CET (3 min)",
         "Summary unavailable: TimeoutError",
         "• 11:06:13 die exitCode=137",
-        "• container started 11:09:30",
+        "• container created 11:09:30",
         "• 11:05:00 wud updated wiki",
         "• error: connection refused",
         "Missing: logins (Loki down)",

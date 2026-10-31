@@ -141,7 +141,7 @@ detail names the fallback. The dry run passes its own window.
 | `gatus`          | first failed check, recovery, failed checks out of total in the window, up to 5 distinct errors and the failed conditions |
 | `docker_events`  | the container's lifecycle events from Loki `service_name="docker-events"`: `kill signal=15`, `die exitCode=0`, `oom`, `stop`, `start`, `create`, `destroy`, health changes (exec events dropped) |
 | `container_logs` | the last 15 lines before the first failure, then error, warn and fatal lines in the window          |
-| `restarts`       | whether cAdvisor's container start time changed (also across a recreate), when it started, and whether the host rebooted |
+| `restarts`       | when the container was not running (gaps in its cAdvisor series), whether it was recreated (its start time is its creation; a stop and start keeps it), and whether the host rebooted |
 | `proxmox_tasks`  | Proxmox tasks started in the window: type, guest, user, status                                       |
 | `logins`         | `sudo` and `sshd` lines, only on hosts that ship them; otherwise skipped                              |
 | `deploys`        | What's Up Docker lines naming the container, and Upgrade Advisor deploy rows read from its database read-only |

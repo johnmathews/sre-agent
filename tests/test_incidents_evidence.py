@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from src.incidents import evidence
 from src.incidents.evidence import (
     FALLBACK_SPAN,
     MAX_LINE_CHARS,
@@ -290,3 +291,33 @@ class TestHostMapping:
         assert loki_hostname("infra") == "infra"
         assert loki_hostname("pve") == "pve"
         assert prometheus_hostname("proxmox") == "proxmox"
+
+
+class TestFindGaps:
+    """``find_gaps`` turns a sampled series into the spans with no sample."""
+
+    START = datetime(2026, 10, 27, 10, 0, 0, tzinfo=UTC)
+
+    def _ts(self, *offsets: int) -> list[float]:
+        return [(self.START + timedelta(seconds=o)).timestamp() for o in offsets]
+
+    def test_no_gap(self) -> None:
+        end = self.START + timedelta(seconds=120)
+        assert evidence.find_gaps(self._ts(0, 30, 60, 90, 120), self.START, end, 30) == []
+
+    def test_middle_gap(self) -> None:
+        end = self.START + timedelta(seconds=240)
+        gaps = evidence.find_gaps(self._ts(0, 30, 180, 210, 240), self.START, end, 30)
+        assert gaps == [(self.START + timedelta(seconds=60), self.START + timedelta(seconds=180))]
+
+    def test_leading_and_trailing_gaps(self) -> None:
+        end = self.START + timedelta(seconds=300)
+        gaps = evidence.find_gaps(self._ts(120, 150), self.START, end, 30)
+        assert gaps == [
+            (self.START, self.START + timedelta(seconds=120)),
+            (self.START + timedelta(seconds=180), end),
+        ]
+
+    def test_one_missing_sample_is_not_a_gap(self) -> None:
+        end = self.START + timedelta(seconds=120)
+        assert evidence.find_gaps(self._ts(0, 30, 90, 120), self.START, end, 30) == []

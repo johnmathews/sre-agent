@@ -146,6 +146,30 @@ def test_parse_truncates_over_long_fields() -> None:
     assert len(v.evidence[0]) == 120 and v.evidence[0].endswith("…")
 
 
+def test_urls_in_model_text_are_removed() -> None:
+    answer = {
+        **VALID,
+        "cause": "Stopped on purpose; see https://evil.example/login?next=1 for details.",
+        "how": "Started again (docs at HTTP://Phish.example/x).",
+        "evidence": ["kill signal=15 http://a.example", "no link here", "two https://b.example and https://c.example"],
+    }
+    v = parse_verdict(json.dumps(answer))
+    assert v.cause == "Stopped on purpose; see [link removed] for details."
+    assert v.how == "Started again (docs at [link removed])."
+    assert v.evidence == ["kill signal=15 [link removed]", "no link here", "two [link removed] and [link removed]"]
+
+
+def test_url_is_removed_before_clipping() -> None:
+    """Clipping first would leave the start of the URL behind, and a cut URL is still a link."""
+    long_url = "https://evil.example/" + "p" * 300
+    answer = {**VALID, "cause": "c" * 150 + " " + long_url, "how": long_url, "evidence": ["e" * 100 + " " + long_url]}
+    v = parse_verdict(json.dumps(answer))
+    assert v.cause == "c" * 150 + " [link removed]"
+    assert v.how == "[link removed]"
+    assert v.evidence == ["e" * 100 + " [link removed]"]
+    assert all("http" not in text.lower() for text in [v.cause, v.how, *v.evidence])
+
+
 def test_parse_pathological_braces_is_fast() -> None:
     start = time.perf_counter()
     with pytest.raises(VerdictError):

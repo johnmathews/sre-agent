@@ -60,7 +60,8 @@ class Incident(BaseModel):
 
 
 class Source(BaseModel):
-    """One evidence source and what it returned. ``detail`` gives the reason when the status is not ``ok``."""
+    """One evidence source and what it returned. ``detail`` gives the reason when the status is not ``ok``, and can
+    carry notes on an ``ok`` source (for example "no lifecycle events for this container in the window")."""
 
     name: str
     status: SourceStatus

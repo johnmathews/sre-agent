@@ -6,6 +6,7 @@ The model gets no tools: it reads the evidence bundle, each source in a fenced "
 
 import json
 import logging
+import re
 import secrets
 from datetime import UTC, datetime
 from typing import Literal
@@ -28,6 +29,10 @@ MAX_ANSWER_CHARS = 20_000
 # How many "{" positions the parser tries before giving up (bounds the work on a pathological answer).
 MAX_PARSE_ATTEMPTS = 50
 VERDICT_BUDGET_SECONDS = 60.0
+# An http(s) URL in the model's text; trailing punctuation stays outside it. Removed so the push carries no link the
+# model chose (the push's own Gatus link comes from configuration).
+_URL = re.compile(r"https?://\S*[^\s.,;:!?)\]]", re.IGNORECASE)
+LINK_REMOVED = "[link removed]"
 
 Resolution = Literal["self", "manual", "deploy", "unknown"]
 Confidence = Literal["low", "medium", "high"]
@@ -83,9 +88,14 @@ def _clip(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _clean(text: str, limit: int) -> str:
+    """``text`` with every http(s) URL replaced by ``[link removed]``, then clipped to ``limit``."""
+    return _clip(_URL.sub(LINK_REMOVED, text), limit)
+
+
 class Verdict(BaseModel):
-    """The model's answer. Over-long text is clipped (a wordy but valid answer stays usable); a missing field, a
-    wrong type or a value outside the allowed literals is rejected."""
+    """The model's answer. URLs are removed and over-long text is clipped (a wordy but valid answer stays usable); a
+    missing field, a wrong type or a value outside the allowed literals is rejected."""
 
     cause: str = Field(min_length=1, max_length=MAX_CAUSE_CHARS)
     how: str = Field(min_length=1, max_length=MAX_CAUSE_CHARS)
@@ -96,14 +106,14 @@ class Verdict(BaseModel):
     @field_validator("cause", "how", mode="before")
     @classmethod
     def _clip_text(cls, value: object) -> object:
-        return _clip(value, MAX_CAUSE_CHARS) if isinstance(value, str) else value
+        return _clean(value, MAX_CAUSE_CHARS) if isinstance(value, str) else value
 
     @field_validator("evidence", mode="before")
     @classmethod
     def _clip_evidence(cls, value: object) -> object:
         if not isinstance(value, list):
             return value
-        items = [_clip(v, MAX_EVIDENCE_CHARS) if isinstance(v, str) else v for v in value]
+        items = [_clean(v, MAX_EVIDENCE_CHARS) if isinstance(v, str) else v for v in value]
         return [v for v in items if v != ""][:MAX_EVIDENCE_ITEMS]
 
 

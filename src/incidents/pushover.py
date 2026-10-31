@@ -1,7 +1,10 @@
 """Send one push through the incident explainer's own Pushover application.
 
-Priority 0 (normal). One retry after ``RETRY_DELAY_SECONDS`` on a network error or a 5xx; a 4xx is not retried
-(the request itself is wrong). The application token and user key never appear in a log line or a result detail.
+Priority 0 (normal). One retry after ``RETRY_DELAY_SECONDS`` on a 5xx or on a transport error that means the
+request never reached Pushover (``ConnectError``, ``ConnectTimeout``, ``PoolTimeout``). Any other transport error
+(a read or write timeout, a dropped connection) may come after Pushover took the request, so it is not retried: a
+retry could send the push twice. A 4xx is not retried (the request itself is wrong). The application token and user
+key never appear in a log line or a result detail.
 """
 
 import asyncio
@@ -19,6 +22,8 @@ PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
 TIMEOUT_SECONDS = 10.0
 RETRY_DELAY_SECONDS = 5.0
 PRIORITY = "0"
+# Transport errors raised before the request was sent: retrying them cannot deliver the push twice.
+NOT_SENT_ERRORS: tuple[type[httpx.TransportError], ...] = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 class PushoverResult(BaseModel):
@@ -80,9 +85,11 @@ async def send(title: str, message: str, url: str | None, url_title: str | None)
             retryable = False
             try:
                 response = await client.post(PUSHOVER_URL, data=form)
-            except httpx.TransportError as exc:
+            except NOT_SENT_ERRORS as exc:
                 result = PushoverResult(ok=False, detail=f"Pushover unreachable: {type(exc).__name__}")
                 retryable = True
+            except httpx.TransportError as exc:
+                result = PushoverResult(ok=False, detail=f"delivery unknown: {type(exc).__name__}; not resent")
             else:
                 result = _parse(response, secrets)
                 retryable = response.status_code >= 500

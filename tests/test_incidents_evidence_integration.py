@@ -646,3 +646,28 @@ class TestRestartGaps:
         bundle = await collect(_incident(), NOW)
         lines = _by_name(bundle)["restarts"].lines
         assert any("no running container in the whole window" in line for line in lines), lines
+
+    @respx.mock
+    async def test_long_window_widens_the_range_query_step(self, settings: Any) -> None:
+        """Prometheus rejects a range query with more than 11,000 points per series; a 5-day window at 30 s needs
+        14,400, so the step must widen."""
+        series = _prom_range_router()
+
+        def strict(request: httpx.Request) -> httpx.Response:
+            params = request.url.params
+            span = float(params["end"]) - float(params["start"])
+            if span / float(params["step"].removesuffix("s")) > 11_000:
+                body = {"status": "error", "errorType": "bad_data", "error": "exceeded maximum resolution"}
+                return httpx.Response(400, json=body)
+            return series(request)
+
+        routes = _mock_all(prom_range=strict)
+        start = datetime(2026, 10, 22, 10, 0, tzinfo=UTC)
+        end = start + timedelta(days=5)
+        bundle = await collect(_incident(), NOW, window=(start, end))
+
+        step = float(routes["prom_range"].calls.last.request.url.params["step"].removesuffix("s"))
+        assert step >= 216
+        restarts = _by_name(bundle)["restarts"]
+        assert restarts.status == "ok", restarts.detail
+        assert not any("no running container" in line for line in restarts.lines), restarts.lines

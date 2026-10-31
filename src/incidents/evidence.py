@@ -1,11 +1,11 @@
 """Evidence collector: a fixed set of read-only queries that show why one Gatus outage happened and how it ended.
 
 ``collect(incident, now, window=None)`` returns an ``EvidenceBundle`` with exactly seven ``Source`` items, always in
-the order of ``SOURCE_NAMES``. It never raises: a source that fails is ``unavailable`` with a short reason (no URLs,
-no secrets), a source that does not apply is ``skipped`` with the reason, so the verdict can say what it could not
-see. Every source runs concurrently with its own timeout (``SOURCE_TIMEOUT_SECONDS``) and is capped at
-``MAX_LINES_PER_SOURCE`` lines of at most ``MAX_LINE_CHARS`` characters. Lines are plain text, one fact per line,
-with UTC times as ``HH:MM:SSZ``; the message layer converts them to local time.
+the order of ``SOURCE_NAMES``. It never raises: a source that fails is ``unavailable`` with a short reason (no URLs, no
+secrets), a source that does not apply is ``skipped`` with the reason, so the verdict can say what it could not see.
+Gatus is read first, because it sets the window; the other six then run concurrently. Each has its own timeout
+(``SOURCE_TIMEOUT_SECONDS``) and is capped at ``MAX_LINES_PER_SOURCE`` lines of at most ``MAX_LINE_CHARS`` characters.
+Lines are plain text, one fact per line, with UTC times as ``HH:MM:SSZ``; the message layer converts them to local time.
 
 The window
     Gatus is read first because it fixes the window. The first failed check is the last ``UNHEALTHY`` event at or
@@ -52,6 +52,7 @@ Hostnames: Loki and Prometheus share the ``hostname`` label except on the Proxmo
 import asyncio
 import json
 import logging
+import math
 import re
 import sqlite3
 from collections.abc import Coroutine, Iterable
@@ -71,8 +72,10 @@ from src.incidents.models import EvidenceBundle, Incident, Source, SourceStatus
 
 logger = logging.getLogger(__name__)
 
-# Step of the cAdvisor range query that finds when a container was not running.
+# Step of the cAdvisor range query that finds when a container was not running. Long windows widen it so the query
+# stays at or under RESTART_MAX_POINTS samples (Prometheus rejects more than 11,000 points per series).
 RESTART_STEP_SECONDS = 30
+RESTART_MAX_POINTS = 2000
 SOURCE_NAMES: tuple[str, ...] = (
     "gatus",
     "docker_events",
@@ -555,6 +558,7 @@ async def _prom_sample_times(query: str, start: datetime, end: datetime, step_s:
 
 async def _restarts(host: str, container: str | None, window: Window) -> Source:
     window_seconds = max(60, int((window.end - window.start).total_seconds()))
+    step_s = max(RESTART_STEP_SECONDS, math.ceil(window_seconds / RESTART_MAX_POINTS))
     boot_query = f"max(node_boot_time_seconds{_selector(('hostname', '=', host))})"
     lines: list[str] = []
     detail = ""
@@ -564,11 +568,11 @@ async def _restarts(host: str, container: str | None, window: Window) -> Source:
             _prom_value(f"max({series})", window.end),
             _prom_value(f"sum(changes({series}[{window_seconds}s]))", window.end),
             _prom_value(boot_query, window.end),
-            _prom_sample_times(f"max({series})", window.start, window.end, RESTART_STEP_SECONDS),
+            _prom_sample_times(f"max({series})", window.start, window.end, step_s),
         )
         # cAdvisor drops a stopped container's series, so a gap means the container was not running. Its start time
         # is the container's creation: a recreate changes it, a stop and start of the same container does not.
-        gaps = find_gaps(samples, window.start, window.end, RESTART_STEP_SECONDS)
+        gaps = find_gaps(samples, window.start, window.end, step_s)
         if gaps == [(window.start, window.end)]:
             lines.append("cAdvisor saw no running container in the whole window")
         else:

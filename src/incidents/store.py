@@ -6,7 +6,9 @@ correctly, and returned as timezone-aware UTC datetimes. Naive datetimes are rej
 
 State machine: ``open`` (TRIGGERED seen) -> ``resolved`` (RESOLVED seen) -> ``explaining`` (claimed by exactly one
 job) -> ``explained`` or ``failed``. A RESOLVED with no open row creates a ``resolved`` row directly. At most one
-``open`` row exists per endpoint key (a partial unique index enforces it).
+``open`` row exists per endpoint key (a partial unique index enforces it). An ``open`` row whose trigger is older
+than ``STALE_OPEN_AFTER`` (its RESOLVED was lost) is retired as ``failed``/``lost_resolve`` when the next TRIGGERED
+for that key arrives.
 """
 
 import logging
@@ -24,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 # A second RESOLVED for the same endpoint within this window, with no TRIGGERED in between, is a duplicate.
 DUPLICATE_RESOLVE_WINDOW = timedelta(seconds=60)
+# An open row triggered longer ago than this is assumed to have lost its RESOLVED: the next TRIGGERED retires it.
+STALE_OPEN_AFTER = timedelta(hours=24)
+LOST_RESOLVE_OUTCOME = "lost_resolve"
+LOST_RESOLVE_DETAIL = "no RESOLVED within 24 h; a new outage opened a fresh incident"
 
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS incidents (
@@ -139,13 +145,28 @@ def open_incident(
     """Record a TRIGGERED event: return the endpoint's open incident, or open a new one at ``now``.
 
     A repeated TRIGGERED (Gatus retries a failed send on the next failing check) reuses the open row and keeps its
-    first trigger time.
+    first trigger time. An open row triggered more than ``STALE_OPEN_AFTER`` before ``now`` (or with no trigger
+    time) lost its RESOLVED: it is retired (``failed``/``lost_resolve``, logged at WARNING) and a fresh row opened.
     """
     now_str = _to_str(now)
+    stale_before = _to_str(now - STALE_OPEN_AFTER)
     with _immediate(conn):
         row = conn.execute(
-            "SELECT id FROM incidents WHERE endpoint_key = ? AND state = 'open'", (endpoint_key,)
+            "SELECT id, triggered_at FROM incidents WHERE endpoint_key = ? AND state = 'open'", (endpoint_key,)
         ).fetchone()
+        if row is not None and (row["triggered_at"] is None or row["triggered_at"] < stale_before):
+            conn.execute(
+                "UPDATE incidents SET state = 'failed', outcome = ?, detail = ?, finished_at = ? WHERE id = ?",
+                (LOST_RESOLVE_OUTCOME, LOST_RESOLVE_DETAIL, now_str, row["id"]),
+            )
+            logger.warning(
+                "incident %s (%s) stayed open since %s with no RESOLVED; retired as %s, opening a fresh incident",
+                row["id"],
+                endpoint_key,
+                row["triggered_at"] or "an unknown time",
+                LOST_RESOLVE_OUTCOME,
+            )
+            row = None
         if row is not None:
             incident_id: int = row["id"]
         else:
@@ -293,6 +314,7 @@ def list_unfinished(conn: sqlite3.Connection) -> list[Incident]:
 
 __all__ = [
     "DUPLICATE_RESOLVE_WINDOW",
+    "STALE_OPEN_AFTER",
     "claim_for_explanation",
     "connect",
     "get_incident",

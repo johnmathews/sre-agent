@@ -73,7 +73,14 @@ async def _explain_claimed(incident_id: int) -> None:
         verdict = await verdict_mod.judge(bundle)
     except Exception as exc:
         reason = no_verdict_reason(exc)
-        logger.warning("incident %d: no verdict (%s); sending the fallback push", incident_id, reason)
+        # An unexpected model failure keeps its traceback: the SDK's message carries the provider's error body.
+        expected = isinstance(exc, verdict_mod.VerdictError | TimeoutError)
+        logger.warning(
+            "incident %d: no verdict (%s); sending the fallback push",
+            incident_id,
+            reason,
+            exc_info=None if expected else exc,
+        )
         push = message.compose_fallback(
             bundle, reason, timezone=settings.user_timezone, gatus_public_url=settings.gatus_public_url
         )
@@ -84,16 +91,24 @@ async def _explain_claimed(incident_id: int) -> None:
 
     result = await pushover.send(push.title, push.message, push.url, push.url_title)
     if not result.ok:
-        detail = f"not sent: {result.detail}"
+        # "delivery unknown" means the push may have arrived (a read timeout), so it is not called "not sent".
+        unknown = result.detail.startswith("delivery unknown")
+        detail = result.detail if unknown else f"not sent: {result.detail}"
         logger.warning("incident %d: %s", incident_id, detail)
         await _record(incident_id, state="failed", outcome="not_sent", detail=detail)
         return
     if reason is None:
-        await _record(incident_id, state="explained", outcome="explained", detail=result.detail)
-        logger.info("incident %d explained: %s", incident_id, result.detail)
+        outcome, detail = "explained", result.detail
+    else:
+        outcome, detail = "fallback", f"fallback ({reason}); {result.detail}"
+    try:
+        await _record(incident_id, state="explained", outcome=outcome, detail=detail)
+    except Exception:
+        # The push went out: never record this incident as failed, and count what really happened.
+        logger.exception("incident %d: push sent, but recording the outcome failed", incident_id)
+        INCIDENT_EXPLANATIONS_TOTAL.labels(outcome=outcome).inc()
         return
-    await _record(incident_id, state="explained", outcome="fallback", detail=f"fallback ({reason}); {result.detail}")
-    logger.info("incident %d: fallback push %s", incident_id, result.detail)
+    logger.info("incident %d: %s push %s", incident_id, outcome, result.detail)
 
 
 async def explain(incident_id: int) -> None:

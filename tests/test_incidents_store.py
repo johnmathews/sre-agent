@@ -1,5 +1,6 @@
 """Unit tests for the incident SQLite store (a fresh database file per test)."""
 
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +71,46 @@ def test_repeated_triggered_reuses_the_open_row(conn: sqlite3.Connection) -> Non
     assert again.id == first.id
     assert again.triggered_at == T0  # the first trigger time is kept
     assert conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 1
+
+
+def test_triggered_within_24_hours_still_reuses_the_open_row(conn: sqlite3.Connection) -> None:
+    first = _open(conn)
+    again = _open(conn, now=T0 + store.STALE_OPEN_AFTER - timedelta(minutes=1))
+    assert again.id == first.id
+    assert again.triggered_at == T0
+
+
+def test_stale_open_row_is_retired_and_a_fresh_one_opened(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    stale = _open(conn)
+    later = T0 + store.STALE_OPEN_AFTER + timedelta(minutes=1)
+    with caplog.at_level(logging.WARNING, logger="src.incidents.store"):
+        fresh = _open(conn, now=later)
+    assert fresh.id != stale.id
+    assert fresh.state == "open"
+    assert fresh.triggered_at == later
+    retired = store.get_incident(conn, stale.id)
+    assert retired is not None
+    assert retired.state == "failed"
+    assert retired.outcome == "lost_resolve"
+    assert retired.detail == "no RESOLVED within 24 h; a new outage opened a fresh incident"
+    finished = conn.execute("SELECT finished_at FROM incidents WHERE id = ?", (stale.id,)).fetchone()[0]
+    assert datetime.fromisoformat(finished) == later
+    [record] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"incident {stale.id}" in record.getMessage()
+    assert KEY in record.getMessage()
+
+
+def test_open_row_without_trigger_time_is_retired(conn: sqlite3.Connection) -> None:
+    stale = _open(conn)
+    conn.execute("UPDATE incidents SET triggered_at = NULL WHERE id = ?", (stale.id,))
+    conn.commit()
+    fresh = _open(conn, now=T0 + timedelta(minutes=5))
+    assert fresh.id != stale.id
+    retired = store.get_incident(conn, stale.id)
+    assert retired is not None
+    assert (retired.state, retired.outcome) == ("failed", "lost_resolve")
 
 
 def test_open_rows_are_per_endpoint(conn: sqlite3.Connection) -> None:

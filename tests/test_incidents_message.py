@@ -129,7 +129,16 @@ def test_evidence_is_dropped_before_anything_else() -> None:
 
 def test_fallback_body_order() -> None:
     sources = [
-        Source(name="gatus", status="ok", lines=["first failed check 10:06:44Z", "error: connection refused"]),
+        Source(
+            name="gatus",
+            status="ok",
+            lines=[
+                "first failed check 10:06:44Z",
+                "failed checks: 3 of 5 in the window",
+                "error: connection refused",
+                "failed condition: [STATUS] == 200",
+            ],
+        ),
         Source(name="deploys", status="ok", lines=["10:05:00Z wud updated wiki"]),
         Source(name="proxmox_tasks", status="ok", lines=[]),
         Source(name="restarts", status="ok", lines=["container created 10:09:30Z"]),
@@ -154,6 +163,21 @@ def test_fallback_caps_facts_at_four() -> None:
     push = compose_fallback(make_bundle(sources=sources), "no JSON", timezone="UTC", gatus_public_url=PUBLIC)
     bullets = [line for line in _lines(push) if line.startswith("•")]
     assert bullets == ["• 10:00:00 event 0", "• 10:01:00 event 1", "• 10:02:00 event 2", "• 10:03:00 event 3"]
+
+
+def test_fallback_gatus_uses_failed_condition_without_error_line() -> None:
+    lines = ["first failed check 10:06:44Z", "failed checks: 3 of 5 in the window", "failed condition: [STATUS] == 200"]
+    sources = [Source(name="gatus", status="ok", lines=lines)]
+    push = compose_fallback(make_bundle(sources=sources), "x", timezone=AMS, gatus_public_url=PUBLIC)
+    bullets = [line for line in _lines(push) if line.startswith("•")]
+    assert bullets == ["• failed condition: [STATUS] == 200"]
+
+
+def test_fallback_gatus_without_error_or_condition_adds_nothing() -> None:
+    lines = ["first failed check 10:06:44Z", "failed checks: 3 of 5 in the window", "recovered 10:09:44Z"]
+    sources = [Source(name="gatus", status="ok", lines=lines)]
+    push = compose_fallback(make_bundle(sources=sources), "x", timezone=AMS, gatus_public_url=PUBLIC)
+    assert not [line for line in _lines(push) if line.startswith("•")]
 
 
 def test_fallback_long_reason_and_huge_lines_fit() -> None:

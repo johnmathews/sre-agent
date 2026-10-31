@@ -150,6 +150,48 @@ async def test_judge_failure_sends_fallback(
     assert reason in caplog.text
 
 
+async def test_model_failure_cause_is_logged_with_the_exception(
+    mock_settings: Any, stubs: Stubs, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The push keeps the short reason; the log keeps the provider's error message for debugging."""
+    error = RuntimeError("Error code: 529 - overloaded_error: Overloaded")
+    stubs.judge.side_effect = error
+    incident = _resolved(mock_settings)
+    with caplog.at_level(logging.WARNING, logger="src.incidents.job"):
+        await job.explain(incident.id)
+    body = stubs.send.call_args.args[1]
+    assert body.split("\n")[1] == "Summary unavailable: model call failed (RuntimeError)"
+    [record] = [r for r in caplog.records if r.levelno == logging.WARNING and "no verdict" in r.getMessage()]
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert "overloaded_error: Overloaded" in caplog.text
+
+
+@pytest.mark.parametrize(("judge_error", "outcome"), [(None, "explained"), (VerdictError("no JSON"), "fallback")])
+async def test_push_sent_but_recording_failed_is_not_overwritten(
+    mock_settings: Any,
+    stubs: Stubs,
+    caplog: pytest.LogCaptureFixture,
+    judge_error: Exception | None,
+    outcome: str,
+) -> None:
+    stubs.judge.side_effect = judge_error
+    incident = _resolved(mock_settings)
+    sent_before, error_before = _count(outcome), _count("error")
+    with (
+        patch("src.incidents.store.record_outcome", side_effect=RuntimeError("disk full")),
+        caplog.at_level(logging.ERROR, logger="src.incidents.job"),
+    ):
+        await job.explain(incident.id)  # does not raise
+    assert stubs.send.await_count == 1
+    assert _count(outcome) == sent_before + 1
+    assert _count("error") == error_before
+    [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert record.getMessage() == f"incident {incident.id}: push sent, but recording the outcome failed"
+    assert record.exc_info is not None
+    assert _row(mock_settings, incident.id).state == "explaining"  # never overwritten as failed
+
+
 async def test_pushover_failure_records_not_sent(
     mock_settings: Any, stubs: Stubs, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -162,6 +204,15 @@ async def test_pushover_failure_records_not_sent(
     assert (row.state, row.outcome, row.detail) == ("failed", "not_sent", "not sent: Pushover not configured")
     assert _count("not_sent") == before + 1
     assert "not sent: Pushover not configured" in caplog.text
+
+
+async def test_unknown_delivery_is_not_called_not_sent(mock_settings: Any, stubs: Stubs) -> None:
+    """A read timeout means the push may have arrived: the detail must not claim it was not sent."""
+    stubs.send.return_value = PushoverResult(ok=False, detail="delivery unknown: ReadTimeout; not resent")
+    incident = _resolved(mock_settings)
+    await job.explain(incident.id)
+    row = _row(mock_settings, incident.id)
+    assert row.detail == "delivery unknown: ReadTimeout; not resent"
 
 
 async def test_unexpected_exception_records_error(

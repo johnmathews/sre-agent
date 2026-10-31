@@ -30,7 +30,8 @@ URL_TITLE = "Gatus history"
 BULLET = "• "
 # Sources whose lines become fallback facts, in this order; the Gatus error line comes after them.
 FALLBACK_SOURCES = ("docker_events", "restarts", "proxmox_tasks", "deploys")
-_GATUS_STATUS_PREFIXES = ("first failed check", "recovered")
+# The Gatus line used as a fallback fact: the first error line, else the first failed condition.
+_GATUS_FACT_PREFIXES = ("error:", "failed condition:")
 # A UTC time in an evidence line: HH:MMZ or HH:MM:SSZ, not part of a longer number.
 _UTC_TIME = re.compile(r"(?<![\d:])(\d{2}):(\d{2})(?::(\d{2}))?Z(?!\w)")
 # A time in a line counts as inside the window with this much slack on each side.
@@ -151,15 +152,19 @@ def compose(bundle: EvidenceBundle, verdict: Verdict, *, timezone: str, gatus_pu
 
 def fallback_facts(bundle: EvidenceBundle) -> list[str]:
     """Up to four plain facts from the bundle: Docker events, restarts, Proxmox tasks, deploys, then the Gatus
-    error line. Only sources with status ``ok`` count."""
+    ``error:`` line (or its first ``failed condition:`` line when there is no error). Only sources with status
+    ``ok`` count."""
     ok = {s.name: s for s in bundle.sources if s.status == "ok"}
     facts: list[str] = []
     for name in FALLBACK_SOURCES:
         if name in ok:
             facts += ok[name].lines
     if "gatus" in ok:
-        errors = [line for line in ok["gatus"].lines if not line.lower().startswith(_GATUS_STATUS_PREFIXES)]
-        facts += errors[:1]
+        for prefix in _GATUS_FACT_PREFIXES:
+            matches = [line for line in ok["gatus"].lines if line.startswith(prefix)]
+            if matches:
+                facts.append(matches[0])
+                break
     return facts[:MAX_FALLBACK_FACTS]
 
 

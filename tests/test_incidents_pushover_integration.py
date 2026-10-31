@@ -103,13 +103,37 @@ async def test_network_error_twice_is_not_ok(sleep: AsyncMock) -> None:
     assert sleep.await_count == 1
 
 
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow connect"), httpx.PoolTimeout("no connection")],
+    ids=["ConnectError", "ConnectTimeout", "PoolTimeout"],
+)
 @respx.mock
-async def test_network_error_then_success(sleep: AsyncMock) -> None:
-    respx.post(PUSHOVER_URL).mock(
-        side_effect=[httpx.ReadTimeout("slow"), httpx.Response(200, json={"status": 1, "request": "r3"})]
-    )
+async def test_not_sent_error_then_success_retries(sleep: AsyncMock, error: httpx.TransportError) -> None:
+    """The request never left: a retry cannot send the push twice."""
+    route = respx.post(PUSHOVER_URL).mock(side_effect=[error, httpx.Response(200, json={"status": 1, "request": "r3"})])
     result = await send("t", "m", None, None)
     assert result.ok and result.request_id == "r3"
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout("slow"), httpx.WriteTimeout("slow write"), httpx.RemoteProtocolError("closed")],
+    ids=["ReadTimeout", "WriteTimeout", "RemoteProtocolError"],
+)
+@respx.mock
+async def test_maybe_delivered_error_is_not_retried(
+    sleep: AsyncMock, error: httpx.TransportError, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The request may have reached Pushover: a retry could send the push twice, so it is not resent."""
+    route = respx.post(PUSHOVER_URL).mock(side_effect=[error, httpx.Response(200, json={"status": 1, "request": "r"})])
+    with caplog.at_level(logging.WARNING, logger="src.incidents.pushover"):
+        result = await send("t", "m", None, None)
+    assert route.call_count == 1
+    assert sleep.await_count == 0
+    assert result == PushoverResult(ok=False, detail=f"delivery unknown: {type(error).__name__}; not resent")
+    assert "delivery unknown" in caplog.text
 
 
 @respx.mock

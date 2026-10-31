@@ -63,3 +63,15 @@ The user made these in the design discussion before the build.
 - **No dashboard panels** for the two new counters. The Upgrade Advisor's counters have none either.
 - **Not yet proven live:** the verdict from the real model, the token check end to end, and Pushover delivery. W8 of
   the plan (a stop by hand of Dozzle after deploy) settles them.
+
+## 5. Live test, same day (appended after deploy)
+
+- Dozzle stopped by hand at 15:15:13 UTC. Gatus triggered at 15:18:04 and sent both the Pushover push and the webhook,
+  which sre-agent accepted (202 from 192.168.2.115). Dozzle started by hand at 15:18:30, and Gatus resolved at
+  15:20:05. Incident 1 was `explained` / `fallback`, and the push was sent (Pushover request 2c366335…). Confirmed.
+- The verdict fell back. The log shows `anthropic.BadRequestError: 400 … '`temperature` is deprecated for this model'`
+  (request req_011CgaYMG5k97ceCKEsppho5). `create_anthropic_chat` always sent `temperature=0`. The Upgrade Advisor's
+  `claude-opus-4-6` accepts it; `claude-sonnet-5-5` rejects it. The local dry run never reached the model (no key), so
+  this surfaced only live.
+- Fix: send `temperature` only to models that accept it (Claude 3.x and Claude 4 up to 4.6). The main agent's model
+  (`claude-opus-4-6`) keeps `temperature=0`, so its behaviour is unchanged.

@@ -219,13 +219,18 @@ create_anthropic_chat(api_key, model, temperature, max_tokens)
 `build_agent()` also prepends `"You are Claude Code, Anthropic's official CLI for Claude."` to the system prompt when
 OAuth is detected. Regular API keys (`sk-ant-api03-*`) skip all of this and pass the key directly.
 
+`create_anthropic_chat()` sends `temperature` only to models that accept it (`accepts_sampling_params()`: Claude 3.x
+and Claude 4 up to 4.6). Claude 4.7 and later, including `claude-sonnet-5-5`, answer a request carrying `temperature`
+with a 400 ("`temperature` is deprecated for this model"), so for those, and for any model not on that list, the
+parameter is left out.
+
 ### Shared no-tools call
 
 `src/agent/llm.py::ask_text(system, prompt, *, model_override=None, budget_s=120)` is the one-shot call used by the
 Upgrade Advisor review (`src/upgrades/review.py`) and the incident verdict (`src/incidents/verdict.py`, budget 60 s;
 `model_override=INCIDENT_MODEL` only with `LLM_PROVIDER=anthropic`, otherwise no override, so the provider's configured
 model answers). It applies the same OAuth system prefix (`CLAUDE_CODE_SYSTEM_PREFIX`), calls
-`create_llm(..., temperature=0)`, and retries rate limits, 5xx, network errors and timeouts
+`create_llm(..., temperature=0)` (dropped for models that reject it, above), and retries rate limits, 5xx, network errors and timeouts
 (`_is_retryable_llm_error`, also used by the report narrative) with doubling backoff from 15 s until the budget runs
 out; any other error is raised at once. Each attempt times out after the remaining budget, at least 10 s.
 

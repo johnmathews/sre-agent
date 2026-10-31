@@ -191,9 +191,15 @@ UPGRADE_DEPLOYS_TOTAL = Counter(
 # ---------------------------------------------------------------------------
 
 INCIDENT_EVENTS_TOTAL = Counter(
-    "sre_incident_events_total",
+    "sre_assistant_incident_events_total",
     "Gatus webhook events received by POST /incidents/gatus",
     labelnames=["event", "outcome"],
+)
+
+INCIDENT_EXPLANATIONS_TOTAL = Counter(
+    "sre_assistant_incident_explanations_total",
+    "Finished incident explanations by outcome (explained, fallback, not_sent, error)",
+    labelnames=["outcome"],
 )
 
 # ---------------------------------------------------------------------------

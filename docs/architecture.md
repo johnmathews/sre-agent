@@ -628,14 +628,19 @@ placeholders. `auto_deploy` in the allowlist is rejected for now.
 
 Turns a resolved Gatus outage into a second Pushover push that says why the service went down and how it came back.
 Gatus posts every alert transition to `POST /incidents/gatus` (bearer token, answered 202 at once). TRIGGERED opens
-an incident in SQLite; RESOLVED closes it and starts one background job per incident: it waits for the last logs to
-land, collects a fixed evidence bundle (Gatus results, Docker events, container logs, restarts, Proxmox tasks,
-logins, deploys; each source `ok` or `unavailable` with the reason), asks `INCIDENT_MODEL` (Sonnet, no tools) for a
-JSON verdict, and sends the push from code, with the plain facts when the model fails. An atomic claim in the store
-guarantees at most one push per incident. Optional: the endpoint answers 503 until `INCIDENT_WEBHOOK_TOKEN` and
-`INCIDENT_DB_PATH` are set, and startup logs one warning naming the missing settings. Code: `src/incidents/`, endpoint
-`src/api/incidents.py`. Counter `sre_incident_events_total{event, outcome}`. Details, the endpoint contract and the
-state machine: [incident-explainer.md](incident-explainer.md).
+an incident in SQLite; RESOLVED closes it and starts one background job per incident (`src/incidents/job.py`): it
+waits for the last logs to land, claims the incident (an atomic claim in the store guarantees at most one push),
+collects a fixed evidence bundle (`evidence.py`: Gatus results, Docker events, container logs, restarts, Proxmox
+tasks, logins, deploys; each source `ok`, `unavailable` with the reason, or `skipped`), asks `INCIDENT_MODEL`
+(Sonnet, no tools, through the shared `src/agent/llm.py:ask_text`) for a JSON verdict (`verdict.py`), composes the
+push in code (`message.py`, times in `USER_TIMEZONE`, at most 1024 characters, a `Missing:` line for unavailable
+sources) and sends it at priority 0 from its own Pushover app (`pushover.py`). When the model fails the push still
+goes out with plain facts and `Summary unavailable: <reason>`. At startup, incidents a restart left unfinished are
+recovered in the background. `python -m src.incidents --dry-run` prints the bundle, verdict and push for a past
+outage without sending. Optional: the endpoint answers 503 until `INCIDENT_WEBHOOK_TOKEN` and `INCIDENT_DB_PATH` are
+set, and startup logs one warning naming the missing settings. Code: `src/incidents/`, endpoint
+`src/api/incidents.py`. Counters `sre_assistant_incident_events_total{event, outcome}` and
+`sre_assistant_incident_explanations_total{outcome}`. Details: [incident-explainer.md](incident-explainer.md).
 
 ## Configuration
 

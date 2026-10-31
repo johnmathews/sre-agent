@@ -43,6 +43,7 @@ MAX_BODY_BYTES = 16 * 1024
 # Strong references to running explanation tasks, so none is garbage-collected mid-flight; each removes itself
 # when done.
 _explain_tasks: set[asyncio.Task[None]] = set()
+_recovery_tasks: set[asyncio.Task[None]] = set()
 
 _REQUIRED = (("incident_webhook_token", "INCIDENT_WEBHOOK_TOKEN"), ("incident_db_path", "INCIDENT_DB_PATH"))
 _DELIVERY = (
@@ -140,10 +141,32 @@ def _explanation_done(incident_id: int, task: asyncio.Task[None]) -> None:
         logger.error("incident %d explanation failed", incident_id, exc_info=exc)
 
 
-def _schedule_explanation(incident_id: int) -> None:
+def schedule_explanation(incident_id: int) -> None:
+    """Run ``job.explain(incident_id)`` as a background task, referenced until done; a failure is logged."""
     task = asyncio.create_task(job.explain(incident_id), name=f"incident-explain-{incident_id}")
     _explain_tasks.add(task)
     task.add_done_callback(functools.partial(_explanation_done, incident_id))
+
+
+def _recovery_done(task: asyncio.Task[None]) -> None:
+    _recovery_tasks.discard(task)
+    if task.cancelled():
+        logger.warning("incident recovery was cancelled before it finished")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("incident recovery failed", exc_info=exc)
+
+
+def start_incident_recovery() -> asyncio.Task[None]:
+    """At startup, finish incidents a restart left behind (``job.recover_unfinished``) as a background task, so
+    startup never waits on it. Recent resolved incidents are explained through ``schedule_explanation``."""
+    task = asyncio.create_task(
+        job.recover_unfinished(datetime.now(UTC), schedule_explanation), name="incident-recovery"
+    )
+    _recovery_tasks.add(task)
+    task.add_done_callback(_recovery_done)
+    return task
 
 
 @router.post("/incidents/gatus", status_code=202)
@@ -182,7 +205,7 @@ async def gatus_webhook(request: Request) -> JSONResponse:
         return _answer(202, body, label, "duplicate")
     logger.info("incident %d (%s): %s", incident.id, clean_text(incident.endpoint_key), event.event)
     if schedule:
-        _schedule_explanation(incident.id)
+        schedule_explanation(incident.id)
     return _answer(202, body, label, "accepted")
 
 
@@ -192,4 +215,6 @@ __all__ = [
     "log_incident_explainer_status",
     "missing_incident_settings",
     "router",
+    "schedule_explanation",
+    "start_incident_recovery",
 ]

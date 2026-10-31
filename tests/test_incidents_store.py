@@ -213,3 +213,28 @@ def test_non_utc_datetimes_are_stored_and_returned_as_utc(conn: sqlite3.Connecti
     assert incident.triggered_at == T0
     assert incident.triggered_at is not None
     assert incident.triggered_at.utcoffset() == timedelta(0)
+
+
+def test_list_unfinished_returns_resolved_and_explaining_rows(conn: sqlite3.Connection) -> None:
+    _open(conn, key="a_open")
+    resolved, _ = _resolve(conn, T0, key="b_resolved")
+    explaining, _ = _resolve(conn, T0, key="c_explaining")
+    assert store.claim_for_explanation(conn, explaining.id)
+    done, _ = _resolve(conn, T0, key="d_done")
+    assert store.claim_for_explanation(conn, done.id)
+    store.record_outcome(conn, done.id, state="explained", outcome="explained", detail="sent", now=T0)
+    unfinished = store.list_unfinished(conn)
+    assert [(i.endpoint_key, i.state) for i in unfinished] == [
+        ("b_resolved", "resolved"),
+        ("c_explaining", "explaining"),
+    ]
+    assert unfinished[0].id == resolved.id
+
+
+def test_list_unfinished_skips_unreadable_rows(conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture) -> None:
+    good, _ = _resolve(conn, T0, key="good")
+    bad, _ = _resolve(conn, T0, key="bad")
+    conn.execute("UPDATE incidents SET resolved_at = 'garbage' WHERE id = ?", (bad.id,))
+    conn.commit()
+    assert [i.id for i in store.list_unfinished(conn)] == [good.id]
+    assert "unreadable incident row" in caplog.text

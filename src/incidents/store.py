@@ -277,11 +277,26 @@ def get_incident(conn: sqlite3.Connection, incident_id: int) -> Incident | None:
         return None
 
 
+def list_unfinished(conn: sqlite3.Connection) -> list[Incident]:
+    """Incidents a job has not finished: ``resolved`` (never claimed) and ``explaining`` (claimed, no outcome yet),
+    oldest first. Read at startup to recover incidents a restart left behind. Unreadable rows are logged and
+    skipped."""
+    rows = conn.execute("SELECT * FROM incidents WHERE state IN ('resolved', 'explaining') ORDER BY id").fetchall()
+    out: list[Incident] = []
+    for row in rows:
+        try:
+            out.append(_row_to_incident(row))
+        except (ValidationError, ValueError, TypeError) as exc:
+            logger.error("unreadable incident row id=%s: %r", row["id"], exc)  # noqa: TRY400
+    return out
+
+
 __all__ = [
     "DUPLICATE_RESOLVE_WINDOW",
     "claim_for_explanation",
     "connect",
     "get_incident",
+    "list_unfinished",
     "open_incident",
     "record_outcome",
     "resolve_incident",

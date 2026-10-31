@@ -18,7 +18,7 @@ from typing import NamedTuple, NotRequired, TypedDict
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.agent.llm import _is_oauth_token, create_llm
+from src.agent.llm import _is_oauth_token, _is_retryable_llm_error, create_llm
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -35,25 +35,6 @@ _RETRY_INITIAL_DELAY = 30.0
 _RETRY_BACKOFF_FACTOR = 2.0
 # Cap individual retry delays at 30 minutes.
 _RETRY_MAX_DELAY = 1800.0
-
-
-def _is_retryable_llm_error(exc: Exception) -> bool:
-    """Return True if *exc* is a transient LLM error worth retrying.
-
-    Retryable errors:
-      - HTTP 429 (rate limit) from Anthropic or OpenAI SDKs
-      - HTTP 5xx (server-side) from Anthropic or OpenAI SDKs
-      - Network / connection errors (httpx, OSError)
-
-    Non-retryable: auth errors (401/403), validation errors (400/422), etc.
-    """
-    # Both anthropic and openai SDKs expose a .status_code on their API errors.
-    status_code = getattr(exc, "status_code", None)
-    if isinstance(status_code, int):
-        return status_code == 429 or status_code >= 500
-
-    # Network-level failures (connection refused, DNS, timeout, etc.)
-    return isinstance(exc, (httpx.TransportError, OSError, ConnectionError, TimeoutError))
 
 
 # ---------------------------------------------------------------------------

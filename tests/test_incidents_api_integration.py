@@ -75,7 +75,7 @@ async def _drain() -> None:
 
 
 def _count(event: str, outcome: str) -> float:
-    return REGISTRY.get_sample_value("sre_incident_events_total", {"event": event, "outcome": outcome}) or 0.0
+    return REGISTRY.get_sample_value("sre_assistant_incident_events_total", {"event": event, "outcome": outcome}) or 0.0
 
 
 @pytest.mark.integration

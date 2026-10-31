@@ -141,6 +141,7 @@ def mock_settings() -> Generator[Any]:
         "src.agent.tools.loki.get_settings",
         "src.agent.tools.truenas.get_settings",
         "src.agent.agent.get_settings",
+        "src.agent.llm.get_settings",
         "src.agent.tools.disk_status.get_settings",
         "src.agent.tools.clock.get_settings",
         "src.agent.retrieval.embeddings.get_settings",
@@ -156,13 +157,17 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.config.get_settings",
         "src.upgrades.wud.get_settings",
         "src.upgrades.releases.get_settings",
-        "src.upgrades.review.get_settings",
         "src.upgrades.verify.get_settings",
         "src.upgrades.job.get_settings",
         "src.upgrades.access.get_settings",
         "src.upgrades.deploy.get_settings",
         "src.api.upgrades.get_settings",
         "src.api.incidents.get_settings",
+        "src.incidents.evidence.get_settings",
+        "src.incidents.verdict.get_settings",
+        "src.incidents.pushover.get_settings",
+        "src.incidents.job.get_settings",
+        "src.incidents.__main__.get_settings",
     ]
     with ExitStack() as stack:
         for site in patch_sites:

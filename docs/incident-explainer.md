@@ -21,9 +21,10 @@
    claimed" and stops. The job then builds an `EvidenceBundle` (`src/incidents/evidence.py`, see
    [section 5](#5-evidence-sources)) over the window from 10 minutes before the first failing Gatus result to the
    resolve. A source that fails is marked `unavailable` with the reason and never stops the job.
-4. **Sonnet gives a verdict with no tools.** `src/incidents/verdict.py:judge` sends the bundle to `INCIDENT_MODEL`
-   through the shared no-tools call `src/agent/llm.py:ask_text` and validates the JSON answer
-   ([section 6](#6-verdict)).
+4. **The model gives a verdict with no tools.** `src/incidents/verdict.py:judge` sends the bundle through the shared
+   no-tools call `src/agent/llm.py:ask_text` and validates the JSON answer ([section 6](#6-verdict)). With
+   `LLM_PROVIDER=anthropic` the model is `INCIDENT_MODEL` (default `claude-sonnet-5-5`); with any other provider it
+   is that provider's configured model (`OPENAI_MODEL`).
 5. **Code composes and sends the push.** `src/incidents/message.py` composes the title, body and link
    ([section 7](#7-the-push)); `src/incidents/pushover.py` sends it ([section 8](#8-pushover)). When the model fails
    (error, timeout or an answer that does not parse), the push still goes out with plain facts from the bundle and
@@ -38,10 +39,15 @@
    | `not_sent`  | `failed`    | Pushover failed or is not configured                    | `not sent: Pushover not configured`       |
    | `error`     | `failed`    | an unexpected exception (logged with its traceback)     | `KeyError`                                |
 
-   Restart recovery also records `error` and `not_sent` ([section 9](#9-restart-recovery)).
+   Restart recovery also records `error` and `not_sent` ([section 9](#9-restart-recovery)). The store records a
+   fifth outcome, `lost_resolve`, on its own ([section 3](#3-incident-store-and-state-machine)); no counter sees it.
 
    Every SQLite call runs in a worker thread (`asyncio.to_thread`). The job never raises: an unexpected exception
-   after the claim is logged with the traceback, recorded as `error` (best effort) and counted.
+   after the claim is logged with the traceback, recorded as `error` (best effort) and counted. A claim that fails
+   (the store raised) is logged and counted as `error`, records nothing, and leaves the row `resolved` until the
+   next restart recovery picks it up. When the push was sent but recording the outcome fails, the failure is logged,
+   the push still counts as its real outcome (`explained` or `fallback`), and the job does not overwrite the state
+   with `error`.
 
 ## 2. Endpoint contract
 
@@ -105,7 +111,9 @@ TRIGGERED            RESOLVED                  claim_for_explanation      record
 ```
 
 - **TRIGGERED** (`open_incident`): returns the endpoint's open row, or inserts one with `triggered_at=now`. A
-  repeated TRIGGERED keeps the first trigger time.
+  repeated TRIGGERED keeps the first trigger time. When the open row was triggered more than 24 hours earlier (or
+  has no trigger time), its RESOLVED was lost: the row is retired as `failed` with outcome `lost_resolve` (logged as
+  a WARNING) and a fresh `open` row is inserted.
 - **RESOLVED** (`resolve_incident`): closes the open row (`resolved_at=now`) and schedules the job. With no open row,
   it inserts a `resolved` row with `triggered_at` empty (the start comes from Gatus) and schedules the job. When the
   endpoint's latest row was resolved within the last 60 seconds and no TRIGGERED came in between, the event is a
@@ -121,35 +129,46 @@ TRIGGERED            RESOLVED                  claim_for_explanation      record
 
 `src/incidents/models.py` holds the types the receiver, store, evidence collector and job share: `GatusEvent` (the
 webhook body), `Target` (host and container from the description), `Incident` (one stored row, frozen), `Source`
-(`name`, `status` of `ok`/`unavailable`/`skipped`, `detail` with the reason when not ok, `lines`) and
-`EvidenceBundle` (the incident, the window, the first failure time and the sources).
+(`name`, `status` of `ok`/`unavailable`/`skipped`, `detail` with the reason when not ok or notes on an ok source,
+`lines`) and `EvidenceBundle` (the incident, the window, the first failure time and the sources).
 
 ## 5. Evidence sources
 
 `evidence.collect(incident, now, window=None)` (`src/incidents/evidence.py`) returns seven sources, always in the
 order below, each `ok`, `unavailable` (the reason in `detail`) or `skipped` (the reason in `detail`). It never
-raises. Each source runs concurrently with a 10 s timeout and is capped at 20 lines of 300 characters. Times in the
-lines are UTC, written `HH:MM:SSZ`; the push shows them in `USER_TIMEZONE`.
+raises. Gatus is read first, on its own, with its own 10 s timeout; the other six sources then run concurrently,
+each with a 10 s timeout. Each source is capped at 20 lines of 300 characters, and `detail` says how many lines were
+dropped (`5 more lines not shown`). An `ok` source can carry notes in `detail` too, for example `no lifecycle events for
+this container in the window`, the window fallback on `gatus`, or `3 more error/warn lines not shown`. Times in the
+lines are UTC, written `HH:MM:SSZ`; the `up since` and `unchanged since` times in `restarts` are written
+`YYYY-MM-DD HH:MMZ`. The push shows times inside the window in `USER_TIMEZONE`.
 
-Gatus sets the window, so it is read first. The window runs from 10 min before the first failed check (the last
-`UNHEALTHY` event at or before the resolve) to the resolve. When Gatus cannot be read or has no `UNHEALTHY` event,
-the window starts 13 min before the TRIGGERED time, or else covers the 30 min before the resolve, and the `gatus`
-detail names the fallback. The dry run passes its own window.
+Gatus sets the window, which is why it is read first. The window runs from 10 min before the first failed check
+(the last `UNHEALTHY` event at or before the resolve) to the resolve. When Gatus cannot be read or has no
+`UNHEALTHY` event, the window starts 13 min before the TRIGGERED time, or else covers the 30 min before the resolve,
+and the `gatus` detail names the fallback. The dry run passes its own window.
 
 | Source           | What its lines hold                                                                                   |
 | ---------------- | ----------------------------------------------------------------------------------------------------- |
 | `gatus`          | first failed check, recovery, failed checks out of total in the window, up to 5 distinct errors and the failed conditions |
 | `docker_events`  | the container's lifecycle events from Loki `service_name="docker-events"`: `kill signal=15`, `die exitCode=0`, `oom`, `stop`, `start`, `create`, `destroy`, health changes (exec events dropped) |
-| `container_logs` | the last 15 lines before the first failure, then error, warn and fatal lines in the window          |
+| `container_logs` | the last 15 lines in the hour up to 1 min after the first failure, then error, warn and fatal lines in the window |
 | `restarts`       | when the container was not running (gaps in its cAdvisor series), whether it was recreated (its start time is its creation; a stop and start keeps it), and whether the host rebooted |
 | `proxmox_tasks`  | Proxmox tasks started in the window: type, guest, user, status                                       |
 | `logins`         | `sudo` and `sshd` lines, only on hosts that ship them; otherwise skipped                              |
 | `deploys`        | What's Up Docker lines naming the container, and Upgrade Advisor deploy rows read from its database read-only |
 
+`restarts` finds the gaps with a cAdvisor range query whose step is 30 s, raised for long windows so the query
+stays under Prometheus's point limit: `max(30, ceil(window_seconds / 2000))`, where `window_seconds` is the window
+length (at least 60). A gap counts only when it is longer than two steps.
+
 An endpoint with no host gets only `gatus` and `proxmox_tasks`; the other five are skipped. A host with no container
 skips `docker_events` and `container_logs`, checks only the host reboot, and reads WUD lines for the whole host. An
-unconfigured Loki, Prometheus, Gatus or Proxmox skips its sources. Loki and Prometheus name hosts the same way except
-the Proxmox host: `pve` in Loki, `proxmox` in Prometheus.
+unconfigured Loki, Prometheus, Gatus or Proxmox skips its sources, with one exception: `deploys` still runs when
+`UPGRADE_ADVISOR_DB_PATH` is set, reads the advisor rows and notes `Loki not configured`. `deploys` reads its two
+halves separately: when one half fails, the source is `unavailable` with that half's reason (for example `Loki:
+request timed out`) and still holds the lines the other half returned. Loki and Prometheus name hosts the same way
+except the Proxmox host: `pve` in Loki, `proxmox` in Prometheus.
 
 ## 6. Verdict
 
@@ -169,24 +188,32 @@ than guess, to write times with the `Z`, and how to read the evidence:
 - a What's Up Docker or Upgrade Advisor deploy line: a deploy;
 - a Proxmox task by a user on the guest: a person acted on the VM or LXC;
 - a host boot time change: the host rebooted;
+- "cAdvisor saw no running container from A to B": the container was not running then (stopped or crashed); its
+  start time is the container's creation, so a change means it was recreated, and an unchanged start time does not
+  rule out a stop and start;
 - no restart, no action and only connection errors: a network or transient problem that cleared by itself.
 
 The answer is one JSON object, validated by the `Verdict` model:
 
 | Field        | Type                                       | Rule                                                        |
 | ------------ | ------------------------------------------ | ----------------------------------------------------------- |
-| `cause`      | string                                     | why it went down; clipped to 200 characters                 |
-| `how`        | string                                     | how it came back; clipped to 200 characters                 |
+| `cause`      | string                                     | why it went down; must not be empty; clipped to 200 characters |
+| `how`        | string                                     | how it came back; must not be empty; clipped to 200 characters |
 | `resolution` | `self`, `manual`, `deploy` or `unknown`    | `manual`: a person or manual command; `deploy`: a deploy caused or ended it; `self`: no recorded action (restart policy included); `unknown`: the evidence cannot tell |
 | `confidence` | `low`, `medium` or `high`                  |                                                             |
-| `evidence`   | list of strings                            | first 3 kept, each clipped to 120 characters                |
+| `evidence`   | list of strings                            | optional (default empty); each clipped to 120 characters, empty strings dropped, first 3 kept |
 
 `parse_verdict(text)` takes the first JSON object in the answer and ignores prose or a code fence around it.
-Over-long text is clipped rather than rejected, so a wordy but correct answer still gives a verdict. It raises
-`VerdictError` for an answer over 20 000 characters, an answer with no JSON object, a missing field, a wrong type or
-a value outside the allowed ones. `judge(bundle)` calls `ask_text(SYSTEM_TEXT, prompt,
-model_override=INCIDENT_MODEL, budget_s=60)`: rate limits, 5xx, network errors and timeouts are retried with
-doubling backoff within the 60-second budget.
+Over-long text is clipped rather than rejected, so a wordy but correct answer still gives a verdict. Each http(s)
+URL in `cause`, `how` and `evidence` is replaced with `[link removed]` before clipping. It raises `VerdictError`
+for an answer over 20 000 characters, an answer with no JSON object, a missing field, an empty `cause` or `how`, a
+wrong type or a value outside the allowed ones.
+
+`judge(bundle)` calls `ask_text(SYSTEM_TEXT, prompt, model_override=..., budget_s=60)`. The override is
+`INCIDENT_MODEL` only with `LLM_PROVIDER=anthropic`; with any other provider it is empty, so the provider's
+configured model answers. Rate limits, 5xx, network errors and timeouts are retried with doubling backoff (from
+15 s) within the 60-second budget. Each attempt gets the remaining budget but at least 10 s (`MIN_CALL_TIMEOUT`),
+so the call can run past 60 seconds.
 
 ## 7. The push
 
@@ -220,13 +247,14 @@ Confidence: high
 • 11:06:12 kill signal=15 then stop
 • 11:05:58 SSH login by admin
 • 11:09:30 start
-Missing: deploys (Loki timed out after 10 s)
+Missing: deploys (Loki: request timed out)
 ```
 
 **Fallback.** When the model fails, the body is the `Down` line, `Summary unavailable: <reason>` (for example `the
 model did not answer in time`, `no JSON object in the answer`, `model call failed (AuthenticationError)`), then up to
 four facts from `ok` sources in this order: `docker_events` lines, `restarts` lines, `proxmox_tasks` lines,
-`deploys` lines, then the first Gatus error line; then the `Missing:` line.
+`deploys` lines, then the first Gatus `error:` line (else the first `failed condition:` line); then the `Missing:`
+line.
 
 ```text
 Why Wiki went down
@@ -237,17 +265,22 @@ Summary unavailable: the model did not answer in time
 • 11:06:13 die exitCode=0
 • 11:06:13 stop
 • 11:09:30 start
-Missing: deploys (Loki timed out after 10 s)
+Missing: deploys (Loki: request timed out)
 ```
 
 ## 8. Pushover
 
 `src/incidents/pushover.py:send` posts form data to `https://api.pushover.net/1/messages.json` with the
 explainer's own application token (`PUSHOVER_APP_TOKEN`), the user key (`PUSHOVER_USER_KEY`), priority 0 (normal),
-and a 10-second timeout. A network error or a 5xx is retried once after 5 seconds; a 4xx is not retried. A reply of
-`{"status": 1, "request": "<id>"}` is a success; anything else is a failure whose detail names the HTTP status and
-Pushover's `errors`. With either key empty, nothing is sent and the outcome is `not_sent` with `Pushover not
-configured`. The token and user key never appear in a log line or a stored detail.
+and a 10-second timeout. A reply of `{"status": 1, "request": "<id>"}` is a success. The send is retried once, after
+5 seconds, only in two cases: the request never left (a connect error, a connect timeout or a pool timeout,
+detail `Pushover unreachable: <error>`), or Pushover answered 5xx. Any other transport error, such as a read
+timeout or a protocol error, can come after Pushover took the request, so it is not retried and the detail reads
+`delivery unknown: <error>; not resent`; a retry could send the push twice. A 4xx is not retried, and its detail
+names the HTTP status and Pushover's `errors`. A 2xx whose `status` is not 1 gives `Pushover answered status <n>`
+(with the `errors`) and is not retried. Every failure is recorded as `not_sent`, with the detail after `not sent: `, except "delivery unknown", which is recorded as is because the push may have arrived.
+With either key empty, nothing is sent and the outcome is `not_sent` with `Pushover not configured`. The token and
+user key never appear in a log line or a stored detail.
 
 ## 9. Restart recovery
 
@@ -258,7 +291,8 @@ ran leaves `resolved`. At startup, when the webhook is configured, the lifespan 
 
 - an `explaining` incident is recorded as `failed`, `error`, `interrupted by a restart` (a WARNING);
 - a `resolved` incident resolved within the last 30 minutes is explained now, through the same scheduling helper
-  as the webhook (the task is referenced until done, and a failure is logged);
+  as the webhook (the task is referenced until done, and a failure is logged); it goes through `explain`, so it
+  waits `INCIDENT_SETTLE_SECONDS` again before the claim;
 - an older `resolved` incident is claimed and recorded as `failed`, `not_sent`, `not explained before a restart`
   (a WARNING): its evidence window has passed, and a late push would confuse more than it helps.
 
@@ -275,8 +309,11 @@ uv run python -m src.incidents --dry-run --group monitoring --name Dozzle --host
 `--url`, `--host` and `--container` are optional; `--start` and `--end` are ISO-8601 with a timezone. It builds an
 in-memory incident (id 0, `resolved`), collects the evidence over `start - 10 min` to `end`, asks the model, and
 prints the bundle (each source's name, status, detail and lines), the verdict JSON (or why it is unavailable, then
-the fallback) and the push's title, link and body. It exits with code 2 and names the missing settings when
-`INCIDENT_MODEL` or `GATUS_URL` is empty. It still calls the model, so it costs one request.
+the fallback) and the push's title, link and body. It exits with code 2 when the settings fail validation
+(`Settings are invalid or missing (<n> errors); check .env`), and with code 2 naming the missing settings when
+`INCIDENT_MODEL` or `GATUS_URL` is empty. argparse also exits with code 2 on bad flags: `--dry-run`, `--group`,
+`--name`, `--start` and `--end` are required, and `--end` must be after `--start`. It still calls the model, so it
+costs at least one request; model retries can make more.
 
 ## 11. Settings
 
@@ -296,10 +333,16 @@ At startup the service logs one line: a warning naming the missing settings when
 warning naming any empty Gatus or Pushover setting when the endpoint is enabled but an explanation would lack what
 those provide; otherwise `incident explainer enabled (model ...)`. `.env.example` has placeholders.
 
+The evidence also reads settings the agent's tools use: `LOKI_URL` (Docker events, container logs, logins and WUD
+lines), `PROMETHEUS_URL` (restarts), `PROXMOX_URL` and `PROXMOX_NODE` (Proxmox tasks) and `UPGRADE_ADVISOR_DB_PATH`
+(Upgrade Advisor deploy rows). An empty one skips the sources it feeds ([section 5](#5-evidence-sources)).
+
 ## 12. Metrics
 
 - `sre_assistant_incident_events_total{event, outcome}` counts webhook calls. `event` is `triggered`, `resolved`,
   or `unknown` (the body was not read or not valid). `outcome` is `accepted`, `duplicate`, `unauthorized`,
   `not_configured`, `invalid` or `error`.
 - `sre_assistant_incident_explanations_total{outcome}` counts finished explanations: `explained`, `fallback`,
-  `not_sent` or `error` (the outcomes in [section 1](#1-flow), restart recovery included).
+  `not_sent` or `error` (the outcomes in [section 1](#1-flow), restart recovery included). A claim that fails
+  counts `error` and leaves the row `resolved` until the next restart recovery. A push that was sent counts as
+  `explained` or `fallback` even when recording that outcome fails. `lost_resolve` is not counted.

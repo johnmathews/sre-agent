@@ -103,6 +103,17 @@ Only one LLM provider is required — set `LLM_PROVIDER` to select which one.
 
 All HTTP reads are size-capped while streaming. See [architecture.md](architecture.md#upgrade-advisor).
 
+### Incident explainer services (optional, all off unless configured)
+
+| Service          | What it provides                                                                          | Auth                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **Gatus API**    | An endpoint's check results and events (`GET /api/v1/endpoints/{key}/statuses`) at `GATUS_URL` | None                                                   |
+| **Pushover API** | Delivery of the explanation push (`POST https://api.pushover.net/1/messages.json`)       | Application token (`PUSHOVER_APP_TOKEN`) and user key (`PUSHOVER_USER_KEY`) |
+| **LLM**          | The verdict, through the configured LLM provider (`INCIDENT_MODEL` on Anthropic)          | The provider's existing credentials                         |
+
+The evidence also reads Loki, Prometheus, Proxmox VE and the Upgrade Advisor database when those are configured. See
+[incident-explainer.md](incident-explainer.md).
+
 ## Authentication Setup
 
 ### Anthropic API

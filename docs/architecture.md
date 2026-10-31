@@ -81,11 +81,16 @@ HomeLab SRE Assistant
   |
   +-- Proxmox Backup Server API (optional — backup status)
   |
+  +-- Gatus API (optional — incident explainer: failing check results, GATUS_URL)
+  |
+  +-- Pushover API (optional — incident explainer: the explanation push)
+  |
   +-- Chroma vector store (local, on-disk)
 ```
 
 Required: LLM API (OpenAI or Anthropic), Prometheus, Grafana. Optional: TrueNAS, Loki, Proxmox VE, PBS (tools are
-conditionally registered based on config). Local: Chroma vector store (rebuilt via `make ingest`).
+conditionally registered based on config); Gatus and Pushover serve only the incident explainer. Local: Chroma vector
+store (rebuilt via `make ingest`).
 
 ## Request Lifecycle
 
@@ -273,13 +278,19 @@ The assistant tracks its own reliability via Prometheus metrics, exposed at `GET
 | `sre_assistant_oauth_refresh_total`        | Counter   | `status` (success/error)                               |
 | `sre_assistant_claude_credentials_healthy` | Gauge     | — (anthropic path only; 1 usable, 0 re-login needed)   |
 | `sre_assistant_agent_errors_total`         | Counter   | `reason`                                               |
+| `sre_assistant_upgrade_runs_total`         | Counter   | `status` (success/error)                               |
+| `sre_assistant_upgrade_verdicts_total`     | Counter   | `verdict` (upgrade/hold/needs_you)                     |
+| `sre_assistant_upgrade_last_success_timestamp` | Gauge | —                                                      |
+| `sre_assistant_upgrade_deploys_total`      | Counter   | `outcome`                                              |
+| `sre_assistant_incident_events_total`      | Counter   | `event`, `outcome`                                     |
+| `sre_assistant_incident_explanations_total` | Counter  | `outcome`                                              |
 
 ### Architecture
 
 Three layers:
 
-1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons. Sixteen
-   metrics are created once at import time and shared across the process. The seventeenth,
+1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons.
+   Twenty-two metrics are created once at import time and shared across the process. The twenty-third,
    `sre_assistant_claude_credentials_healthy`, is registered by the lifespan only on the anthropic path, because an
    unlabelled gauge exports 0 from the moment it exists and would read as "login needs renewing" where no login is
    in use. Histogram buckets are tuned for expected latencies:
@@ -631,10 +642,11 @@ Gatus posts every alert transition to `POST /incidents/gatus` (bearer token, ans
 an incident in SQLite; RESOLVED closes it and starts one background job per incident (`src/incidents/job.py`): it
 waits for the last logs to land, claims the incident (an atomic claim in the store guarantees at most one push),
 collects a fixed evidence bundle (`evidence.py`: Gatus results, Docker events, container logs, restarts, Proxmox
-tasks, logins, deploys; each source `ok`, `unavailable` with the reason, or `skipped`), asks `INCIDENT_MODEL`
-(Sonnet, no tools, through the shared `src/agent/llm.py:ask_text`) for a JSON verdict (`verdict.py`), composes the
-push in code (`message.py`, times in `USER_TIMEZONE`, at most 1024 characters, a `Missing:` line for unavailable
-sources) and sends it at priority 0 from its own Pushover app (`pushover.py`). When the model fails the push still
+tasks, logins, deploys; each source `ok`, `unavailable` with the reason, or `skipped`), asks the model (no tools,
+through the shared `src/agent/llm.py:ask_text`; `INCIDENT_MODEL` with `LLM_PROVIDER=anthropic`, otherwise the
+provider's configured model) for a JSON verdict (`verdict.py`), composes the push in code (`message.py`, times in
+`USER_TIMEZONE`, at most 1024 characters, a `Missing:` line for unavailable sources) and sends it at priority 0 from
+its own Pushover app (`pushover.py`). When the model fails the push still
 goes out with plain facts and `Summary unavailable: <reason>`. At startup, incidents a restart left unfinished are
 recovered in the background. `python -m src.incidents --dry-run` prints the bundle, verdict and push for a past
 outage without sending. Optional: the endpoint answers 503 until `INCIDENT_WEBHOOK_TOKEN` and `INCIDENT_DB_PATH` are

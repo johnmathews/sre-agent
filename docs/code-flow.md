@@ -222,8 +222,9 @@ OAuth is detected. Regular API keys (`sk-ant-api03-*`) skip all of this and pass
 ### Shared no-tools call
 
 `src/agent/llm.py::ask_text(system, prompt, *, model_override=None, budget_s=120)` is the one-shot call used by the
-Upgrade Advisor review (`src/upgrades/review.py`) and the incident verdict (`src/incidents/verdict.py`, budget 60 s,
-`model_override=INCIDENT_MODEL`). It applies the same OAuth system prefix (`CLAUDE_CODE_SYSTEM_PREFIX`), calls
+Upgrade Advisor review (`src/upgrades/review.py`) and the incident verdict (`src/incidents/verdict.py`, budget 60 s;
+`model_override=INCIDENT_MODEL` only with `LLM_PROVIDER=anthropic`, otherwise no override, so the provider's configured
+model answers). It applies the same OAuth system prefix (`CLAUDE_CODE_SYSTEM_PREFIX`), calls
 `create_llm(..., temperature=0)`, and retries rate limits, 5xx, network errors and timeouts
 (`_is_retryable_llm_error`, also used by the report narrative) with doubling backoff from 15 s until the budget runs
 out; any other error is raised at once. Each attempt times out after the remaining budget, at least 10 s.

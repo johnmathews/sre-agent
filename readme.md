@@ -65,6 +65,7 @@ make serve
 # POST /ask/stream   — send questions with live SSE progress events
 # POST /report       — generate a weekly reliability report
 # GET /health        — check infrastructure component status
+# POST /incidents/gatus — Gatus alert webhook for the incident explainer (bearer token, posted by Gatus)
 
 # The web UI is a separate repo: github.com/johnmathews/sre-webapp
 # In dev, run `npm run dev` there — it proxies /api to this server at :8000.
@@ -412,6 +413,8 @@ The assistant has **up to 27 tools** across 9 categories, depending on which int
 - Incident summaries
 - Suggested remediation steps based on runbooks
 - Weekly reliability reports (alerts, SLO status, tool usage, costs, log errors) — on demand via `POST /report` or scheduled via cron
+- Outage explanations — after a Gatus outage resolves, the agent collects evidence and sends a Pushover push saying why
+  the service went down and how it came back (optional, see [docs/incident-explainer.md](docs/incident-explainer.md))
 
 ---
 
@@ -502,7 +505,7 @@ inside the container. In Docker, `CONVERSATION_HISTORY_HOST_DIR` controls the ho
 
 ## Self-Observability
 
-The assistant tracks its own reliability via 12 Prometheus metrics exposed at `GET /metrics`, visualized in a dedicated
+The assistant tracks its own reliability via 23 Prometheus metrics exposed at `GET /metrics`, visualized in a dedicated
 Grafana dashboard (`dashboards/sre-assistant-sli.json`).
 
 | SLI                          | Target SLO  | How It's Measured                     |
@@ -757,7 +760,7 @@ sre-agent/
 │   ├── cli.py                    # Interactive CLI REPL
 │   ├── agent/
 │   │   ├── agent.py              # LangChain agent setup
-│   │   ├── llm.py                # LLM factory (OpenAI / Anthropic provider selection)
+│   │   ├── llm.py                # LLM factory (OpenAI / Anthropic provider selection) and ask_text, the shared no-tools call
 │   │   ├── history.py            # Conversation history persistence to JSON
 │   │   ├── tools/
 │   │   │   ├── prometheus.py     # Prometheus query tools (3)
@@ -768,7 +771,7 @@ sre-agent/
 │   │   │   └── loki.py           # Loki log query tools (4, optional)
 │   │   └── retrieval/
 │   ├── observability/
-│   │   ├── metrics.py            # Prometheus metric definitions (10 metrics)
+│   │   ├── metrics.py            # Prometheus metric definitions (23 metrics)
 │   │   └── callbacks.py          # LangChain callback handler for metrics
 │   │       ├── embeddings.py     # Document embedding pipeline
 │   │       └── runbooks.py       # Runbook RAG retrieval
@@ -789,9 +792,11 @@ sre-agent/
 │   │   ├── email.py              # SMTP email delivery (STARTTLS)
 │   │   └── scheduler.py          # APScheduler cron-based report scheduling
 │   ├── upgrades/                 # Upgrade Advisor (allowlist, WUD/registry/GitHub clients, review, deploy, verify)
+│   ├── incidents/                # Incident explainer (store, job, evidence, verdict, message, pushover, dry run)
 │   └── api/
 │       ├── main.py               # FastAPI application
-│       └── upgrades.py           # Upgrade approval launcher (GET), review page (POST /view), guarded deploy (POST)
+│       ├── upgrades.py           # Upgrade approval launcher (GET), review page (POST /view), guarded deploy (POST)
+│       └── incidents.py          # Gatus incident webhook (POST /incidents/gatus)
 ├── scripts/
 │   ├── ingest_runbooks.py        # Rebuild Chroma vector store
 │   ├── run_eval.py               # Eval framework entry point
@@ -803,7 +808,8 @@ sre-agent/
 │   ├── architecture.md           # System overview, data flow, deployment
 │   ├── tool-reference.md         # All tools with inputs and examples
 │   ├── code-flow.md              # Request lifecycle, tool registration
-│   └── dependencies.md           # Python packages, external services
+│   ├── dependencies.md           # Python packages, external services
+│   └── incident-explainer.md     # Gatus outage explanations: webhook, store, evidence, verdict, push
 └── runbooks/                     # Operational runbooks (markdown, ingested into RAG)
 ```
 

@@ -339,6 +339,9 @@ lines), `PROMETHEUS_URL` (restarts), `PROXMOX_URL` and `PROXMOX_NODE` (Proxmox t
 
 ## 12. Metrics
 
+The job's INFO lines (`incident <id>: explained push sent (request …)`, a duplicate RESOLVED, a claimed incident)
+appear in `docker logs sre-agent` at the default `LOG_LEVEL=INFO`; failures log at WARNING or ERROR.
+
 - `sre_assistant_incident_events_total{event, outcome}` counts webhook calls. `event` is `triggered`, `resolved`,
   or `unknown` (the body was not read or not valid). `outcome` is `accepted`, `duplicate`, `unauthorized`,
   `not_configured`, `invalid` or `error`.

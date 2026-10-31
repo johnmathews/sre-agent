@@ -107,6 +107,7 @@ def mock_settings() -> Generator[Any]:
             "documentation_mcp_url": "",
             # User timezone (used by clock tool and prompt time fields)
             "user_timezone": "UTC",
+            "log_level": "INFO",
             # Upgrade Advisor (disabled by default)
             "upgrade_advisor_config_path": "",
             "upgrade_advisor_db_path": "",

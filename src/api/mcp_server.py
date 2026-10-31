@@ -190,9 +190,9 @@ def _register_loki_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(name="loki_list_label_values", description=loki_list_label_values.description)
     async def loki_list_label_values_mcp(  # pyright: ignore[reportUnusedFunction]
-        label: str, query: str | None = None
+        label: str, query: str | None = None, start: str = "6h", end: str = "now"
     ) -> str:
-        return await _call_async(loki_list_label_values, label=label, query=query)
+        return await _call_async(loki_list_label_values, label=label, query=query, start=start, end=end)
 
     @mcp.tool(name="loki_correlate_changes", description=loki_correlate_changes.description)
     async def loki_correlate_changes_mcp(  # pyright: ignore[reportUnusedFunction]

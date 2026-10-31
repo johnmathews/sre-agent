@@ -1,5 +1,6 @@
 """Integration tests for Loki tools with mocked HTTP responses."""
 
+import time
 from typing import Any
 
 import httpx
@@ -237,6 +238,56 @@ class TestLokiListLabelValues:
         assert route.called
         assert route.calls.last.request.url.params["query"] == '{hostname="infra"}'
         assert "Found 2 values" in result
+
+    @respx.mock
+    async def test_default_window_is_last_6h(self) -> None:
+        route = respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": ["portainer", "sabnzbd"]})
+        )
+
+        result = await loki_list_label_values.ainvoke({"label": "container"})
+        params = route.calls.last.request.url.params
+        span_ns = int(params["end"]) - int(params["start"])
+        assert abs(span_ns - 6 * 3600 * 1_000_000_000) < 60 * 1_000_000_000
+        assert abs(int(params["end"]) - time.time_ns()) < 60 * 1_000_000_000
+        assert "Found 2 values for label 'container' in the last 6h:" in result
+
+    @respx.mock
+    async def test_start_widens_the_window(self) -> None:
+        route = respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": ["portainer"]})
+        )
+
+        result = await loki_list_label_values.ainvoke({"label": "container", "start": "7d"})
+        params = route.calls.last.request.url.params
+        span_ns = int(params["end"]) - int(params["start"])
+        assert abs(span_ns - 7 * 86400 * 1_000_000_000) < 60 * 1_000_000_000
+        assert "in the last 7d:" in result
+
+    @respx.mock
+    async def test_absolute_range_reaches_loki_as_nanoseconds(self) -> None:
+        route = respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": []})
+        )
+
+        result = await loki_list_label_values.ainvoke(
+            {"label": "container", "start": "2026-10-24T00:00:00Z", "end": "2026-10-31T00:00:00Z"}
+        )
+        params = route.calls.last.request.url.params
+        assert params["start"] == "1792800000000000000"
+        assert params["end"] == "1793404800000000000"
+        assert "from 2026-10-24T00:00:00Z to 2026-10-31T00:00:00Z" in result
+        assert "No values found" in result
+
+    @respx.mock
+    async def test_end_before_start_rejected(self) -> None:
+        result = await loki_list_label_values.ainvoke({"label": "container", "start": "1h", "end": "2h"})
+        assert "End time must be after start time" in result
+
+    @respx.mock
+    async def test_unparseable_start_rejected(self) -> None:
+        result = await loki_list_label_values.ainvoke({"label": "container", "start": "last week"})
+        assert "Cannot parse time 'last week'" in result
 
     @respx.mock
     async def test_loki_unreachable(self) -> None:

@@ -157,6 +157,26 @@ class TestMcpToolExecution:
 
     @pytest.mark.integration
     @respx.mock
+    async def test_call_loki_list_label_values_with_window(self, mock_settings: Any) -> None:
+        """start and end pass through the MCP wrapper to Loki."""
+        mock_settings.loki_url = "http://loki.test:3100"
+        route = respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": ["portainer"]})
+        )
+
+        server = build_fastmcp_server(mock_settings)
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "loki_list_label_values",
+                {"label": "container", "start": "2026-10-24T00:00:00Z", "end": "2026-10-31T00:00:00Z"},
+            )
+        params = route.calls.last.request.url.params
+        assert params["start"] == "1792800000000000000"
+        assert params["end"] == "1793404800000000000"
+        assert "from 2026-10-24T00:00:00Z to 2026-10-31T00:00:00Z" in str(result)
+
+    @pytest.mark.integration
+    @respx.mock
     async def test_tool_error_propagates(self, mock_settings: Any) -> None:
         """HTTP errors from tools should propagate through MCP as errors."""
         respx.get("http://prometheus.test:9090/api/v1/label/__name__/values").mock(

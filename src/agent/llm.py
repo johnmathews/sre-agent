@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -35,6 +36,17 @@ RETRY_INITIAL_DELAY = 15.0
 MIN_CALL_TIMEOUT = 10.0
 
 
+# Models that still accept temperature/top_p/top_k: Claude 3.x and Claude 4 up to 4.6. Claude 4.7 and later reject any
+# non-default sampling value with a 400 ("`temperature` is deprecated for this model"), so any model not matched here,
+# including every future one, is sent no temperature.
+_SAMPLING_PARAMS_MODEL = re.compile(r"^claude-(?:3[-.]|(?:opus|sonnet|haiku)-[34](?:-[0-6])?(?:-\d{8})?$)")
+
+
+def accepts_sampling_params(model: str) -> bool:
+    """True when ``model`` accepts ``temperature`` (Claude 3.x and Claude 4 up to 4.6)."""
+    return _SAMPLING_PARAMS_MODEL.match(model) is not None
+
+
 def _is_oauth_token(api_key: str) -> bool:
     """Check if an API key is an Anthropic OAuth token."""
     return api_key.startswith(_OAUTH_TOKEN_PREFIX)
@@ -60,9 +72,10 @@ def create_anthropic_chat(
     """
     kwargs: dict[str, Any] = {
         "model": model,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if accepts_sampling_params(model):
+        kwargs["temperature"] = temperature
     is_oauth = _is_oauth_token(api_key)
     if is_oauth:
         kwargs["api_key"] = SecretStr("placeholder-for-oauth")

@@ -124,3 +124,39 @@ def test_default_budget_matches_review() -> None:
     from src.upgrades import review
 
     assert llm_mod.DEFAULT_RETRY_BUDGET_SECONDS == review.RETRY_BUDGET_SECONDS == 120.0
+
+
+@pytest.mark.parametrize(
+    ("model", "accepts"),
+    [
+        ("claude-opus-4-6", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-haiku-4-5", True),
+        ("claude-sonnet-4-5-20250929", True),
+        ("claude-sonnet-4-20250514", True),
+        ("claude-3-5-sonnet-20241022", True),
+        ("claude-opus-4-7", False),
+        ("claude-opus-4-8", False),
+        ("claude-opus-5", False),
+        ("claude-opus-5-5", False),
+        ("claude-sonnet-5", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-haiku-5-5", False),
+        ("claude-fable-5-1", False),
+    ],
+)
+def test_accepts_sampling_params(model: str, accepts: bool) -> None:
+    """Newer Claude models reject temperature/top_p/top_k with a 400; only older ones take them."""
+    assert llm_mod.accepts_sampling_params(model) is accepts
+
+
+def test_anthropic_chat_omits_temperature_for_models_that_reject_it() -> None:
+    chat = llm_mod.create_anthropic_chat("sk-ant-api-fake", "claude-sonnet-5-5", temperature=0.0, max_tokens=10)
+    payload = chat._get_request_payload([("human", "hi")])  # pyright: ignore[reportPrivateUsage]
+    assert "temperature" not in payload
+
+
+def test_anthropic_chat_keeps_temperature_for_older_models() -> None:
+    chat = llm_mod.create_anthropic_chat("sk-ant-api-fake", "claude-opus-4-6", temperature=0.0, max_tokens=10)
+    payload = chat._get_request_payload([("human", "hi")])  # pyright: ignore[reportPrivateUsage]
+    assert payload["temperature"] == 0.0

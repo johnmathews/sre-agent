@@ -76,6 +76,8 @@ logger = logging.getLogger(__name__)
 # stays at or under RESTART_MAX_POINTS samples (Prometheus rejects more than 11,000 points per series).
 RESTART_STEP_SECONDS = 30
 RESTART_MAX_POINTS = 2000
+# The marker every WUD deploy log line carries, e.g. "[trigger.dockercompose.deploy]" or "[trigger.command.deploy]".
+WUD_DEPLOY_MARKER = "[trigger."
 SOURCE_NAMES: tuple[str, ...] = (
     "gatus",
     "docker_events",
@@ -637,7 +639,12 @@ async def _deploys(host: str, container: str | None, window: Window, loki: bool,
     if container is None:
         notes.append("no container mapped; WUD lines for the whole host, advisor rows not read")
     if loki:
-        query = _selector(("hostname", "=", host), ("service_name", "=~", "wud|wud-advise"))
+        # Only trigger lines are deploys ("[trigger.dockercompose.deploy] Container x recreated ..."). WUD's watcher
+        # also logs a container's state change (`container: "local_dozzle"`) at every stop, which is not a deploy.
+        query = (
+            _selector(("hostname", "=", host), ("service_name", "=~", "wud|wud-advise"))
+            + f" |= {_quote(WUD_DEPLOY_MARKER)}"
+        )
         if container is not None:
             query += f" |= {_quote(container)}"
         try:

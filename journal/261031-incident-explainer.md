@@ -75,3 +75,11 @@ The user made these in the design discussion before the build.
   this surfaced only live.
 - Fix: send `temperature` only to models that accept it (Claude 3.x and Claude 4 up to 4.6). The main agent's model
   (`claude-opus-4-6`) keeps `temperature=0`, so its behaviour is unchanged.
+- Second live test after the fix: Dozzle stopped by hand at 15:37:36 UTC and started at 15:40:16. Incident 2 was
+  `explained` / `explained` (Pushover request 79647e0d…), so the verdict path works live (confirmed).
+  - Docker events matched exactly what was done: `kill signal=15`, `stop`, `die exitCode=0`, `start`.
+  - A dry run over the same window concluded `resolution: deploy` with medium confidence. That conclusion is wrong.
+    The `deploys` source had passed on a `wud-advise` line, `container: "local_dozzle"`, logged at the stop second.
+    That line is WUD's watcher noting the state change: it appears at both stops (15:15:13 and 15:37:36) and is
+    not a deploy. A real WUD deploy always writes `[trigger.dockercompose.deploy] …` lines.
+  - Fix: `deploys` keeps only WUD lines that carry `[trigger.`.

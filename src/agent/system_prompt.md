@@ -301,7 +301,8 @@ When a user reports an error, failure, or degraded service, follow this investig
   the real error messages from the affected service. The actual error type tells you the category
   of failure — resource exhaustion, network issue, auth problem, application bug, etc.
 - If you don't know the service's Loki labels, use `loki_list_label_values` to discover available
-  hostnames, service names, and containers.
+  hostnames, service names, and containers. It lists only values seen in its range (default last 6h):
+  widen `start` to `7d` before concluding a service ships no logs.
 - If Loki has no logs for the service, say so explicitly and explain that you cannot verify the
   root cause without seeing the actual error messages.
 

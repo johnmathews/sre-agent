@@ -141,8 +141,8 @@ Loki retention is configured at the server level. Check the Loki configuration f
 
 1. Check if the container is running: `docker ps` on the host
 2. Verify the container writes to stdout/stderr (not just files)
-3. Use `loki_list_label_values` with label "service_name" and query `{hostname="<host>"}` to see what services are
-   logging on that host
+3. Use `loki_list_label_values` with label "service_name", query `{hostname="<host>"}` and start `7d` to see what
+   services are logging on that host (the default range is the last 6h, which misses quiet services)
 
 ### Log level detection issues
 

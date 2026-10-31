@@ -479,7 +479,7 @@ class TestCollect:
         assert pve_params["since"] == str(int(start.timestamp()))
         assert pve_params["until"] == str(int(end.timestamp()))
         label_params = routes["loki_labels"].calls.last.request.url.params
-        assert label_params["start"] == str(int(start.timestamp() * 1_000_000_000))
+        assert label_params["start"] == str(int((end - timedelta(days=7)).timestamp() * 1_000_000_000))
         assert label_params["end"] == str(int(end.timestamp() * 1_000_000_000))
 
     @respx.mock
@@ -489,9 +489,42 @@ class TestCollect:
         logins = _by_name(bundle)["logins"]
 
         assert logins.status == "skipped"
-        assert logins.detail == "host does not ship login logs"
+        assert logins.detail == "host shipped no sshd or sudo lines in the 7 days before the outage"
         loki_queries = [c.request.url.params.get("query", "") for c in routes["loki_range"].calls]
         assert all("sudo|sshd" not in q for q in loki_queries)
+
+    @respx.mock
+    async def test_login_logs_only_before_the_window_still_ok(self, settings: Any) -> None:
+        """A host whose last sudo line is days old ships login logs: the label lookup reaches back 7 days."""
+        window_start_ns = str(int((FIRST_FAILURE - timedelta(minutes=10)).timestamp() * 1_000_000_000))
+        week_before_end = RESOLVED - timedelta(days=7)
+        loki_route = _loki_router()
+
+        def route(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/label/service_name/values"):
+                # sudo logged three days ago: present only when the lookup starts before the window.
+                lookup_start = int(request.url.params["start"])
+                names = ["docker-events", "dozzle", "wud"]
+                if lookup_start < int(window_start_ns):
+                    names.append("sudo")
+                return httpx.Response(200, json={"status": "success", "data": names})
+            if "sudo|sshd" in request.url.params["query"]:
+                return httpx.Response(200, json=_streams())
+            return loki_route(request)
+
+        routes = _mock_all(loki=route)
+        bundle = await collect(_incident(), NOW)
+        logins = _by_name(bundle)["logins"]
+
+        assert logins.status == "ok"
+        assert logins.detail == "no logins in the window"
+        assert logins.lines == []
+        label_params = routes["loki_labels"].calls.last.request.url.params
+        assert label_params["start"] == _ns(week_before_end)
+        assert label_params["end"] == _ns(RESOLVED)
+        # The line query stays over the window.
+        login_calls = [c for c in routes["loki_range"].calls if "sudo|sshd" in c.request.url.params["query"]]
+        assert login_calls[-1].request.url.params["start"] == window_start_ns
 
     @respx.mock
     async def test_unconfigured_backends_are_skipped(self, settings: Any) -> None:

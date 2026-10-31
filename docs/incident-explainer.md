@@ -155,12 +155,16 @@ and the `gatus` detail names the fallback. The dry run passes its own window.
 | `container_logs` | the last 15 lines in the hour up to 1 min after the first failure, then error, warn and fatal lines in the window |
 | `restarts`       | when the container was not running (gaps in its cAdvisor series), whether it was recreated (its start time is its creation; a stop and start keeps it), and whether the host rebooted |
 | `proxmox_tasks`  | Proxmox tasks started in the window: type, guest, user, status                                       |
-| `logins`         | `sudo` and `sshd` lines, only on hosts that ship them; otherwise skipped                              |
+| `logins`         | `sudo` and `sshd` lines in the window; skipped when the host shipped neither in the 7 days up to the window end |
 | `deploys`        | What's Up Docker trigger lines (`[trigger.…]`, the only lines a deploy writes) naming the container, and Upgrade Advisor deploy rows read from its database read-only |
 
 `restarts` finds the gaps with a cAdvisor range query whose step is 30 s, raised for long windows so the query
 stays under Prometheus's point limit: `max(30, ceil(window_seconds / 2000))`, where `window_seconds` is the window
 length (at least 60). A gap counts only when it is longer than two steps.
+
+`logins` checks whether the host ships login lines by reading Loki's `service_name` values for the host over the 7
+days up to the window end (`LOGINS_LOOKBACK`), then reads the lines over the window. A host with a few sudo lines a
+week then gets `ok` with `no logins in the window` instead of a skip.
 
 An endpoint with no host gets only `gatus` and `proxmox_tasks`; the other five are skipped. A host with no container
 skips `docker_events` and `container_logs`, checks only the host reboot, and reads WUD lines for the whole host. An

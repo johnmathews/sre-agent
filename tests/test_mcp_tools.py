@@ -2,7 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
 from src.agent.mcp_tools import build_mcp_server
 
@@ -76,3 +78,23 @@ class TestMcpToolCallAsync:
             # The handler calls through to the real tool, which we can't mock
             # from outside the closure. Just verify it returns a result dict.
             assert "content" in result
+
+    @pytest.mark.integration
+    @respx.mock
+    async def test_loki_label_values_wrapper_passes_window(self) -> None:
+        """The SDK wrapper passes start and end to the tool, which sends them to Loki."""
+        from src.agent.mcp_tools import _loki_tools
+
+        route = respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": ["portainer"]})
+        )
+        labels_tool = next(t for t in _loki_tools() if t.name == "loki_list_label_values")
+        assert {"start", "end"} <= set(labels_tool.input_schema["properties"])
+
+        result = await labels_tool.handler(
+            {"label": "container", "start": "2026-10-24T00:00:00Z", "end": "2026-10-31T00:00:00Z"}
+        )
+        params = route.calls.last.request.url.params
+        assert params["start"] == "1792800000000000000"
+        assert params["end"] == "1793404800000000000"
+        assert "from 2026-10-24T00:00:00Z to 2026-10-31T00:00:00Z" in str(result)

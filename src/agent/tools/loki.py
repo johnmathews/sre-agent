@@ -89,6 +89,20 @@ class LokiLabelValuesInput(BaseModel):
             'Example: {hostname="media"} to list services on the media VM only.'
         ),
     )
+    start: str = Field(
+        default="6h",
+        description=(
+            "Start of the time range. Only values with log lines in the range are listed. Either a relative "
+            "duration like '6h', '7d' (meaning that long ago from now), or an ISO 8601 timestamp. Default: '6h'."
+        ),
+    )
+    end: str = Field(
+        default="now",
+        description=(
+            "End of the time range. Either 'now', a relative duration like '1d' "
+            "(meaning that long ago from now), or an ISO 8601 timestamp. Default: 'now'."
+        ),
+    )
 
 
 class LokiMetricQueryInput(BaseModel):
@@ -336,16 +350,29 @@ def _format_log_lines(data: LokiQueryResponse, limit: int) -> str:
     return header + "\n" + "\n".join(lines)
 
 
-def _format_label_values(values: list[str], label: str) -> str:
-    """Format label values into a readable list."""
+def _describe_window(start: str, end: str) -> str:
+    """Name a start/end pair as given, e.g. 'in the last 6h' or 'from 7d ago to 1d ago'."""
+    if end == "now" and _RELATIVE_TIME_PATTERN.match(start):
+        return f"in the last {start}"
+
+    def point(value: str) -> str:
+        return f"{value} ago" if _RELATIVE_TIME_PATTERN.match(value) else value
+
+    return f"from {point(start)} to {point(end)}"
+
+
+def _format_label_values(values: list[str], label: str, window: str) -> str:
+    """Format label values into a readable list. ``window`` names the time range, e.g. 'in the last 6h'."""
     if not values:
         return (
-            f"No values found for label '{label}'. "
-            "Available labels include: hostname, service_name, container, detected_level."
+            f"No values found for label '{label}' {window}. "
+            "Available labels include: hostname, service_name, container, detected_level. "
+            "A value with no log lines in the range is absent: widen start (e.g. '7d') before concluding it ships "
+            "no logs."
         )
 
     sorted_values = sorted(values)
-    lines = [f"Found {len(sorted_values)} values for label '{label}':"]
+    lines = [f"Found {len(sorted_values)} values for label '{label}' {window}:"]
     for val in sorted_values:
         lines.append(f"  {val}")
 
@@ -622,7 +649,10 @@ TOOL_DESCRIPTION_LABEL_VALUES = HOMELAB_CONTEXT + (
     "- `container` — Docker container names\n"
     "- `detected_level` — available log levels\n\n"
     "You can optionally scope results with a stream selector, e.g. "
-    'list service_name values where {hostname="media"} to see services on the media VM.'
+    'list service_name values where {hostname="media"} to see services on the media VM.\n\n'
+    "Only values with log lines in the time range are listed. The range defaults to the last 6h, so a "
+    "container that logged nothing in that time is absent. Widen `start` (e.g. '7d') before concluding "
+    "that something ships no logs."
 )
 
 TOOL_DESCRIPTION_METRIC_QUERY = HOMELAB_CONTEXT + (
@@ -775,13 +805,30 @@ loki_metric_query.handle_tool_error = True
 async def loki_list_label_values(
     label: str,
     query: str | None = None,
+    start: str = "6h",
+    end: str = "now",
 ) -> str:
     """List available values for a Loki label. See TOOL_DESCRIPTION_LABEL_VALUES."""
-    params: dict[str, str] = {}
+    try:
+        start_dt = _parse_relative_time(start)
+        end_dt = _parse_relative_time(end)
+    except ValueError as e:
+        raise ToolException(str(e)) from e
+
+    if end_dt <= start_dt:
+        raise ToolException(
+            "End time must be after start time. "
+            "Note: relative times like '1h' mean '1 hour ago', so start='1h' end='now' is correct."
+        )
+
+    params: dict[str, str] = {
+        "start": _datetime_to_nanoseconds(start_dt),
+        "end": _datetime_to_nanoseconds(end_dt),
+    }
     if query is not None:
         params["query"] = query
 
-    logger.info("Loki label values: label=%s, query=%s", label, query)
+    logger.info("Loki label values: label=%s, query=%s (start=%s, end=%s)", label, query, start, end)
     try:
         raw_data = await _query_loki(f"/loki/api/v1/label/{label}/values", params)
         data: LokiLabelValuesResponse = raw_data  # type: ignore[assignment]
@@ -793,7 +840,7 @@ async def loki_list_label_values(
         raise ToolException(f"Loki API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
 
     values: list[str] = data.get("data", [])
-    return _format_label_values(values, label)
+    return _format_label_values(values, label, _describe_window(start, end))
 
 
 loki_list_label_values.description = TOOL_DESCRIPTION_LABEL_VALUES

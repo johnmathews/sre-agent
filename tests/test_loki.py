@@ -162,20 +162,21 @@ class TestFormatLogLines:
 
 class TestFormatLabelValues:
     def test_empty_values(self) -> None:
-        output = _format_label_values([], "hostname")
-        assert "No values found" in output
+        output = _format_label_values([], "hostname", "in the last 6h")
+        assert "No values found for label 'hostname' in the last 6h" in output
+        assert "widen start" in output
 
     def test_formats_values(self) -> None:
         values = ["media", "infra", "jellyfin"]
-        output = _format_label_values(values, "hostname")
-        assert "Found 3 values" in output
+        output = _format_label_values(values, "hostname", "in the last 6h")
+        assert "Found 3 values for label 'hostname' in the last 6h:" in output
         assert "infra" in output
         assert "jellyfin" in output
         assert "media" in output
 
     def test_values_sorted(self) -> None:
         values = ["zebra", "apple", "mango"]
-        output = _format_label_values(values, "service_name")
+        output = _format_label_values(values, "service_name", "in the last 6h")
         lines = [line.strip() for line in output.split("\n") if line.startswith("  ")]
         assert lines == ["apple", "mango", "zebra"]
 

@@ -113,7 +113,7 @@ Always note which timezone you're in when comparing. CEST = UTC+2 in summer, UTC
 
 - **`ssh <host>` + `journalctl`** — works everywhere, slowest to type. Always works as a fallback.
 - **Loki via `loki_query_logs`** — fastest for traefik and most Docker workloads. Verify the host is shipped with
-  `loki_list_label_values(label="service_name", query='{hostname="<host>"}')` before assuming.
+  `loki_list_label_values(label="service_name", query='{hostname="<host>"}', start="7d")` before assuming.
 - **Cloudflare dashboard** — only place that shows the edge-to-tunnel hop and CF-specific status codes; not scriptable
   from the SRE agent environment.
 - **`docker logs <container>`** — **avoid** on hosts using the `journald` log driver (which is the default on this

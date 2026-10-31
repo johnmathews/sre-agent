@@ -441,6 +441,8 @@ def _loki_tools() -> list[SdkMcpTool[Any]]:
             loki_list_label_values,
             label=args["label"],
             query=args.get("query"),
+            start=args.get("start", "6h"),
+            end=args.get("end", "now"),
         )
 
     tools.append(

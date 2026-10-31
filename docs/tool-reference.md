@@ -146,9 +146,14 @@ Run a LogQL metric query against Loki to count, rate, or aggregate logs. Returns
 
 List available values for a Loki label.
 
-- **Input:** `label` (string, e.g. "hostname", "service_name"), `query` (optional LogQL stream selector to scope results)
+- **Input:** `label` (string, e.g. "hostname", "service_name"), `query` (optional LogQL stream selector to scope results),
+  `start` (default `"6h"`, Loki's own default), `end` (default `"now"`); both take the same forms as `loki_query_logs`
+  and reach Loki as nanosecond `start`/`end`
 - **Example questions:** "What services are running on the infra VM?", "What hostnames send logs?"
-- **Returns:** Sorted list of values for the given label
+- **Returns:** Sorted list of values for the given label, headed with the range, e.g. `Found 31 values for label
+  'container' in the last 6h:`
+- **Note:** Only values with log lines in the range are listed. A quiet container is absent from the default 6h, so
+  widen `start` (e.g. `7d`) before concluding something ships no logs.
 
 ### loki_correlate_changes
 

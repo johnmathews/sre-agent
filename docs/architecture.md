@@ -539,7 +539,7 @@ generic denied page, so unauthenticated callers never learn the config state), t
    renders the review page. Superseded items are unticked and labelled.
 3. `POST /upgrades/batches/{id}` (the review page's Approve form, action `../{id}`) deploys. Order: bounded form,
    `check_batch`, ids, `validate_selection`, `consume_batch`, record decisions, start the background deploys, answer
-   at once ("approved by X; deploying N; results by email").
+   at once ("approved by X; deploying N") with the same what-happens-next note as the daily email (`AFTER_APPROVAL`).
 
 Per ticked item a deploy happens only if it is still the newest verdict of its container (any newer verdict,
 including a hold, supersedes it), WUD still offers exactly the reviewed digest, and that digest is not already
@@ -564,8 +564,16 @@ outcome, email and metric happen once. When the trigger was not confirmed (`trig
 and the email says to approve again, without restore advice. A failure or digest mismatch emails at once with the
 latest PBS backup time (`pbs_latest_backup_time`) as the recovery step.
 
-The daily email is sent when there is anything to say: sections Recommended, Needs you, Held, Errors and Yesterday's
-deploys. Failures that stop a run (unreadable allowlist, store or batch failure after the reviews, email not sent,
+The daily email is sent when there is anything to say:
+
+- Sections: Recommended, Needs you, Held, Errors and "Results of approved upgrades (last 24 hours)".
+- Under the approve link, `AFTER_APPROVAL` lists what follows an approval: deploy, check a few minutes later, email
+  immediately on failure, results in the next email.
+- The results section shows each outcome in plain words ("upgraded and verified", "upgrade failed", ...). The store,
+  logs and metrics keep the raw codes.
+- Each entry names one container. An upgrade moves that container to a newer image.
+
+Failures that stop a run (unreadable allowlist, store or batch failure after the reviews, email not sent,
 unexpected exception) count as error runs and send an abort email naming the exception class; one container
 failing does not stop the others. An error item shows our own cleaned message for `WudError`, `RegistryError` and
 `ReleaseLookupError`, and only the class name for anything else.

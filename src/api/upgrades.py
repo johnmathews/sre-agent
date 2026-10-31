@@ -27,6 +27,7 @@ from src.config import get_settings
 from src.upgrades import deploy, store
 from src.upgrades.access import AccessDenied, verify_access_jwt
 from src.upgrades.config import is_advisor_configured
+from src.upgrades.email import AFTER_APPROVAL, AFTER_APPROVAL_HEADING
 from src.upgrades.models import VerdictRecord
 from src.upgrades.textutil import clean_text
 
@@ -288,8 +289,11 @@ def _outcome_body(email: str, ticked: list[VerdictRecord]) -> str:
     if not ticked:
         return f"<p>Approved by {e(email)}. No updates were selected; nothing was deployed.</p>"
     rows = "".join(f'<li class="item"><strong>{e(v.container)}</strong> {_versions(v)}</li>' for v in ticked)
-    return f"<p>Approved by {e(email)}. Deploying {len(ticked)} update(s); results arrive by email.</p>" + (
-        f'<ul class="items">{rows}</ul>' if rows else ""
+    next_steps = "".join(f"<li>{e(line)}</li>" for line in AFTER_APPROVAL)
+    return (
+        f"<p>Approved by {e(email)}. Deploying {len(ticked)} update(s):</p>"
+        + (f'<ul class="items">{rows}</ul>' if rows else "")
+        + f"<p>{e(AFTER_APPROVAL_HEADING)}:</p><ul>{next_steps}</ul>"
     )
 
 

@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     upgrade_advisor_approver_emails: str = ""
     upgrade_advisor_github_token: str = ""  # optional; empty = anonymous GitHub API
 
+    # Incident explainer (optional — empty webhook token or DB path = POST /incidents/gatus answers 503)
+    # Gatus posts every alert transition; each resolved outage gets one Pushover push explaining it.
+    incident_webhook_token: str = ""  # bearer token Gatus sends in the Authorization header
+    incident_db_path: str = ""  # SQLite file for incidents
+    incident_model: str = "claude-sonnet-5-5"  # model that writes the verdict (no tools)
+    incident_settle_seconds: float = 30.0  # wait after RESOLVED so the last logs and metrics land first
+    gatus_url: str = ""  # Gatus API base URL, read for the failing results
+    gatus_public_url: str = ""  # Gatus URL the push links to
+    pushover_app_token: str = ""  # the explainer's own Pushover application token
+    pushover_user_key: str = ""  # the Pushover user (or group) key to notify
+
     @field_validator("upgrade_advisor_public_base_url")
     @classmethod
     def _validate_advisor_base_url(cls, value: str) -> str:

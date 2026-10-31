@@ -120,6 +120,15 @@ def mock_settings() -> Generator[Any]:
             "cf_access_aud": "",
             "upgrade_advisor_approver_emails": "",
             "upgrade_advisor_github_token": "",
+            # Incident explainer (webhook disabled by default: empty token and DB path)
+            "incident_webhook_token": "",
+            "incident_db_path": "",
+            "incident_model": "claude-sonnet-5-5",
+            "incident_settle_seconds": 0.0,
+            "gatus_url": "http://gatus.test:8080",
+            "gatus_public_url": "https://status.example.com",
+            "pushover_app_token": "a-fake-pushover-app-token",
+            "pushover_user_key": "u-fake-pushover-user-key",
         },
     )()
     patch_sites = [
@@ -132,6 +141,7 @@ def mock_settings() -> Generator[Any]:
         "src.agent.tools.loki.get_settings",
         "src.agent.tools.truenas.get_settings",
         "src.agent.agent.get_settings",
+        "src.agent.llm.get_settings",
         "src.agent.tools.disk_status.get_settings",
         "src.agent.tools.clock.get_settings",
         "src.agent.retrieval.embeddings.get_settings",
@@ -147,12 +157,17 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.config.get_settings",
         "src.upgrades.wud.get_settings",
         "src.upgrades.releases.get_settings",
-        "src.upgrades.review.get_settings",
         "src.upgrades.verify.get_settings",
         "src.upgrades.job.get_settings",
         "src.upgrades.access.get_settings",
         "src.upgrades.deploy.get_settings",
         "src.api.upgrades.get_settings",
+        "src.api.incidents.get_settings",
+        "src.incidents.evidence.get_settings",
+        "src.incidents.verdict.get_settings",
+        "src.incidents.pushover.get_settings",
+        "src.incidents.job.get_settings",
+        "src.incidents.__main__.get_settings",
     ]
     with ExitStack() as stack:
         for site in patch_sites:

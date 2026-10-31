@@ -4,20 +4,15 @@ The model gets no tools: it reads a prompt and answers with one JSON object. Eve
 registry sits in fenced "untrusted" blocks, and code (not the model) enforces the major-version rule.
 """
 
-import asyncio
 import json
 import logging
 import secrets
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
-from src.agent.llm import _is_oauth_token, create_llm
-from src.config import get_settings
-from src.report.generator import _is_retryable_llm_error
+from src.agent.llm import DEFAULT_RETRY_BUDGET_SECONDS, ask_text
 from src.upgrades.config import CONTEXT_ROOT, AdvisedContainer
 from src.upgrades.models import Verdict
 from src.upgrades.releases import Release, is_major
@@ -30,9 +25,7 @@ MAX_PROMPT_CHARS = 120_000
 MAX_ANSWER_CHARS = 20_000
 # Tolerance on min_age for the daily cron's start-time jitter (see gate).
 AGE_SLACK = timedelta(hours=1)
-RETRY_BUDGET_SECONDS = 120.0
-RETRY_INITIAL_DELAY = 15.0
-MIN_CALL_TIMEOUT = 10.0
+RETRY_BUDGET_SECONDS = DEFAULT_RETRY_BUDGET_SECONDS
 MAJOR_RISK = "Major version change"
 
 _SYSTEM_TEXT = (
@@ -185,44 +178,8 @@ def _load_context(paths: list[str]) -> dict[str, str]:
     return out
 
 
-def _response_text(content: object) -> str:
-    if isinstance(content, list):
-        return "".join(str(block.get("text", "")) if isinstance(block, dict) else str(block) for block in content)
-    return str(content)
-
-
 async def _ask_model(prompt: str) -> str:
-    settings = get_settings()
-    system_text = _SYSTEM_TEXT
-    if settings.llm_provider == "anthropic" and _is_oauth_token(settings.anthropic_api_key):
-        system_text = "You are Claude Code, Anthropic's official CLI for Claude.\n\n" + system_text
-    messages = [SystemMessage(content=system_text), HumanMessage(content=prompt)]
-    deadline = time.monotonic() + RETRY_BUDGET_SECONDS
-    delay = RETRY_INITIAL_DELAY
-    attempt = 0
-    while True:
-        remaining = deadline - time.monotonic()
-        attempt += 1
-        try:
-            llm = create_llm(settings, temperature=0)
-            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=max(remaining, MIN_CALL_TIMEOUT))
-            return _response_text(response.content)
-        except Exception as exc:
-            remaining = deadline - time.monotonic()
-            if (_is_retryable_llm_error(exc) or isinstance(exc, TimeoutError)) and remaining > 0:
-                sleep_for = min(delay, remaining)
-                logger.warning(
-                    "Upgrade review LLM call failed (attempt %d, %s), retrying in %.0fs",
-                    attempt,
-                    type(exc).__name__,
-                    sleep_for,
-                )
-                await asyncio.sleep(sleep_for)
-                delay *= 2
-                if deadline - time.monotonic() <= 0:
-                    raise
-                continue
-            raise
+    return await ask_text(_SYSTEM_TEXT, prompt, budget_s=RETRY_BUDGET_SECONDS)
 
 
 def _finalize(r: Review) -> Review:

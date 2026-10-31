@@ -59,7 +59,7 @@ def _cand(running: str | None = "1.2.3", cand: str | None = "1.2.4", **kw: Any) 
 def _stub_llm(content: str | None = None, exc: Exception | None = None) -> Any:
     llm = MagicMock()
     llm.ainvoke = AsyncMock(side_effect=exc) if exc else AsyncMock(return_value=MagicMock(content=content))
-    return patch("src.upgrades.review.create_llm", return_value=llm), llm
+    return patch("src.agent.llm.create_llm", return_value=llm), llm
 
 
 @pytest.fixture(autouse=True)
@@ -146,8 +146,8 @@ async def test_review_retries_transient_errors_then_succeeds() -> None:
     llm = MagicMock()
     llm.ainvoke = AsyncMock(side_effect=[Transient("x"), MagicMock(content='{"verdict": "hold", "summary": "w"}')])
     with (
-        patch("src.upgrades.review.create_llm", return_value=llm),
-        patch("src.upgrades.review.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("src.agent.llm.create_llm", return_value=llm),
+        patch("src.agent.llm.asyncio.sleep", new=AsyncMock()) as sleep,
     ):
         r = await review_mod.review(_cand())
     assert r.verdict == "hold"
@@ -244,9 +244,9 @@ async def test_review_retry_budget_is_bounded() -> None:
         clock[0] += s
 
     with (
-        patch("src.upgrades.review.create_llm", return_value=llm),
-        patch("src.upgrades.review.asyncio.sleep", new=fake_sleep),
-        patch("src.upgrades.review.time.monotonic", side_effect=lambda: clock[0]),
+        patch("src.agent.llm.create_llm", return_value=llm),
+        patch("src.agent.llm.asyncio.sleep", new=fake_sleep),
+        patch("src.agent.llm.time.monotonic", side_effect=lambda: clock[0]),
     ):
         r = await review_mod.review(_cand())
     assert r.verdict == "needs_you" and "Transient" in r.summary
@@ -264,9 +264,9 @@ async def test_review_hung_call_times_out_and_is_needs_you() -> None:
     llm = MagicMock()
     llm.ainvoke = hang
     with (
-        patch("src.upgrades.review.create_llm", return_value=llm),
+        patch("src.agent.llm.create_llm", return_value=llm),
         patch("src.upgrades.review.RETRY_BUDGET_SECONDS", 0.0),
-        patch("src.upgrades.review.MIN_CALL_TIMEOUT", 0.05),
+        patch("src.agent.llm.MIN_CALL_TIMEOUT", 0.05),
     ):
         r = await review_mod.review(_cand())
     assert r.verdict == "needs_you" and "TimeoutError" in r.summary

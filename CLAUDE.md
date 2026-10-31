@@ -109,7 +109,10 @@ modifying eval cases.
 - `src/report/` — Weekly reliability report generator, email delivery, APScheduler cron scheduling
 - `src/upgrades/` — Upgrade Advisor: allowlist, WUD/registry/GitHub clients, review, store, deploy, verify, email; the
   approval endpoint is `src/api/upgrades.py`, the daily job is scheduled in `src/report/scheduler.py`
-- `docs/` — Design documentation (architecture, tool reference, code flow, dependencies)
+- `src/incidents/` — Incident explainer: evidence, verdict, message, pushover, job, store, `__main__` dry run; the
+  webhook is `src/api/incidents.py`, shared models and the Gatus endpoint key are in `models.py` and `gatus.py` (see
+  `docs/incident-explainer.md`)
+- `docs/` — Design documentation (architecture, tool reference, code flow, dependencies, `incident-explainer.md`)
 - `runbooks/` — Operational runbooks (markdown)
 - `ansible/` — Symlink/submodule to ansible home-server project
 - `dashboards/` — Grafana dashboard JSON exports

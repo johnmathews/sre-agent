@@ -8,7 +8,7 @@ automatically.  The LangChain agent path is preserved for OpenAI.
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ from src.agent.history import (
     save_turn,
 )
 from src.agent.mcp_tools import build_mcp_server
+from src.agent.tool_registry import TOOL_SPECS, tool_label
 from src.config import Settings, get_settings
 from src.observability.metrics import AGENT_ERRORS_TOTAL
 from src.observability.sdk_metrics import extract_tool_names, record_sdk_metrics
@@ -71,28 +72,17 @@ _DOCS_PREFIX = "mcp__docs__"
 # never closes stdin during long multi-tool agent loops.
 _STREAM_CLOSE_TIMEOUT_MS = "3600000"
 
-# Regex to match short tool names in the system prompt (word boundary)
+# Every tool on the SDK server, as a bare word in the system prompt. /mcp-only tools are not on it.
 _TOOL_NAME_PATTERN = re.compile(
-    r"\b("
-    r"get_current_time"
-    r"|prometheus_search_metrics|prometheus_instant_query|prometheus_range_query"
-    r"|grafana_get_alerts|grafana_get_alert_rules|grafana_get_dashboard|grafana_search_dashboards"
-    r"|proxmox_list_guests|proxmox_get_guest_config|proxmox_node_status|proxmox_list_tasks"
-    r"|truenas_pool_status|truenas_list_shares|truenas_snapshots|truenas_system_status|truenas_apps"
-    r"|hdd_power_status"
-    r"|loki_query_logs|loki_metric_query|loki_list_label_values|loki_correlate_changes"
-    r"|pbs_datastore_status|pbs_list_backups|pbs_list_tasks"
-    r"|runbook_search"
-    r"|memory_search_incidents|memory_record_incident|memory_get_previous_report|memory_check_baseline"
-    r")\b"
+    r"\b(" + "|".join(re.escape(spec.name) for spec in TOOL_SPECS if "agent" in spec.surfaces) + r")\b"
 )
 
 
 def _prefix_tool_names(prompt: str) -> str:
-    """Add mcp__sre__ prefix to tool names in the system prompt for SDK path.
+    """Add the mcp__sre__ prefix to each SDK tool name in the system prompt.
 
-    Only transforms tool names that appear as backtick-delimited references,
-    not arbitrary word occurrences (e.g. in description text).
+    A name already prefixed is left alone: the ``_`` before it is a word character, so the
+    pattern's word boundary does not match there.
     """
     return _TOOL_NAME_PATTERN.sub(lambda m: _MCP_PREFIX + m.group(0), prompt)
 
@@ -133,8 +123,9 @@ def _build_system_prompt() -> str:
 def build_sdk_options(
     settings: Settings | None = None,
     model_override: str | None = None,
+    exclude: Collection[str] = (),
 ) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions for the SDK agent.
+    """Build ClaudeAgentOptions for the SDK agent, its tool server minus the tools named in ``exclude``.
 
     The system prompt is built fresh each call with current timestamps.
     """
@@ -143,7 +134,7 @@ def build_sdk_options(
 
     model = model_override or settings.anthropic_model
     system_prompt = _build_system_prompt()
-    mcp_server = build_mcp_server(settings)
+    mcp_server = build_mcp_server(settings, exclude=exclude)
 
     mcp_servers: dict[str, McpServerConfig] = {"sre": mcp_server}
     allowed_tools = [f"{_MCP_PREFIX}*"]
@@ -341,39 +332,6 @@ async def invoke_sdk_agent(
 # Streaming invocation (SSE-friendly)
 # ---------------------------------------------------------------------------
 
-# Human-readable labels for tools (keep in sync with agent.py _TOOL_LABELS)
-_TOOL_LABELS: dict[str, str] = {
-    "prometheus_search_metrics": "Searching Prometheus metrics",
-    "prometheus_instant_query": "Querying Prometheus",
-    "prometheus_range_query": "Querying Prometheus (range)",
-    "grafana_get_alerts": "Checking Grafana alerts",
-    "grafana_get_alert_rules": "Fetching Grafana alert rules",
-    "grafana_get_dashboard": "Loading Grafana dashboard",
-    "grafana_search_dashboards": "Searching Grafana dashboards",
-    "proxmox_list_guests": "Listing Proxmox VMs/CTs",
-    "proxmox_get_guest_config": "Fetching guest config",
-    "proxmox_node_status": "Checking Proxmox node status",
-    "proxmox_list_tasks": "Listing Proxmox tasks",
-    "truenas_pool_status": "Checking TrueNAS pools",
-    "truenas_list_shares": "Listing NFS/SMB shares",
-    "truenas_snapshots": "Listing TrueNAS snapshots",
-    "truenas_system_status": "Checking TrueNAS system status",
-    "truenas_apps": "Listing TrueNAS apps",
-    "hdd_power_status": "Checking HDD power states",
-    "loki_query_logs": "Querying Loki logs",
-    "loki_metric_query": "Running Loki metric query",
-    "loki_list_label_values": "Listing Loki label values",
-    "loki_correlate_changes": "Correlating log changes",
-    "pbs_datastore_status": "Checking PBS datastore",
-    "pbs_list_backups": "Listing PBS backups",
-    "pbs_list_tasks": "Listing PBS tasks",
-    "runbook_search": "Searching runbooks",
-    "memory_search_incidents": "Searching incident history",
-    "memory_record_incident": "Recording incident",
-    "memory_get_previous_report": "Retrieving previous report",
-    "memory_check_baseline": "Checking baseline metrics",
-}
-
 
 def _tool_display_name(name: str) -> str:
     """Strip MCP prefixes for display purposes."""
@@ -384,11 +342,28 @@ def _tool_display_name(name: str) -> str:
     return name
 
 
+# Parameters worth showing in a tool_start line, first match wins. Each is a real tool parameter
+# (tests/test_sdk_agent.py checks), and every required string parameter is covered.
+_SUMMARY_KEYS: tuple[str, ...] = (
+    "query",
+    "search_term",
+    "dashboard",
+    "label",
+    "name",
+    "dataset",
+    "datastore",
+    "pool",
+    "metric_name",
+    "title",
+    "reference_time",
+)
+
+
 def _summarize_sdk_tool_input(tool_input: dict[str, Any] | None) -> str:
     """Extract a short parameter summary for display in tool_start events."""
     if not tool_input:
         return ""
-    for key in ("query", "expr", "search", "metric", "dashboard_uid", "session_id"):
+    for key in _SUMMARY_KEYS:
         val = tool_input.get(key)
         if val and isinstance(val, str):
             result: str = val[:80]
@@ -451,7 +426,7 @@ async def stream_sdk_agent(
                 elapsed = time.monotonic() - tool_start
                 for name in pending_tools:
                     tool_durations.append((name, elapsed / len(pending_tools)))
-                    end_label = _TOOL_LABELS.get(name, f"Running {name}")
+                    end_label = tool_label(name)
                     yield {"type": "tool_end", "content": end_label, "tool_name": name}
                 pending_tools = []
 
@@ -460,7 +435,7 @@ async def stream_sdk_agent(
                 for block in msg.content:
                     if isinstance(block, ToolUseBlock):
                         short_name = _tool_display_name(block.name)
-                        label = _TOOL_LABELS.get(short_name, f"Running {short_name}")
+                        label = tool_label(short_name)
                         summary = _summarize_sdk_tool_input(block.input if hasattr(block, "input") else None)
                         if summary:
                             label = f"{label} — {summary}"
@@ -491,7 +466,7 @@ async def stream_sdk_agent(
         elapsed = time.monotonic() - tool_start
         for name in pending_tools:
             tool_durations.append((name, elapsed / len(pending_tools)))
-            end_label = _TOOL_LABELS.get(name, f"Running {name}")
+            end_label = tool_label(name)
             yield {"type": "tool_end", "content": end_label, "tool_name": name}
 
     yield {"type": "status", "content": "Synthesizing response..."}

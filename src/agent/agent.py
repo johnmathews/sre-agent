@@ -6,7 +6,7 @@ Supports two backend paths:
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,41 +20,9 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.history import load_turns_as_langchain_messages, save_turn
 from src.agent.llm import create_llm
-from src.agent.tools.grafana_alerts import grafana_get_alert_rules, grafana_get_alerts
-from src.agent.tools.grafana_dashboards import grafana_get_dashboard, grafana_search_dashboards
-from src.agent.tools.loki import (
-    loki_correlate_changes,
-    loki_list_label_values,
-    loki_metric_query,
-    loki_query_logs,
-)
-from src.agent.tools.pbs import pbs_datastore_status, pbs_list_backups, pbs_list_tasks
-from src.agent.tools.prometheus import (
-    prometheus_instant_query,
-    prometheus_range_query,
-    prometheus_search_metrics,
-)
-from src.agent.tools.proxmox import (
-    proxmox_get_guest_config,
-    proxmox_list_guests,
-    proxmox_list_tasks,
-    proxmox_node_status,
-)
-from src.agent.tools.truenas import (
-    truenas_apps,
-    truenas_list_shares,
-    truenas_pool_status,
-    truenas_snapshots,
-    truenas_system_status,
-)
+from src.agent.tool_registry import enabled_specs, tool_label
 from src.config import get_settings
 from src.observability.callbacks import MetricsCallbackHandler
-
-# Conditional import — disk_status depends on both prometheus and truenas tools
-try:
-    from src.agent.tools.disk_status import hdd_power_status
-except Exception:  # pragma: no cover
-    hdd_power_status = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -175,105 +143,15 @@ def _post_response_actions(messages: list[Any], question: str, response_text: st
         return ""
 
 
-def _get_tools() -> list[BaseTool]:
-    """Collect all agent tools, conditionally including optional integrations."""
-    from src.agent.tools.clock import get_current_time
-
-    tools: list[BaseTool] = [
-        get_current_time,
-        prometheus_search_metrics,
-        prometheus_instant_query,
-        prometheus_range_query,
-        grafana_get_alerts,
-        grafana_get_alert_rules,
-        grafana_get_dashboard,
-        grafana_search_dashboards,
-    ]
-
-    settings = get_settings()
-
-    # Proxmox VE tools — only if configured
-    if settings.proxmox_url:
-        tools.extend(
-            [
-                proxmox_list_guests,
-                proxmox_get_guest_config,
-                proxmox_node_status,
-                proxmox_list_tasks,
-            ]
-        )
-    else:
-        logger.info("Proxmox VE tools disabled — PROXMOX_URL not set")
-
-    # TrueNAS SCALE tools — only if configured
-    if settings.truenas_url:
-        tools.extend(
-            [
-                truenas_pool_status,
-                truenas_list_shares,
-                truenas_snapshots,
-                truenas_system_status,
-                truenas_apps,
-            ]
-        )
-        # Composite HDD tool — needs Prometheus (always available) + TrueNAS
-        if hdd_power_status is not None:
-            tools.append(hdd_power_status)  # pyright: ignore[reportUnknownArgumentType]
-    else:
-        logger.info("TrueNAS tools disabled — TRUENAS_URL not set")
-
-    # Loki log tools — only if configured
-    if settings.loki_url:
-        tools.extend(
-            [
-                loki_query_logs,
-                loki_metric_query,
-                loki_list_label_values,
-                loki_correlate_changes,
-            ]
-        )
-    else:
-        logger.info("Loki tools disabled — LOKI_URL not set")
-
-    # Proxmox Backup Server tools — only if configured
-    if settings.pbs_url:
-        tools.extend(
-            [
-                pbs_datastore_status,
-                pbs_list_backups,
-                pbs_list_tasks,
-            ]
-        )
-    else:
-        logger.info("PBS tools disabled — PBS_URL not set")
-
-    # Only include runbook search if vector store exists
-    try:
-        from src.agent.retrieval.runbooks import runbook_search
-
-        tools.append(runbook_search)
-    except Exception:
-        logger.warning("Runbook search tool unavailable — run 'make ingest' to build the vector store")
-
-    # Memory tools — only if MEMORY_DB_PATH is configured
-    try:
-        from src.memory.tools import get_memory_tools
-
-        memory_tools = get_memory_tools()
-        if memory_tools:
-            tools.extend(memory_tools)
-            logger.info("Memory tools enabled: %s", [t.name for t in memory_tools])
-        else:
-            logger.info("Memory tools disabled — MEMORY_DB_PATH not set")
-    except Exception:
-        logger.warning("Memory tools unavailable")
-
-    return tools
+def _get_tools(exclude: Collection[str] = ()) -> list[BaseTool]:
+    """The registry's ``agent`` surface as the current settings enable it, minus ``exclude``."""
+    return [spec.tool for spec in enabled_specs(get_settings(), "agent", exclude)]
 
 
 def build_agent(
     model_name: str | None = None,
     temperature: float = 0.0,
+    exclude: Collection[str] = (),
 ) -> SREAgent:
     """Build and return the SRE assistant agent.
 
@@ -284,6 +162,7 @@ def build_agent(
     Args:
         model_name: LLM model to use. Defaults to the configured provider's model.
         temperature: LLM temperature (0.0 for deterministic tool-calling).
+        exclude: Tool names to leave out on either path (the eval runner leaves out ``runbook_search``).
 
     Returns:
         An SREAgent wrapping either the SDK options or the LangGraph agent.
@@ -294,7 +173,7 @@ def build_agent(
     if settings.llm_provider == "anthropic":
         from src.agent.sdk_agent import build_sdk_options
 
-        sdk_options = build_sdk_options(settings, model_override=model_name)
+        sdk_options = build_sdk_options(settings, model_override=model_name, exclude=exclude)
         resolved_model = model_name or settings.anthropic_model
         logger.info("Building SDK agent with model=%s", resolved_model)
         return SREAgent(provider="anthropic", sdk_options=sdk_options)
@@ -302,7 +181,7 @@ def build_agent(
     # --- OpenAI / LangGraph path ---
     llm = create_llm(settings, temperature=temperature, model_override=model_name)
 
-    tools = _get_tools()
+    tools = _get_tools(exclude)
     resolved_model = model_name or settings.openai_model
     logger.info("Building agent with model=%s, %d tools: %s", resolved_model, len(tools), [t.name for t in tools])
 
@@ -467,35 +346,6 @@ async def _invoke_langgraph_agent(
 # Streaming invocation (SSE-friendly)
 # ---------------------------------------------------------------------------
 
-# Human-readable labels for tools (keep in sync with tool registration)
-_TOOL_LABELS: dict[str, str] = {
-    "prometheus_search_metrics": "Searching Prometheus metrics",
-    "prometheus_instant_query": "Querying Prometheus",
-    "prometheus_range_query": "Querying Prometheus (range)",
-    "grafana_get_alerts": "Checking Grafana alerts",
-    "grafana_get_alert_rules": "Fetching Grafana alert rules",
-    "grafana_get_dashboard": "Loading Grafana dashboard",
-    "grafana_search_dashboards": "Searching Grafana dashboards",
-    "proxmox_list_guests": "Listing Proxmox VMs/CTs",
-    "proxmox_get_guest_config": "Fetching guest config",
-    "proxmox_node_status": "Checking Proxmox node status",
-    "proxmox_list_tasks": "Listing Proxmox tasks",
-    "truenas_pool_status": "Checking TrueNAS pools",
-    "truenas_list_shares": "Listing NFS/SMB shares",
-    "truenas_snapshots": "Listing TrueNAS snapshots",
-    "truenas_system_status": "Checking TrueNAS system status",
-    "truenas_apps": "Listing TrueNAS apps",
-    "hdd_power_status": "Checking HDD power states",
-    "loki_query_logs": "Querying Loki logs",
-    "loki_metric_query": "Running Loki metric query",
-    "loki_list_label_values": "Listing Loki label values",
-    "loki_correlate_changes": "Correlating log changes",
-    "pbs_datastore_status": "Checking PBS datastore",
-    "pbs_list_backups": "Listing PBS backups",
-    "pbs_list_tasks": "Listing PBS tasks",
-    "runbook_search": "Searching runbooks",
-}
-
 
 def _summarize_tool_input(tool_name: str, tool_input: Any) -> str:
     """Create a brief human-readable summary of the tool input."""
@@ -606,7 +456,7 @@ async def _stream_langgraph_agent(
             data: dict[str, Any] = event.get("data", {})
 
             if event_type == "on_tool_start":
-                label = _TOOL_LABELS.get(event_name, f"Running {event_name}")
+                label = tool_label(event_name)
                 summary = _summarize_tool_input(event_name, data.get("input"))
                 content = f"{label}: {summary}" if summary else label
                 yield {
@@ -616,7 +466,7 @@ async def _stream_langgraph_agent(
                 }
 
             elif event_type == "on_tool_end":
-                label = _TOOL_LABELS.get(event_name, event_name)
+                label = tool_label(event_name)
                 yield {
                     "type": "tool_end",
                     "content": f"{label} — done",

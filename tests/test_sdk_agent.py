@@ -1,8 +1,10 @@
 """Tests for the Claude Agent SDK agent path."""
 
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from claude_agent_sdk.types import AssistantMessage, ToolUseBlock
 
 from src.agent.sdk_agent import (
     _BLOCKED_BUILTINS,
@@ -12,7 +14,11 @@ from src.agent.sdk_agent import (
     _summarize_sdk_tool_input,
     _tool_display_name,
     build_sdk_options,
+    stream_sdk_agent,
 )
+from src.agent.tool_registry import TOOL_SPECS, input_schema
+
+AGENT_SPECS = [s for s in TOOL_SPECS if "agent" in s.surfaces]
 
 
 class TestPrefixToolNames:
@@ -39,6 +45,13 @@ class TestPrefixToolNames:
         text = "This is a normal sentence about CPU usage."
         result = _prefix_tool_names(text)
         assert result == text
+
+    def test_tool_name_pattern_covers_registry(self) -> None:
+        """Every tool on the SDK server is rewritten to its mcp__sre__ name; /mcp-only tools are not on it."""
+        for spec in TOOL_SPECS:
+            text = f"Call `{spec.name}` first."
+            expected = f"Call `mcp__sre__{spec.name}` first." if "agent" in spec.surfaces else text
+            assert _prefix_tool_names(text) == expected, spec.name
 
 
 class TestBuildSystemPrompt:
@@ -140,6 +153,12 @@ class TestBuildSdkOptions:
             options = build_sdk_options()
             assert options.env.get("ANTHROPIC_API_KEY") == ""
 
+    def test_exclude_reaches_the_sdk_server(self, mock_settings: Any) -> None:
+        with patch("src.agent.sdk_agent.build_mcp_server") as mock_mcp:
+            mock_mcp.return_value = MagicMock()
+            build_sdk_options(exclude={"runbook_search"})
+        mock_mcp.assert_called_once_with(mock_settings, exclude={"runbook_search"})
+
     def test_env_sets_stream_close_timeout(self) -> None:
         """CLAUDE_CODE_STREAM_CLOSE_TIMEOUT guards against CLI inactivity timer bug."""
         with patch("src.agent.sdk_agent.build_mcp_server") as mock_mcp:
@@ -175,11 +194,26 @@ class TestSummarizeSdkToolInput:
     def test_extracts_query_param(self) -> None:
         assert _summarize_sdk_tool_input({"query": "up{job='node'}"}) == "up{job='node'}"
 
-    def test_extracts_expr_param(self) -> None:
-        assert _summarize_sdk_tool_input({"expr": "rate(http_requests[5m])"}) == "rate(http_requests[5m])"
+    def test_extracts_search_term_param(self) -> None:
+        assert _summarize_sdk_tool_input({"search_term": "disk"}) == "disk"
 
-    def test_extracts_search_param(self) -> None:
-        assert _summarize_sdk_tool_input({"search": "disk failure"}) == "disk failure"
+    def test_extracts_dashboard_param(self) -> None:
+        assert _summarize_sdk_tool_input({"dashboard": "node-exporter"}) == "node-exporter"
+
+    def test_summary_keys_are_real_parameters(self) -> None:
+        """Each key is a parameter of some tool the SDK agent can call."""
+        from src.agent.sdk_agent import _SUMMARY_KEYS
+
+        params = {name for spec in AGENT_SPECS for name in input_schema(spec)["properties"]}
+        assert [k for k in _SUMMARY_KEYS if k not in params] == []
+
+    def test_summary_covers_every_required_string_parameter(self) -> None:
+        """A tool that takes a required string shows something in its tool_start line."""
+        for spec in AGENT_SPECS:
+            schema = input_schema(spec)
+            strings = [n for n in schema.get("required", []) if schema["properties"][n].get("type") == "string"]
+            if strings:
+                assert _summarize_sdk_tool_input({n: "x" for n in strings}) == "x", spec.name
 
     def test_returns_empty_for_no_matching_keys(self) -> None:
         assert _summarize_sdk_tool_input({"unrelated": "value"}) == ""
@@ -200,6 +234,34 @@ class TestSummarizeSdkToolInput:
 
     def test_priority_order(self) -> None:
         """First matching key in priority order wins."""
-        result = _summarize_sdk_tool_input({"expr": "rate(...)", "query": "up"})
-        # 'query' comes before 'expr' in the priority list
+        result = _summarize_sdk_tool_input({"label": "container", "query": "up"})
+        # 'query' comes before 'label' in the priority list
         assert result == "up"
+
+
+class TestStreamLabels:
+    @pytest.mark.integration
+    async def test_every_tool_has_label_on_sdk_stream(self, mock_settings: Any) -> None:
+        """Each tool's tool_start and tool_end events carry its registry label."""
+        blocks = [ToolUseBlock(id=f"t{i}", name=f"mcp__sre__{s.name}", input={}) for i, s in enumerate(AGENT_SPECS)]
+
+        async def fake_query(**kwargs: object):  # type: ignore[no-untyped-def]
+            yield AssistantMessage(content=list(blocks), model="test-model")
+
+        options = MagicMock()
+        options.model = "test-model"
+        with (
+            patch("src.agent.sdk_agent.query", side_effect=fake_query),
+            patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock),
+            patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"),
+            patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options),
+            patch("src.agent.sdk_agent.record_sdk_metrics"),
+            patch("src.agent.sdk_agent._post_response_actions", return_value=""),
+        ):
+            events = [ev async for ev in stream_sdk_agent(options, "hi")]
+
+        expected = [(s.name, s.label) for s in AGENT_SPECS]
+        starts = [(e["tool_name"], e["content"]) for e in events if e["type"] == "tool_start"]
+        ends = [(e["tool_name"], e["content"]) for e in events if e["type"] == "tool_end"]
+        assert starts == expected
+        assert ends == expected

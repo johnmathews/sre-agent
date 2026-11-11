@@ -246,10 +246,14 @@ claude mcp add --transport http \
   shutdown, and answers 503 `{"error":"MCP server not started"}` while that is unset. A second lifespan (a restart,
   or `TestClient` entered twice) therefore serves a fresh MCP app instead of a stale one.
   `tests/test_mcp_http_integration.py` drives initialize, tools/list and tools/call over real HTTP.
-- **Tools:** Same LangChain tool functions used by the agent, wrapped as FastMCP tools, plus 2 conversation
-  history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) only available via MCP
-- **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their
-  URLs are configured
+- **Tools:** One registry, `TOOL_SPECS` in `src/agent/tool_registry.py`, builds all three tool surfaces: `/mcp`, the
+  LangGraph agent's tools and the SDK agent's in-process `sre` server. Each surface shows the same names, descriptions
+  and input schemas, and every call is validated against the schema before the tool runs.
+  `tests/test_tool_registry.py::test_surfaces_built_from_registry` fails if the surfaces drift apart. The 2
+  conversation history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) are only on `/mcp`.
+- **Conditional registration:** Each spec carries its enabling condition. Proxmox, TrueNAS, Loki, PBS, memory and
+  conversation tools are registered only when their settings are configured, and each disabled group is logged once
+  at INFO. A tool module that fails to import fails startup.
 
 ### Security
 

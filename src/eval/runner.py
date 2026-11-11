@@ -357,16 +357,9 @@ async def run_eval_case(
     # Stack all settings patches
     patches = [patch(site, return_value=fake_settings) for site in _SETTINGS_PATCH_SITES]
 
-    # Prevent runbook_search from loading — it requires a vector store on disk.
-    # RAG quality is tested separately; eval focuses on tool selection + answer quality.
-    # Setting the module to None in sys.modules makes `from ... import` raise
-    # ImportError, which _get_tools() catches gracefully (tool never registered).
-    runbook_patch = patch.dict(sys.modules, {"src.agent.retrieval.runbooks": None})
-
     try:
         for p in patches:
             p.start()
-        runbook_patch.start()
 
         # Import agent builder inside the patch context so it sees fake settings
         from src.agent.agent import build_agent
@@ -395,13 +388,9 @@ async def run_eval_case(
             # Catch-all: unmocked infra routes return 503
             router.route().mock(return_value=httpx.Response(503, json={"error": "unmocked"}))
 
-            # Suppress the "Runbook search tool unavailable" warning — we intentionally
-            # disabled it via sys.modules patch, so the warning is expected noise.
-            agent_logger = logging.getLogger("src.agent.agent")
-            prev_level = agent_logger.level
-            agent_logger.setLevel(logging.ERROR)
-            agent = build_agent()
-            agent_logger.setLevel(prev_level)
+            # runbook_search needs a vector store on disk. RAG quality is tested separately;
+            # the eval scores tool selection and answer quality.
+            agent = build_agent(exclude={"runbook_search"})
 
             from langchain_core.messages import HumanMessage
 
@@ -417,7 +406,6 @@ async def run_eval_case(
         tool_score = _score_tools(case, called_tools)
 
     finally:
-        runbook_patch.stop()
         for p in reversed(patches):
             p.stop()
         # Clean up temp memory DB

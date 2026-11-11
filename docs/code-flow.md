@@ -38,9 +38,10 @@ The same `ensure_valid_token()` also runs from a background task, `oauth_refresh
 lifespan starts when `LLM_PROVIDER=anthropic`. It runs every `CLAUDE_CREDENTIALS_CHECK_INTERVAL_S` (default 900 s),
 whether or not anyone is asking questions.
 
-The SDK path uses MCP tools (`src/agent/mcp_tools.py`) that wrap the same LangChain tool functions. The system prompt
-is built fresh each call with current timestamps and `mcp__sre__` tool name prefixes. Conversation history is injected
-into the prompt (context stuffing) since each `query()` call is stateless.
+The SDK path uses an in-process MCP server (`src/agent/mcp_tools.py`) built from the tool registry, so it runs the
+same LangChain tool functions with the same validation as `/mcp` (see [Tool Registration](#tool-registration)). The
+system prompt is built fresh each call with current timestamps and `mcp__sre__` tool name prefixes. Conversation
+history is injected into the prompt (context stuffing) since each `query()` call is stateless.
 
 For both paths, `invoke_agent()` and `stream_agent()` dispatch based on `SREAgent.provider`.
 
@@ -179,24 +180,39 @@ The registry's helpers:
 gets an `isError` result with the tool's message. The contract `/mcp` presents (names, parameters, defaults, limits,
 annotations) is pinned by `tests/snapshots/mcp_tools_contract.json`.
 
-The agent (`src/agent/agent.py::_get_tools()`) and the SDK tool server (`src/agent/mcp_tools.py::build_mcp_server()`)
-still assemble their own lists with the same conditions. W10 moves both onto the registry. Today
-`_get_tools()` includes:
+Both agent paths are built from the registry's `"agent"` surface, which is the `"mcp"` surface minus the two
+conversation tools:
+
+- **LangGraph (OpenAI):** `src/agent/agent.py::_get_tools()` returns the specs' LangChain tools.
+- **Claude Agent SDK (Anthropic):** `src/agent/mcp_tools.py::build_mcp_server()` adds one `SdkMcpTool` per spec
+  to the in-process `sre` server, with the same input schema `/mcp` serves. Its handler calls `run_tool`, so the
+  agent gets the same validation as `/mcp` (unknown argument names refused, limits enforced). A `ToolError` or
+  `ToolException` becomes an `is_error` result with the message; any other exception is logged with its traceback
+  and becomes an `is_error` result naming the exception class.
+
+`build_agent(exclude=...)` passes `exclude` through to `enabled_specs` on both paths. The eval runner uses it to leave
+out `runbook_search`, which needs a vector store on disk.
+
+The progress labels in `tool_start` and `tool_end` events come from `tool_label(name)` on both paths. The SDK path's
+system prompt rewrites each agent-surface tool name to its `mcp__sre__` form with a pattern built from the registry.
+
+The enabling conditions:
 
 ```
-Always included:
-  - get_current_time
+Always enabled:
+  - get_current_time, runbook_search (a missing vector store is reported when it is called)
   - prometheus_search_metrics, prometheus_instant_query, prometheus_range_query
   - grafana_get_alerts, grafana_get_alert_rules
   - grafana_get_dashboard, grafana_search_dashboards
 
 Conditional (config-dependent):
-  - truenas_* tools and hdd_power_status  (if TRUENAS_URL is set)
+  - truenas_* tools  (if TRUENAS_URL is set)
+  - hdd_power_status (if TRUENAS_URL and PROMETHEUS_URL are set)
   - loki_* tools     (if LOKI_URL is set)
   - proxmox_* tools  (if PROXMOX_URL is set)
   - pbs_* tools      (if PBS_URL is set)
-  - runbook_search   (if its module imports; a missing vector store is reported when it is called)
   - memory_* tools   (if MEMORY_DB_PATH is set)
+  - sre_agent_list_conversations, sre_agent_get_conversation (if CONVERSATION_HISTORY_DIR is set; /mcp only)
 ```
 
 ## Settings Loading

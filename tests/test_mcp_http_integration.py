@@ -214,3 +214,47 @@ def test_expected_tool_errors_logged_once(mock_settings: Any, caplog: pytest.Log
         r.getMessage() for r in caplog.records if r.name.startswith("fastmcp") and r.levelno >= logging.ERROR
     ]
     assert fastmcp_errors == []
+
+
+@pytest.mark.integration
+@respx.mock
+def test_initialize_returns_instructions(mock_settings: Any) -> None:
+    """The server sends usage guidance once, in ``initialize``, instead of in every tool description."""
+    respx.get(f"{PROM}/api/v1/label/__name__/values").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": []})
+    )
+    respx.get(f"{PROM}/api/v1/metadata").mock(return_value=httpx.Response(200, json={"status": "success", "data": {}}))
+    with patch("src.api.main.build_agent", return_value=MagicMock(name="fake_agent")):
+        from src.api.main import app
+
+        with TestClient(app) as client:
+            instructions = _initialize(client)["result"].get("instructions")
+    assert instructions, "initialize.result.instructions is empty"
+    assert "memory_record_incident" in instructions
+    assert "get_current_time" in instructions
+    assert "now-1h" in instructions
+    assert "RFC3339" in instructions
+
+
+@pytest.mark.integration
+@respx.mock
+def test_no_description_repeats_preamble(mock_settings: Any) -> None:
+    """No two descriptions share a leading sentence, and none carries the old ``[Homelab SRE]`` tag."""
+    respx.get(f"{PROM}/api/v1/label/__name__/values").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": []})
+    )
+    respx.get(f"{PROM}/api/v1/metadata").mock(return_value=httpx.Response(200, json={"status": "success", "data": {}}))
+    with patch("src.api.main.build_agent", return_value=MagicMock(name="fake_agent")):
+        from src.api.main import app
+
+        with TestClient(app) as client:
+            _initialize(client)
+            tools = _rpc(client, 2, "tools/list", {})["result"]["tools"]
+    assert tools
+    first_sentences: dict[str, str] = {}
+    for tool in tools:
+        description: str = tool["description"]
+        assert not description.startswith("[Homelab SRE]"), tool["name"]
+        first = description.strip().split(". ")[0].split("\n")[0]
+        assert first not in first_sentences, f"{tool['name']} and {first_sentences[first]} both start {first!r}"
+        first_sentences[first] = tool["name"]

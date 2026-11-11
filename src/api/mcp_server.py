@@ -156,12 +156,26 @@ class ToolCallObserver(Middleware):
         return result
 
 
+SERVER_INSTRUCTIONS = """\
+Read-only SRE tools for a personal Proxmox homelab: Prometheus metrics, Grafana alerts and dashboards, Loki logs, \
+Proxmox VE, Proxmox Backup Server, TrueNAS storage, container and service health, upgrade status, runbook search, \
+agent memory and past agent conversations. Which tools are present depends on how the server is configured.
+
+Every tool only reads, except memory_record_incident, which writes one incident record.
+
+Call get_current_time before building a time range, so that relative times are anchored on the real date. Time \
+arguments accept: 'now'; a duration before now such as '1h', '-1h' or 'now-1h' (units ms, s, m, h, d, w; compound \
+forms like '1h30m' work); an RFC3339 timestamp such as '2026-11-11T13:00:00Z' (no zone means UTC); or Unix epoch \
+seconds.
+"""
+
+
 def build_fastmcp_server(settings: Settings | None = None) -> FastMCP:
     """Build the FastMCP server from the registry's ``mcp`` surface, as ``settings`` enables it."""
     if settings is None:
         settings = get_settings()
 
-    mcp = FastMCP("sre-assistant", middleware=[ToolCallObserver()])
+    mcp = FastMCP("sre-assistant", middleware=[ToolCallObserver()], instructions=SERVER_INSTRUCTIONS)
     specs = enabled_specs(settings, "mcp")
     for spec in specs:
         mcp.add_tool(RegistryTool.from_spec(spec))

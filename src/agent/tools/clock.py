@@ -26,7 +26,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -128,7 +127,7 @@ def render_prompt_time_fields(settings: Settings | None = None) -> dict[str, str
     }
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "Return the current date, time, weekday, and the user's local time. Use this when "
     "you need to ground a duration or 'how long ago' claim, when computing elapsed time "
     "from a Unix timestamp returned by another tool, or when you want to confirm the "

@@ -1,6 +1,10 @@
 # Tool Reference
 
-The agent has up to 29 tools across 11 categories (plus 2 MCP-only conversation history tools). Tools are conditionally registered based on configuration.
+The MCP server exposes up to 36 tools across 14 categories: the 13 groups in the table below (all but Documentation) and the 2 MCP-only conversation history tools. "Up to" means the maximum: each tool group is registered only when its configuration is set (see below), so a deployment shows fewer.
+
+## Server Instructions and Descriptions
+
+Guidance that applies to every tool is sent once, as the MCP `instructions` string in the `initialize` result (`SERVER_INSTRUCTIONS` in `src/api/mcp_server.py`). It states what the server covers, that every tool is read-only except `memory_record_incident`, that clients call `get_current_time` before building a time range, and the accepted time forms (`now`, `now-1h`, `-1h`, `1h`, RFC3339, Unix seconds). Tool descriptions hold only facts about their own tool and never repeat a shared preamble. The SDK agent does not receive these instructions: its system prompt (`src/agent/system_prompt.md`) already tells it to use `get_current_time`, and each time argument documents its accepted forms.
 
 ## Conditional Registration
 
@@ -10,9 +14,11 @@ is skipped entirely (no failed connections, no error logs).
 | Tool Group       | Tools                                                                                                      | Required Config             | Always Available          |
 | ---------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------- |
 | Time             | `get_current_time`                                                                                         | None                        | Yes                       |
-| Prometheus       | `prometheus_search_metrics`, `prometheus_instant_query`, `prometheus_range_query`                          | `PROMETHEUS_URL`            | Yes (required)            |
+| Prometheus       | `prometheus_search_metrics`, `prometheus_instant_query`, `prometheus_range_query`, `scrape_targets`, `container_status` | `PROMETHEUS_URL`            | Yes (required)            |
 | Grafana Alerting | `grafana_get_alerts`, `grafana_get_alert_rules`                                                            | `GRAFANA_URL`               | Yes (required)            |
 | Grafana Dashboards | `grafana_get_dashboard`, `grafana_search_dashboards`                                                     | `GRAFANA_URL`               | Yes (required)            |
+| Upgrade Status   | `upgrade_status`                                                                                           | `PROMETHEUS_URL`; `UPGRADE_ADVISOR_DB_PATH` adds verdicts and deploys | Yes |
+| Service Health   | `service_health`                                                                                           | `PROMETHEUS_URL`, `GRAFANA_URL`; `LOKI_URL` adds the error count | Yes |
 | Loki             | `loki_query_logs`, `loki_metric_query`, `loki_list_label_values`, `loki_correlate_changes`                 | `LOKI_URL`                  | No                        |
 | Proxmox VE       | `proxmox_list_guests`, `proxmox_get_guest_config`, `proxmox_node_status`, `proxmox_list_tasks`             | `PROXMOX_URL`               | No                        |
 | TrueNAS SCALE    | `truenas_pool_status`, `truenas_list_shares`, `truenas_snapshots`, `truenas_system_status`, `truenas_apps` | `TRUENAS_URL`               | No                        |
@@ -83,6 +89,18 @@ Search for available Prometheus metric names matching a substring.
 - **Example questions:** "What MikroTik metrics are available?", "Find CPU-related metrics"
 - **Returns:** Matching metric names with type and description from metadata
 
+### scrape_targets
+
+List Prometheus scrape targets and their health (`GET /api/v1/targets?state=active`).
+
+- **Input:** `job` (optional; letters, digits and `_ : . -`, at most 100; sent as `scrapePool` and applied again to
+  `labels.job`), `only_down` (default `false`; list only targets whose health is `down`)
+- **Example questions:** "Which scrape targets are down?", "Is the fastapi job being scraped?"
+- **Returns:** A summary line (`N targets, M down across K jobs`), then one line per target with down targets first, then
+  unknown, then up: job, instance, hostname, health, last scrape in UTC with its age, scrape duration and `lastError` cut
+  to 200 characters. At most 100 targets are listed, with `showing N of M` when more match.
+- **Errors:** An invalid `job`, an unreachable Prometheus, a timeout or an HTTP error raises a tool error.
+
 ### prometheus_instant_query
 
 Query Prometheus for the current value of a metric (instant query).
@@ -116,6 +134,36 @@ Query Prometheus for metric values over a time range.
 - **Example questions:** "How has CPU changed over the last hour?", "Show memory usage for the past day"
 - **Returns:** Time series data with sample counts and per-series summary statistics (min, max, avg). Sample times
   print as `YYYY-MM-DD HH:MM:SSZ`. The series cap and `container_label_*` hiding match the instant query.
+
+### container_status
+
+Report Docker container state across hosts from the container-status exporter, with start times from cadvisor.
+
+- **Input:**
+  - `host` (optional, at most 64 characters: letters, digits, space and `. _ -`): matched through `host_key`, so
+    `media`, `media vm` and `Media VM` name the same host.
+  - `name` (optional, at most 128 characters): a case-insensitive substring of the container name.
+  - `only_problems` (default `false`): list only containers that are not running, are unhealthy, restarted in the
+    last 24 hours or run an outdated image.
+- **Data:** nine concurrent instant queries: `container_state`, `container_health`, `container_restart_count`,
+  `increase(container_restart_count[86400s])`, `container_image_outdated` and `container_image_info` (all
+  `job="container-status"`), cadvisor `container_start_time_seconds`, `up{job="container-status"}` and
+  `portainer_exporter_last_scrape_timestamp`. The exporter's series carry `hostname="infra"` (the exporter's own host)
+  and the container's host in `exported_hostname`, so the tool keys each container on
+  `(host_key(exported_hostname), container_name)` and joins cadvisor's `(host_key(hostname), name)` to it. It filters
+  in Python, never on the `hostname` label.
+- **Example questions:** "Is jellyfin running?", "Which containers on media have problems?", "When did tubearchivist
+  last start?"
+- **Returns:** A summary line, the exporter's state (`up` and the last collection time with its age; flagged stale when
+  `up` is 0 or missing, or the last collection is over 5 minutes old), then one line per container with problems first:
+  `host/name: state[, health], restarts N (+M in 24h), started <UTC> (<age>), image <ref> (<version>)`, prefixed with
+  `PROBLEM (reasons)` when it has any; an outdated image reads `(<current> -> <available> available)`. At most 150 containers print, with `showing 150 of M`. A source that fails prints
+  `<source>: unavailable: <reason>` and the other sources still render. An unknown `host` lists the known hosts.
+- **Errors:** If `container_state` itself fails, the tool raises an error that names every failed source.
+- **For other tools:** `collect_containers(host=None, name=None, restart_window_seconds=86400)` in
+  `src/agent/tools/containers.py` returns the same data as records (`ContainerReport`), never raises for an HTTP or
+  response error, and lists failed sources in `unavailable`. `restart_window_seconds` sets the window of the restart
+  delta (`restarts_24h` on each record). `container_status` keeps 24h; `service_health` passes its own window.
 
 ## Grafana Alerting (always enabled)
 
@@ -175,6 +223,74 @@ Search for Grafana dashboards by name.
 - **Input:** `query` (string)
 - **Example questions:** "What dashboards exist?", "Find the network dashboard"
 - **Returns:** Matching dashboards with title, UID, folder, URL, tags
+
+## Upgrade Status (always enabled)
+
+### upgrade_status
+
+Report what the Upgrade Advisor decided about container image upgrades, and which images are outdated. Read-only: it
+never approves or deploys, and its module imports only the advisor's `store` and `models`, never the deploy code.
+
+- **Input:** `container` (optional; letters, digits and `_ . -`, at most 128), `days` (int, default 30, 1–365; how far
+  back to list deploys)
+- **Example questions:** "Should I upgrade homepage?", "What did the upgrade advisor say about sonarr?", "Which
+  containers have a newer image?"
+- **Sources, fetched concurrently:**
+  - The advisor's SQLite store at `UPGRADE_ADVISOR_DB_PATH`, opened read-only (`mode=ro`, no schema script): the last
+    successful run, the latest verdict per container with that verdict's deploys, and other deploys in the last `days`.
+  - The container-status exporter in Prometheus: `container_image_outdated` and `container_image_info`, filtered on
+    `container_name` and joined on `exported_hostname` (the real host; the exporter's own `hostname` is `infra`).
+- **Returns:** The last successful advisor run in UTC with its age. Then each latest verdict (`upgrade`, `hold` or
+  `needs_you`), with running and candidate versions, review time and summary, and its deploys (outcome, trigger state,
+  detail). Then other deploys in the window, and image freshness (newer image available with current and available
+  versions, image, status, base image). With `container`, only that container. Without it, every reviewed container
+  (newest verdict first, at most 50) and only the outdated images, with `N of M containers have a newer image`.
+- **Errors:**
+  - An empty `UPGRADE_ADVISOR_DB_PATH` prints `Upgrade Advisor not configured` and still shows the exporter data.
+  - A configured path whose file is missing prints `Upgrade Advisor DB unavailable: file not found: <path>`. An
+    unreadable file prints the SQLite error. The exporter data still shows in both cases.
+  - A Prometheus failure prints `unavailable: <reason>` in the image freshness part and the advisor data still shows.
+  - When neither source answers, the tool raises an error naming both reasons.
+
+## Service Health (always enabled)
+
+### service_health
+
+Answer "is this service up?" in one call: five sources run concurrently and a fixed rule set turns them into one
+verdict.
+
+- **Input:**
+  - `name` (1–128 characters: letters, digits, space and `. _ ( ) -`): the service, e.g. `jellyfin` or
+    `Home Assistant`.
+  - `window` (default `1h`, from `5m` to `7d`): how far back the restart count, the Gatus success ratio and the Loki
+    error count look. A value outside the range, or not a duration, is refused with the accepted range.
+- **Sources and matching (fixed):**
+  1. **Gatus:** `gatus_results_endpoint_success` now and `avg_over_time(...[window])`. An endpoint matches when `name`
+     equals its `name` label, or its `key` after the first `_` (Gatus builds the key from the lower-cased group:
+     `apps_home-assistant` and `home-automation_home-assistant` both give `home-assistant`), ignoring case.
+  2. **Containers:** `collect_containers(name=…, restart_window_seconds=<window>)` from `container_status`: a
+     case-insensitive substring of the container name, with restarts counted over the window.
+  3. **Blackbox probes:** `probe_success` whose `instance` (the probed URL) contains `name`, ignoring case.
+  4. **Grafana alerts:** active alerts whose alert name, a label value (`container_name`, `exported_hostname`, ...) or
+     summary contains `name`, ignoring case.
+  5. **Loki errors:** `sum by (service_name) (count_over_time({service_name=~"(?i).*<name>.*",
+     detected_level=~"error|err|fatal|critical|crit"}[window]))`. The name is regex-escaped, so `a.b(c)` matches only
+     itself. Without `LOKI_URL` this source reads `unavailable: LOKI_URL not set`. No error lines reads `no match`.
+- **Verdict (fixed rules):**
+  - `DOWN`: a matched Gatus endpoint is failing now, or a matched container is not running.
+  - `DEGRADED`: a matched container is unhealthy or restarted in the window, a Gatus success ratio is below 1 over
+    the window, a matched probe's `probe_success` is 0 now (`probe <instance> failing now`), a matched Grafana alert
+    is active, or Loki counts error lines.
+  - `UP`: at least one source matched and none of the above holds.
+  - `UNKNOWN`: no source matched.
+- **Example questions:** "Is jellyfin healthy?", "Has Home Assistant had problems in the last day?"
+- **Returns:** The verdict line first, as `<VERDICT>: <name> over <window>: <reasons>`. `DOWN` and `DEGRADED` list
+  the reasons that decided them; `UP` names the sources that matched; `UP` and `UNKNOWN` also name any unavailable
+  source. Then one line per source: `ok: …`, `no match` or `unavailable: <reason>`.
+- **Errors:** An HTTP or response failure in one source makes that source `unavailable` and the verdict still renders.
+  The containers source is `unavailable` only when `container_state` fails. Any other failed container query is
+  noted in its line (`ok: …; container_image_info unavailable: HTTP 500 - …`) and the containers still decide, so a
+  container that is not running still gives `DOWN`. Any other exception propagates.
 
 ## Loki (enabled when `LOKI_URL` is set)
 

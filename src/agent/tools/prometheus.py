@@ -11,7 +11,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_utc, parse_duration, parse_time, promql_string, regex_literal
 from src.config import get_settings
 
@@ -454,7 +453,7 @@ def _format_search_results(
     return "\n".join(lines)
 
 
-TOOL_DESCRIPTION_SEARCH = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_SEARCH = (
     "Search for available Prometheus metric names matching a substring. "
     "Use this BEFORE querying when you're unsure of the exact metric name. "
     "Returns matching metric names with their type and description.\n\n"
@@ -469,7 +468,7 @@ TOOL_DESCRIPTION_SEARCH = HOMELAB_CONTEXT + (
 )
 
 
-TOOL_DESCRIPTION_INSTANT = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_INSTANT = (
     "Query Prometheus for the current value of a metric (instant query). "
     "Use this for point-in-time questions like 'what is the current CPU usage?', "
     "'how much memory is free right now?', or 'how many VMs are running?' "
@@ -493,7 +492,7 @@ TOOL_DESCRIPTION_INSTANT = HOMELAB_CONTEXT + (
     "For example, use {hostname='jellyfin'} not just the bare metric name."
 )
 
-TOOL_DESCRIPTION_RANGE = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_RANGE = (
     "Query Prometheus for metric values over a time range (range query). "
     "Use this for trend questions like 'how has CPU changed over the last hour?' "
     "or 'show memory usage for the past day'.\n\n"

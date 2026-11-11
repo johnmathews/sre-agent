@@ -9,7 +9,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -433,7 +432,7 @@ async def _resolve_dashboard(dashboard: str) -> dict[str, Any]:
 
 # --- Tool descriptions ---
 
-TOOL_DESCRIPTION_DASHBOARD = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_DASHBOARD = (
     "Fetch a Grafana dashboard by UID or name, and inspect its panels, queries, "
     "thresholds, template variables, and configuration. "
     "Use this to answer questions like 'what query does the CPU panel use?', "
@@ -446,7 +445,7 @@ TOOL_DESCRIPTION_DASHBOARD = HOMELAB_CONTEXT + (
     "that panel including queries, thresholds, units, overrides, and transformations."
 )
 
-TOOL_DESCRIPTION_SEARCH = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_SEARCH = (
     "Search for Grafana dashboards by name. "
     "Use this to discover available dashboards and their UIDs before fetching details. "
     "Example questions: 'what dashboards exist?', 'find the network dashboard'.\n\n"

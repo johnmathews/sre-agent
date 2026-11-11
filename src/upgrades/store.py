@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal, get_args
 
 from pydantic import ValidationError
@@ -101,6 +102,20 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA_SQL)
     _add_missing_columns(conn)
+    return conn
+
+
+def connect_readonly(path: str) -> sqlite3.Connection:
+    """Open an existing store read-only, for readers outside the advisor (the ``upgrade_status`` tool).
+
+    Runs no schema script and changes no pragma. Every write raises ``sqlite3.OperationalError``
+    ("attempt to write a readonly database"). ``mode=ro`` never creates the database file: a missing one
+    raises ``sqlite3.OperationalError`` ("unable to open database file") here or on the first query. On a
+    WAL-mode store, SQLite may still create the ``-wal`` and ``-shm`` sidecar files beside it.
+    """
+    uri = Path(path).absolute().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -234,6 +249,15 @@ def latest_verdict_for_container(conn: sqlite3.Connection, container: str) -> Ve
         return None
     parsed = _parse_rows([row], _row_to_verdict, "verdict")
     return parsed[0] if parsed else None
+
+
+def latest_verdicts(conn: sqlite3.Connection) -> list[VerdictRecord]:
+    """The most recent verdict of each container, newest first (unreadable rows are logged and skipped)."""
+    rows = conn.execute(
+        "SELECT * FROM verdicts WHERE id IN (SELECT MAX(id) FROM verdicts GROUP BY container)"
+        " ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+    return _parse_rows(rows, _row_to_verdict, "verdict")
 
 
 def get_verdict(conn: sqlite3.Connection, verdict_id: int) -> VerdictRecord | None:
@@ -513,6 +537,7 @@ __all__ = [
     "assert_batch_members",
     "check_batch",
     "connect",
+    "connect_readonly",
     "consume_batch",
     "create_batch",
     "deploys_for_verdicts",
@@ -526,6 +551,7 @@ __all__ = [
     "get_verdict",
     "latest_verdict",
     "latest_verdict_for_container",
+    "latest_verdicts",
     "pending_verifications",
     "record_decision",
     "save_deploy",

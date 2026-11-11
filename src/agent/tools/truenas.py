@@ -11,7 +11,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_age, format_bytes, format_utc
 from src.config import get_settings
 
@@ -752,7 +751,7 @@ class AppsInput(BaseModel):
 # --- Tool descriptions ---
 
 
-TOOL_DESCRIPTION_POOL_STATUS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_POOL_STATUS = (
     "Get ZFS pool health and dataset space usage from TrueNAS. "
     "Use this to answer questions like 'is the tank pool healthy?', "
     "'how much space is left on the NAS?', 'any degraded pools?', "
@@ -763,7 +762,7 @@ TOOL_DESCRIPTION_POOL_STATUS = HOMELAB_CONTEXT + (
     "each top-level dataset in each pool."
 )
 
-TOOL_DESCRIPTION_LIST_SHARES = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_LIST_SHARES = (
     "List NFS and SMB shares configured on TrueNAS, and optionally show active SMB sessions. "
     "Use this to answer questions like 'what NFS shares exist?', "
     "'is the document-store share enabled?', 'which SMB shares are configured?', "
@@ -774,7 +773,7 @@ TOOL_DESCRIPTION_LIST_SHARES = HOMELAB_CONTEXT + (
     "Set include_sessions=true for questions about active connections or connected clients."
 )
 
-TOOL_DESCRIPTION_SNAPSHOTS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_SNAPSHOTS = (
     "Report ZFS snapshot counts, periodic snapshot tasks with their last run, and replication tasks on "
     "TrueNAS. Use this to answer questions like 'when did the tank/media snapshot task last run?', "
     "'how many snapshots does tank have?', 'is replication running?' or 'what snapshot schedules exist?'.\n\n"
@@ -786,7 +785,7 @@ TOOL_DESCRIPTION_SNAPSHOTS = HOMELAB_CONTEXT + (
     "up to limit. The listing takes about 20 s."
 )
 
-TOOL_DESCRIPTION_SYSTEM_STATUS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_SYSTEM_STATUS = (
     "Get TrueNAS system information, alerts, running jobs, and disk inventory. "
     "Use this to answer questions like 'any TrueNAS alerts?', "
     "'what version is TrueNAS running?', 'what disks does TrueNAS have?', "
@@ -796,7 +795,7 @@ TOOL_DESCRIPTION_SYSTEM_STATUS = HOMELAB_CONTEXT + (
     "(model, type, serial, size, pool assignment, standby timer)."
 )
 
-TOOL_DESCRIPTION_APPS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_APPS = (
     "List apps installed on TrueNAS SCALE with their running state. "
     "Use this to answer questions like 'what apps are running on TrueNAS?', "
     "'is Alloy running?', 'is the disk-status-exporter deployed?', "

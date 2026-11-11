@@ -20,6 +20,7 @@ import httpx
 import pytest
 import respx
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from prometheus_client import REGISTRY
 
 from src.api.upgrades import router
@@ -1364,10 +1365,18 @@ async def test_routes_404_when_advisor_not_configured(
 def test_main_app_serves_the_upgrade_routes() -> None:
     from src.api.main import app
 
-    paths = {(getattr(r, "path", ""), m) for r in app.routes for m in getattr(r, "methods", set())}
-    assert ("/upgrades/batches/{batch_id}", "GET") in paths
-    assert ("/upgrades/batches/{batch_id}", "POST") in paths
-    assert ("/upgrades/batches/{batch_id}/view", "POST") in paths
+    # fastapi 0.162 wraps an included router in an _IncludedRouter, so app.routes no longer lists its
+    # routes. url_path_for still resolves through it, and raises NoMatchFound if the router is not included.
+    expected = {
+        "launch_batch": ("/upgrades/batches/{batch_id}", "GET"),
+        "approve_batch": ("/upgrades/batches/{batch_id}", "POST"),
+        "view_batch": ("/upgrades/batches/{batch_id}/view", "POST"),
+    }
+    by_name = {r.name: r for r in router.routes if isinstance(r, APIRoute)}
+    for name, (path, method) in expected.items():
+        assert app.url_path_for(name, batch_id="b1") == path.format(batch_id="b1")
+        assert by_name[name].path == path
+        assert method in by_name[name].methods
 
 
 # ---------------------------------------------------------------------------

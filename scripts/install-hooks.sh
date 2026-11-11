@@ -2,7 +2,9 @@
 # Install git hooks for the SRE assistant repository.
 set -euo pipefail
 
-HOOKS_DIR="$(git rev-parse --show-toplevel)/.git/hooks"
+# --git-path resolves the shared hooks dir from a linked worktree, where .git is a file, not a directory.
+HOOKS_DIR="$(git rev-parse --path-format=absolute --git-path hooks)"
+mkdir -p "$HOOKS_DIR"
 
 # --- Pre-commit: fast lint + format check (~1s) ---
 cat > "$HOOKS_DIR/pre-commit" << 'HOOK'

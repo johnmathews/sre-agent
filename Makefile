@@ -1,4 +1,4 @@
-.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor docker-build docker-up docker-down
+.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down
 
 install:
 	uv sync
@@ -18,7 +18,8 @@ typecheck:
 	uv run mypy src/
 
 test:
-	uv run pytest
+	uv run coverage run -m pytest -rf
+	uv run coverage report
 
 test-e2e:
 	uv run pytest --run-e2e
@@ -45,6 +46,11 @@ advisor:
 
 hooks:
 	bash scripts/install-hooks.sh
+
+# Build the image and smoke-test it (the same check CI runs before pushing).
+smoke:
+	docker build -t sre-agent:smoke .
+	bash scripts/smoke_image.sh sre-agent:smoke
 
 docker-build:
 	docker compose build

@@ -11,7 +11,6 @@ from langchain_core.tools import ToolException, tool
 from pydantic import BaseModel, Field
 
 from src.agent.history import get_conversation, list_conversations
-from src.agent.tools import HOMELAB_CONTEXT
 from src.config import get_settings
 
 SESSION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
@@ -38,7 +37,7 @@ class GetConversationInput(BaseModel):
     )
 
 
-_LIST_DESC = HOMELAB_CONTEXT + (
+_LIST_DESC = (
     "List recent conversations the deployed SRE agent has had via the web UI or API. "
     "Returns session IDs, titles (derived from the first user message), timestamps, "
     "turn counts, and which LLM model/provider was used. "
@@ -47,7 +46,7 @@ _LIST_DESC = HOMELAB_CONTEXT + (
     "with its session_id to read the full dialogue."
 )
 
-_GET_DESC = HOMELAB_CONTEXT + (
+_GET_DESC = (
     "Retrieve the full dialogue of a specific deployed SRE agent conversation by session ID. "
     "Returns all user and assistant turns with timestamps. "
     "Use sre_agent_list_conversations first to find the session_id you need."

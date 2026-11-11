@@ -21,7 +21,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT, prometheus
+from src.agent.tools import prometheus
 from src.agent.tools._common import format_age, format_utc, host_key
 
 logger = logging.getLogger(__name__)
@@ -462,7 +462,7 @@ def format_report(report: ContainerReport, only_problems: bool, now: datetime) -
     return "\n".join(lines)
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "Report Docker container state across hosts: running or not, health, restarts (total and in the last 24h), "
     "start time, image and whether a newer image is available. Use this instead of ssh 'docker ps' or a raw "
     "container_state query. Problems print first.\n\n"

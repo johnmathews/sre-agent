@@ -6,7 +6,6 @@ from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableTy
 from pydantic import BaseModel, Field
 
 from src.agent.retrieval.embeddings import load_vector_store
-from src.agent.tools import HOMELAB_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ class RunbookSearchInput(BaseModel):
     )
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "Search the operational runbook knowledge base for homelab procedures, "
     "troubleshooting steps, architecture details, and service documentation. "
     "Use this when the user asks about how to fix something, how a service works, "

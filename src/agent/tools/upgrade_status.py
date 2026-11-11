@@ -23,7 +23,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_age, format_utc, promql_string
 from src.agent.tools.prometheus import _query_prometheus  # pyright: ignore[reportPrivateUsage]
 from src.config import get_settings
@@ -296,7 +295,7 @@ async def _exporter_lines(container: str | None) -> tuple[list[str], bool]:
     return [summary, *format_exporter_lines(images, only_outdated=True)], True
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "Report what the Upgrade Advisor decided about container image upgrades, and which images are outdated. "
     "Use this for questions like 'should I upgrade homepage?', 'what did the upgrade advisor say about sonarr?', "
     "'which containers have a newer image?' or 'what was deployed this week?'.\n\n"

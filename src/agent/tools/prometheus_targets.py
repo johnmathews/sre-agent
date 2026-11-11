@@ -9,7 +9,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_age, format_utc
 from src.agent.tools.prometheus import (  # pyright: ignore[reportPrivateUsage]
     DEFAULT_TIMEOUT_SECONDS,
@@ -95,7 +94,7 @@ def format_targets(targets: list[dict[str, Any]], job: str | None, only_down: bo
     return "\n".join(lines)
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "List Prometheus scrape targets and whether Prometheus can scrape them. Use this to find exporters "
     "that are down or failing (a 'Scrape target down' alert, missing metrics for a host) and read the "
     "scrape error. Down targets come first, each with job, instance, hostname, last scrape time, "

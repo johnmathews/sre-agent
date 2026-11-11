@@ -11,7 +11,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_age, format_bytes, format_utc
 from src.config import get_settings
 from src.upgrades.http import bounded_request
@@ -290,7 +289,7 @@ class ListPbsTasksInput(BaseModel):
 # --- Tool descriptions ---
 
 
-TOOL_DESCRIPTION_DATASTORE_STATUS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_DATASTORE_STATUS = (
     "Get storage usage for all PBS datastores. "
     "Use this to answer questions like 'how much backup space is left?', "
     "'is the backup store full?', or 'show PBS datastore usage'.\n\n"
@@ -298,7 +297,7 @@ TOOL_DESCRIPTION_DATASTORE_STATUS = HOMELAB_CONTEXT + (
     "and last garbage collection status."
 )
 
-TOOL_DESCRIPTION_LIST_BACKUPS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_LIST_BACKUPS = (
     "List backup groups in a PBS datastore. Each group represents a "
     "backed-up guest (VM/CT) or host, showing the number of snapshots "
     "and when the last backup was taken.\n\n"
@@ -308,7 +307,7 @@ TOOL_DESCRIPTION_LIST_BACKUPS = HOMELAB_CONTEXT + (
     "and owner."
 )
 
-TOOL_DESCRIPTION_PBS_TASKS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_PBS_TASKS = (
     "List recent PBS tasks (backup jobs, garbage collection, verification, etc). "
     "Use this to answer questions like 'did last night's backup succeed?', "
     "'any failed backup tasks?', or 'what PBS jobs ran recently?'.\n\n"

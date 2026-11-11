@@ -11,7 +11,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_utc
 from src.config import get_settings
 
@@ -472,7 +471,7 @@ def _format_alert_rules(
 
 # --- Tool descriptions ---
 
-TOOL_DESCRIPTION_ALERTS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_ALERTS = (
     "Fetch current alerts from Grafana's alerting system. "
     "Use this to answer questions like 'what alerts are firing?', 'are there any active alerts?', "
     "or 'summarize current alerts'.\n\n"
@@ -482,7 +481,7 @@ TOOL_DESCRIPTION_ALERTS = HOMELAB_CONTEXT + (
     "'suppressed' (silenced), 'unprocessed'."
 )
 
-TOOL_DESCRIPTION_RULES = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_RULES = (
     "List Grafana alert rules with their evaluation state (firing, pending, inactive, recovering) "
     "and health (ok, error, nodata). "
     "Use this to answer questions like 'which alert rules are firing or pending?', "

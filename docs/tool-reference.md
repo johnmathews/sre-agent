@@ -1,6 +1,10 @@
 # Tool Reference
 
-The agent has up to 29 tools across 11 categories (plus 2 MCP-only conversation history tools). Tools are conditionally registered based on configuration.
+The MCP server exposes up to 36 tools across 14 categories: the 13 groups in the table below (all but Documentation) and the 2 MCP-only conversation history tools. "Up to" means the maximum: each tool group is registered only when its configuration is set (see below), so a deployment shows fewer.
+
+## Server Instructions and Descriptions
+
+Guidance that applies to every tool is sent once, as the MCP `instructions` string in the `initialize` result (`SERVER_INSTRUCTIONS` in `src/api/mcp_server.py`). It states what the server covers, that every tool is read-only except `memory_record_incident`, that clients call `get_current_time` before building a time range, and the accepted time forms (`now`, `now-1h`, `-1h`, `1h`, RFC3339, Unix seconds). Tool descriptions hold only facts about their own tool and never repeat a shared preamble. The SDK agent does not receive these instructions: its system prompt (`src/agent/system_prompt.md`) already tells it to use `get_current_time`, and each time argument documents its accepted forms.
 
 ## Conditional Registration
 

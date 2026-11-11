@@ -9,7 +9,6 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT
 from src.agent.tools._common import format_bytes, host_key, promql_string
 from src.agent.tools.prometheus import _query_prometheus  # pyright: ignore[reportPrivateUsage]
 from src.config import get_settings
@@ -391,7 +390,7 @@ class ListTasksInput(BaseModel):
 # --- Tool descriptions ---
 
 
-TOOL_DESCRIPTION_LIST_GUESTS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_LIST_GUESTS = (
     "List all VMs and containers on the Proxmox node with their status, "
     "resource allocation, and current CPU usage. "
     "Use this to answer questions like 'what VMs are running?', "
@@ -402,7 +401,7 @@ TOOL_DESCRIPTION_LIST_GUESTS = HOMELAB_CONTEXT + (
     "use proxmox_get_guest_config instead."
 )
 
-TOOL_DESCRIPTION_GET_CONFIG = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_GET_CONFIG = (
     "Get the full configuration of a specific VM or container. "
     "Use this to answer questions like 'what disks does VM 100 have?', "
     "'show the config for jellyfin', 'how much RAM is allocated to container 101?', "
@@ -414,7 +413,7 @@ TOOL_DESCRIPTION_GET_CONFIG = HOMELAB_CONTEXT + (
     "- `vmid` + `guest_type` — e.g. vmid=113, guest_type='lxc'. Use when you know the ID."
 )
 
-TOOL_DESCRIPTION_NODE_STATUS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_NODE_STATUS = (
     "Get the overall status of the Proxmox host node. "
     "Use this to answer questions like 'how is the Proxmox server doing?', "
     "'what is the host CPU usage?', 'how much RAM is available on the hypervisor?', "
@@ -424,7 +423,7 @@ TOOL_DESCRIPTION_NODE_STATUS = HOMELAB_CONTEXT + (
     "For per-VM/container metrics use Prometheus tools or proxmox_list_guests."
 )
 
-TOOL_DESCRIPTION_LIST_TASKS = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION_LIST_TASKS = (
     "List recent Proxmox tasks (migrations, backups, snapshot operations, etc). "
     "Use this to answer questions like 'any recent failed tasks?', "
     "'is a migration running?', 'did the backup task complete?', "

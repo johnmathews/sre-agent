@@ -16,7 +16,7 @@ import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
-from src.agent.tools import HOMELAB_CONTEXT, grafana_alerts, loki, prometheus
+from src.agent.tools import grafana_alerts, loki, prometheus
 from src.agent.tools._common import ERROR_LEVELS, parse_duration, promql_string, regex_literal
 from src.agent.tools.containers import SOURCE_LABELS as CONTAINER_SOURCE_LABELS
 from src.agent.tools.containers import ContainerReport, Sample, collect_containers
@@ -389,7 +389,7 @@ async def check_service_health(name: str, window: str) -> dict[str, SourceResult
     return results
 
 
-TOOL_DESCRIPTION = HOMELAB_CONTEXT + (
+TOOL_DESCRIPTION = (
     "Answer 'is this service up?' in one call. Checks five sources at once for the named service: Gatus endpoint "
     "results (matched on the endpoint name or key), Docker containers (name contains it), blackbox probes (probed "
     "URL contains it), active Grafana alerts that mention it, and Loki error lines from services whose name "

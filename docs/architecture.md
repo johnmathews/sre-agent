@@ -888,7 +888,11 @@ docker-compose.yml
 ```
 
 The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. Run it explicitly
-with `docker compose run --rm sre-ingest`.
+with `docker compose run --rm sre-ingest`. It needs the same settings as `sre-agent` (with `LLM_PROVIDER=anthropic`,
+a non-empty `ANTHROPIC_API_KEY`, though ingest never calls Anthropic) plus `OPENAI_API_KEY` for embeddings. It loads
+the runbooks and makes one embedding call before it clears the old store, so a settings or key error leaves the live
+index in place. **Restart `sre-agent` afterwards:** chromadb caches its client per path in the running process, which
+does not see a store rebuilt underneath it until it restarts.
 
 Both services run as uid/gid **1001:1001** (baked into the image via `USER 1001:1001` in the Dockerfile). They share
 the `chroma_data` volume, so matching uids matter: chromadb 1.x opens the persisted sqlite read-write even on read paths

@@ -251,7 +251,13 @@ docker compose run --rm sre-ingest
 
 # After updating external docs (e.g., git pull on Ansible repo)
 docker compose run --rm sre-ingest
+
+# Then restart the running agent so it reads the rebuilt store
+docker compose restart sre-agent
 ```
+
+Ingest checks its settings and makes one embedding call before it clears the old store, so a missing key leaves the
+current index in place. It needs `OPENAI_API_KEY` and, with `LLM_PROVIDER=anthropic`, a non-empty `ANTHROPIC_API_KEY`.
 
 ### Updating
 

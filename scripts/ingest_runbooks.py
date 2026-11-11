@@ -10,14 +10,29 @@ import logging
 import shutil
 import sys
 
-from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR, build_vector_store, load_all_documents
+from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR, build_vector_store, get_embeddings, load_all_documents
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Load runbooks, embed them, and persist the vector store."""
+    """Load runbooks, embed them, and persist the vector store.
+
+    Settings, the documents and one embedding call are checked before the old store is cleared, so a
+    missing key or a bad config leaves the live index in place.
+    """
+    documents = load_all_documents()
+    if not documents:
+        logger.error("No documents found — nothing to ingest; the existing vector store was left in place")
+        sys.exit(1)
+
+    try:
+        get_embeddings().embed_query("ingest preflight")
+    except Exception:
+        logger.exception("Preflight failed (settings or embeddings API); the existing vector store was left in place")
+        sys.exit(1)
+
     # Clear existing store for a clean rebuild.
     # Delete contents rather than the directory itself — when running in Docker,
     # the directory is a volume mountpoint and cannot be removed (EBUSY).
@@ -29,17 +44,14 @@ def main() -> None:
             else:
                 child.unlink()
 
-    documents = load_all_documents()
-    if not documents:
-        logger.error("No documents found — nothing to ingest")
-        sys.exit(1)
-
     logger.info("Ingesting %d document chunks from all sources...", len(documents))
     store = build_vector_store(documents)
 
     # Verify
     count = store._collection.count()  # pyright: ignore[reportPrivateUsage]
-    logger.info("Done! Vector store contains %d documents", count)
+    logger.info(
+        "Done! Vector store contains %d documents. Restart a running sre-agent so it reads the new store.", count
+    )
 
 
 if __name__ == "__main__":

@@ -257,8 +257,19 @@ def _alert_mentions(alert: GrafanaAlert, needle: str) -> bool:
     return any(needle in text.lower() for text in texts)
 
 
+INFORMATIONAL_SEVERITIES = frozenset({"none", "info"})
+"""``severity`` label values (lower-cased) whose alerts are listed but do not decide the verdict.
+
+A missing label is not informational: none of the homelab's rules set one today, outages included.
+"""
+
+
 def grafana_source(alerts: list[tuple[str, GrafanaAlert]], name: str) -> SourceResult:
-    """Active alerts whose name, a label value or summary contains the name; each is DEGRADED."""
+    """Active alerts whose name, a label value or summary contains the name.
+
+    Each is DEGRADED unless its ``severity`` label says ``info`` or ``none``: those are listed as
+    informational but give no reason. An alert with no ``severity`` label is DEGRADED.
+    """
     needle = name.strip().lower()
     matched = [alert for _, alert in alerts if _alert_mentions(alert, needle)]
     if not matched:
@@ -268,7 +279,11 @@ def grafana_source(alerts: list[tuple[str, GrafanaAlert]], name: str) -> SourceR
     for alert in matched:
         labels = alert.get("labels", {})
         alertname = labels.get("alertname", "unnamed")
-        parts.append(f"{alertname} (severity={labels.get('severity', 'none')}) active")
+        severity = labels.get("severity")
+        if severity is not None and severity.strip().lower() in INFORMATIONAL_SEVERITIES:
+            parts.append(f"{alertname} (severity={severity}, informational) active")
+            continue
+        parts.append(f"{alertname} ({f'severity={severity}' if severity else 'no severity'}) active")
         result.degraded.append(f"Grafana alert {alertname} is active")
     result.detail = "; ".join(parts)
     return result
@@ -400,10 +415,10 @@ TOOL_DESCRIPTION = (
     "contains it.\n\n"
     "Returns a verdict line first, with the reasons that decided it: DOWN (Gatus failing now, or a container not "
     "running), DEGRADED (container unhealthy or restarted in the window, Gatus success below 100% over the window, "
-    "a probe failing now, an active alert, or Loki error lines), UP (something matched and none of those), UNKNOWN "
-    "(nothing matched). Then one line per source: 'ok: ...', 'no match' or 'unavailable: reason'. window (5m to 7d, "
-    "default 1h) sets the restart, Gatus ratio and Loki error range. Drill down with container_status, "
-    "grafana_get_alerts or loki_query_logs."
+    "a probe failing now, an active alert not labelled severity info or none, or Loki error lines), UP (something "
+    "matched and none of those), UNKNOWN (nothing matched). Then one line per source: 'ok: ...', 'no match' or "
+    "'unavailable: reason'. window (5m to 7d, default 1h) sets the restart, Gatus ratio and Loki error range. "
+    "Drill down with container_status, grafana_get_alerts or loki_query_logs."
 )
 
 

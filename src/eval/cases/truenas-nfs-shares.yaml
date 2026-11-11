@@ -19,13 +19,13 @@ mocks:
         comment: "Media files"
         enabled: true
         hosts: []
-        networks: ["192.168.2.0/24"]
+        networks: ["192.0.2.0/24"]
       - id: 2
         path: "/mnt/tank/backups"
         comment: "Backup storage"
         enabled: true
         hosts: []
-        networks: ["192.168.2.0/24"]
+        networks: ["192.0.2.0/24"]
   - url: "https://truenas.test/api/v2.0/sharing/smb"
     method: GET
     status: 200

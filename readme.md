@@ -178,8 +178,8 @@ Create a `.env` file on the deployment host. See `.env.example` for the full lis
 | `LLM_PROVIDER`                   | `openai` or `anthropic`               | Default: `openai`                          |
 | `OPENAI_API_KEY`                 | `sk-proj-...`                          | Required when `LLM_PROVIDER=openai`        |
 | `ANTHROPIC_API_KEY`              | `sk-ant-oat01-...`                     | Required when `LLM_PROVIDER=anthropic`     |
-| `PROMETHEUS_URL`                 | `http://192.168.2.50:9090`             | Must be reachable from inside the container |
-| `GRAFANA_URL`                    | `http://192.168.2.50:3000`             | Must be reachable from inside the container |
+| `PROMETHEUS_URL`                 | `http://192.0.2.50:9090`               | Must be reachable from inside the container |
+| `GRAFANA_URL`                    | `http://192.0.2.50:3000`               | Must be reachable from inside the container |
 | `GRAFANA_SERVICE_ACCOUNT_TOKEN`  | `glsa_...`                             | Grafana service account token              |
 
 **Optional — leave empty or omit to disable the corresponding tools:**
@@ -208,7 +208,7 @@ All URLs must point to addresses reachable from inside the Docker container — 
 ### Networking
 
 Docker containers on the default bridge network can reach hosts on the LAN. Use LAN IP addresses (e.g.,
-`http://192.168.2.50:9090`) in your `.env`, not `localhost` — `localhost` inside a container refers to the
+`http://192.0.2.50:9090`) in your `.env`, not `localhost` — `localhost` inside a container refers to the
 container itself, not the Docker host.
 
 If your compose stack uses a custom network, make sure the SRE services are on one with LAN access. If your
@@ -251,7 +251,13 @@ docker compose run --rm sre-ingest
 
 # After updating external docs (e.g., git pull on Ansible repo)
 docker compose run --rm sre-ingest
+
+# Then restart the running agent so it reads the rebuilt store
+docker compose restart sre-agent
 ```
+
+Ingest checks its settings and makes one embedding call before it clears the old store, so a missing key leaves the
+current index in place. It needs `OPENAI_API_KEY` and, with `LLM_PROVIDER=anthropic`, a non-empty `ANTHROPIC_API_KEY`.
 
 ### Updating
 
@@ -531,7 +537,7 @@ Automated weekly summarization of alerts, SLO status, tool usage, costs, and log
 queries (not agent-driven) with a single LLM call for a narrative summary.
 
 - **On demand:** `POST /report` or `make report`
-- **Scheduled:** configurable cron via `REPORT_SCHEDULE_CRON` (APScheduler)
+- **Scheduled:** configurable cron via `REPORT_SCHEDULE_CRON`, evaluated in `USER_TIMEZONE` (APScheduler)
 - **Email delivery:** plain-text markdown via Gmail SMTP (if `SMTP_*` configured)
 
 ## Evaluation Framework

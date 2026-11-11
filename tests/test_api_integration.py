@@ -82,6 +82,14 @@ class TestAskEndpoint:
         assert resp.json()["session_id"] == "my-sess-1"
 
     @pytest.mark.integration
+    @pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
+    @pytest.mark.parametrize("bad_id", ["*", "../x", "a b", "x" * 65])
+    def test_unsafe_session_id_returns_422(self, client: TestClient, path: str, bad_id: str) -> None:
+        resp = client.post(path, json={"question": "hello", "session_id": bad_id})
+        assert resp.status_code == 422
+        assert "session_id" in resp.text
+
+    @pytest.mark.integration
     def test_empty_question_returns_422(self, client: TestClient) -> None:
         resp = client.post("/ask", json={})
         assert resp.status_code == 422

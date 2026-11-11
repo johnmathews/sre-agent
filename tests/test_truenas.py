@@ -208,14 +208,14 @@ class TestFormatShares:
             "path": "/mnt/tank/media",
             "enabled": True,
             "ro": False,
-            "networks": ["192.168.2.0/24"],
+            "networks": ["192.0.2.0/24"],
             "comment": "Media share",
         }
         result = _format_shares([nfs], [], "nfs")
         assert "NFS shares (1)" in result
         assert "/mnt/tank/media" in result
         assert "enabled" in result
-        assert "192.168.2.0/24" in result
+        assert "192.0.2.0/24" in result
         assert "Media share" in result
 
     def test_smb_share(self) -> None:

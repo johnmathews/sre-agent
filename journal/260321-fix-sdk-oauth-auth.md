@@ -4,7 +4,7 @@
 
 ## Problem
 
-The deployed SRE assistant on the infra VM (192.168.2.106) returned 500 errors on every `/ask` request. The error from
+The deployed SRE assistant on the infra VM (192.0.2.106) returned 500 errors on every `/ask` request. The error from
 the Claude CLI subprocess was: `Invalid API key · Fix external API key`.
 
 The agent had been working in early March 2026 but broke around March 18.

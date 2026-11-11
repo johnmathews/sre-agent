@@ -106,7 +106,15 @@ process lifetime.
 
 All endpoints return 503 when `CONVERSATION_HISTORY_DIR` is empty
 (persistence disabled). Session IDs are validated against
-`^[A-Za-z0-9_-]{1,64}$` before any filesystem access.
+`^[A-Za-z0-9_-]{1,64}$` before any filesystem access. The rule applies at
+three layers: the `/conversations/*` endpoints return 400; `POST /ask` and
+`POST /ask/stream` return 422 for a bad `session_id` in the body; and the
+history functions themselves (`load_turns` and every other lookup by session
+ID) return an empty result and log a WARNING, so a glob wildcard such as `*`
+never matches another session's file. Server-generated IDs
+(`uuid4().hex[:8]`), the webapp's IDs (8 hex characters) and recovery IDs
+always pass: a recovery ID drops earlier `-<6 hex>` suffixes, cuts the base
+to 57 characters and appends a new suffix, so it never exceeds 64.
 
 | Method | Path                              | Purpose |
 |--------|-----------------------------------|---------|

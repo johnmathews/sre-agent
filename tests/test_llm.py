@@ -160,3 +160,40 @@ def test_anthropic_chat_keeps_temperature_for_older_models() -> None:
     chat = llm_mod.create_anthropic_chat("sk-ant-api-fake", "claude-opus-4-6", temperature=0.0, max_tokens=10)
     payload = chat._get_request_payload([("human", "hi")])  # pyright: ignore[reportPrivateUsage]
     assert payload["temperature"] == 0.0
+
+
+def _sdk_errors() -> list[tuple[str, Exception, bool]]:
+    import anthropic
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://llm.example/v1/messages")
+
+    def status_error(cls: Any, status: int) -> Exception:
+        return cls("boom", response=httpx.Response(status, request=request), body=None)
+
+    wrapped = RuntimeError("wrapped transport failure")
+    wrapped.__cause__ = httpx.ConnectError("refused")
+    return [
+        ("anthropic-connection", anthropic.APIConnectionError(request=request), True),
+        ("anthropic-timeout", anthropic.APITimeoutError(request=request), True),
+        ("openai-connection", openai.APIConnectionError(request=request), True),
+        ("openai-timeout", openai.APITimeoutError(request=request), True),
+        ("anthropic-529", status_error(anthropic.APIStatusError, 529), True),
+        ("anthropic-401", status_error(anthropic.AuthenticationError, 401), False),
+        ("openai-400", status_error(openai.BadRequestError, 400), False),
+        ("httpx-in-cause", wrapped, True),
+    ]
+
+
+@pytest.mark.parametrize(("name", "exc", "retryable"), _sdk_errors(), ids=lambda v: v if isinstance(v, str) else "")
+def test_is_retryable_llm_error_classifies_sdk_errors(name: str, exc: Exception, retryable: bool) -> None:
+    assert llm_mod._is_retryable_llm_error(exc) is retryable, name
+
+
+def test_is_retryable_llm_error_survives_a_cause_cycle() -> None:
+    first = RuntimeError("first")
+    second = ValueError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert llm_mod._is_retryable_llm_error(first) is False  # pyright: ignore[reportPrivateUsage]

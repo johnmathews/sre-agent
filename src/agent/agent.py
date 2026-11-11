@@ -6,6 +6,7 @@ Supports two backend paths:
 """
 
 import logging
+import re
 from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -218,6 +219,19 @@ def _is_tool_call_pairing_error(exc: BaseException) -> bool:
     return "tool_calls" in msg and "tool messages" in msg
 
 
+_RECOVERY_SUFFIX = re.compile(r"(-[0-9a-f]{6})+$")
+
+
+def _fresh_session_id(session_id: str) -> str:
+    """A new session ID for recovering from corrupted tool-call history.
+
+    Earlier recovery suffixes are dropped and the base is cut to 57 characters, so the result
+    (base, '-', 6 hex) stays within the 64-character session-ID rule however often a session recovers.
+    """
+    base = _RECOVERY_SUFFIX.sub("", session_id)[:57] or "session"
+    return f"{base}-{uuid4().hex[:6]}"
+
+
 async def invoke_agent(
     agent: SREAgent,
     message: str,
@@ -282,7 +296,7 @@ async def _invoke_langgraph_agent(
         )
     except Exception as exc:
         if _is_tool_call_pairing_error(exc):
-            fresh_id = f"{session_id}-{uuid4().hex[:6]}"
+            fresh_id = _fresh_session_id(session_id)
             effective_session_id = fresh_id
             logger.warning(
                 "Session '%s' has corrupted tool-call history; retrying with fresh session '%s'",
@@ -475,7 +489,7 @@ async def _stream_langgraph_agent(
 
     except Exception as exc:
         if _is_tool_call_pairing_error(exc):
-            fresh_id = f"{session_id}-{uuid4().hex[:6]}"
+            fresh_id = _fresh_session_id(session_id)
             effective_session_id = fresh_id
             logger.warning(
                 "Session '%s' has corrupted tool-call history; retrying with fresh session '%s'",

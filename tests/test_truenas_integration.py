@@ -188,14 +188,14 @@ class TestTruenasListShares:
                     {
                         "session_id": "123",
                         "username": "john",
-                        "remote_machine": "192.168.2.50",
-                        "hostname": "ipv4:192.168.2.50:49226",
+                        "remote_machine": "192.0.2.50",
+                        "hostname": "ipv4:192.0.2.50:49226",
                         "session_dialect": "SMB3_11",
                         "encryption": {"cipher": "-", "degree": "none"},
                         "signing": {"cipher": "AES-128-GMAC", "degree": "partial"},
                         "share_connections": [
-                            {"service": "photos", "machine": "192.168.2.50"},
-                            {"service": "IPC$", "machine": "192.168.2.50"},
+                            {"service": "photos", "machine": "192.0.2.50"},
+                            {"service": "IPC$", "machine": "192.0.2.50"},
                         ],
                     },
                 ],
@@ -204,7 +204,7 @@ class TestTruenasListShares:
 
         result = await truenas_list_shares.ainvoke({"include_sessions": True})
         assert "Active SMB sessions (1)" in result
-        assert "john@192.168.2.50" in result
+        assert "john@192.0.2.50" in result
         assert "SMB3_11" in result
         assert "photos" in result
         # IPC$ should be filtered out

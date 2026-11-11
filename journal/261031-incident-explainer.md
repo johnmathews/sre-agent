@@ -67,7 +67,7 @@ The user made these in the design discussion before the build.
 ## 5. Live test, same day (appended after deploy)
 
 - Dozzle stopped by hand at 15:15:13 UTC. Gatus triggered at 15:18:04 and sent both the Pushover push and the webhook,
-  which sre-agent accepted (202 from 192.168.2.115). Dozzle started by hand at 15:18:30, and Gatus resolved at
+  which sre-agent accepted (202 from 192.0.2.115). Dozzle started by hand at 15:18:30, and Gatus resolved at
   15:20:05. Incident 1 was `explained` / `fallback`, and the push was sent (Pushover request 2c366335…). Confirmed.
 - The verdict fell back. The log shows `anthropic.BadRequestError: 400 … '`temperature` is deprecated for this model'`
   (request req_011CgaYMG5k97ceCKEsppho5). `create_anthropic_chat` always sent `temperature=0`. The Upgrade Advisor's

@@ -27,6 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from src.agent.agent import build_agent, invoke_agent, stream_agent
 from src.agent.history import (
     ConversationMetadata,
+    _validate_session_id_path_safe,
     delete_conversation,
     get_conversation,
     list_conversations,
@@ -83,6 +84,16 @@ class AskRequest(BaseModel):
     # falls back to ``settings.user_timezone`` when omitted, which is what
     # CLI clients, scheduled reports, and direct MCP callers do.
     user_timezone: str | None = None
+
+    @field_validator("session_id")
+    @classmethod
+    def _validate_session_id(cls, value: str | None) -> str | None:
+        """Reject unsafe IDs (glob wildcards, paths) with the history layer's own rule."""
+        if value is None or value == "":
+            return None
+        if not _validate_session_id_path_safe(value):
+            raise ValueError("session_id must be 1-64 characters from A-Z, a-z, 0-9, '_' and '-'")
+        return value
 
     @field_validator("user_timezone")
     @classmethod

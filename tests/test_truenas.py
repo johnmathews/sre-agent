@@ -1,6 +1,7 @@
 """Unit tests for TrueNAS tool formatting and helpers."""
 
 import ssl
+from datetime import UTC, datetime
 
 from src.agent.tools.truenas import (
     TruenasAlertEntry,
@@ -17,27 +18,16 @@ from src.agent.tools.truenas import (
     TruenasSystemInfo,
     _extract_topology_disks,
     _format_apps,
-    _format_bytes,
     _format_cron_schedule,
     _format_pools,
     _format_shares,
+    _format_snapshot_listing,
     _format_snapshots,
+    _format_state,
     _format_system_status,
+    _sort_newest_first,
     _truenas_ssl_verify,
 )
-
-
-class TestFormatBytes:
-    def test_bytes(self) -> None:
-        assert _format_bytes(512) == "512.0 B"
-
-    def test_gibibytes(self) -> None:
-        result = _format_bytes(4 * 1024 * 1024 * 1024)
-        assert "GiB" in result
-
-    def test_tebibytes(self) -> None:
-        result = _format_bytes(16 * 1024**4)
-        assert "TiB" in result
 
 
 class TestExtractTopologyDisks:
@@ -266,20 +256,21 @@ class TestFormatShares:
         assert "NFS shares" not in result
 
 
+NOW = datetime(2026, 11, 11, 13, 0, 0, tzinfo=UTC)
+
+
 class TestFormatSnapshots:
     def test_empty_all(self) -> None:
-        result = _format_snapshots([], [], [])
-        assert "Recent snapshots (0)" in result
-        assert "Snapshot schedules (0)" in result
+        result = _format_snapshots([], [], {}, {}, NOW)
+        assert "Snapshot counts (from TrueNAS count queries):" in result
+        assert "(no pools found)" in result
+        assert "Periodic snapshot tasks (0)" in result
         assert "Replication tasks (0)" in result
 
-    def test_snapshot_listing(self) -> None:
-        snap: TruenasSnapshotEntry = {
-            "id": "tank/media@auto-2024-01-15_00-00",
-        }
-        result = _format_snapshots([snap], [], [])
-        assert "Recent snapshots (1)" in result
-        assert "tank/media@auto-2024-01-15_00-00" in result
+    def test_pool_counts(self) -> None:
+        result = _format_snapshots([], [], {"tank": 3535, "backup": "TrueNAS request timed out after 30s"}, {}, NOW)
+        assert "pool tank: 3535 snapshots" in result
+        assert "pool backup: unavailable: TrueNAS request timed out after 30s" in result
 
     def test_snapshot_schedule(self) -> None:
         task: TruenasSnapshotTaskEntry = {
@@ -289,13 +280,22 @@ class TestFormatSnapshots:
             "lifetime_unit": "DAY",
             "recursive": True,
             "schedule": {"minute": "0", "hour": "0", "dom": "*", "month": "*", "dow": "*"},
+            "state": {"state": "FINISHED", "datetime": {"$date": 1794366000000}},
         }
-        result = _format_snapshots([], [task], [])
-        assert "tank/media" in result
-        assert "enabled" in result
-        assert "14DAY" in result
-        assert "recursive" in result
-        assert "0 0 * * *" in result
+        result = _format_snapshots([task], [], {"tank": 10}, {"tank/media": 4}, NOW)
+        assert "tank/media (enabled, recursive, keep 14 DAY, schedule 0 0 * * *)" in result
+        assert "last run: FINISHED at 2026-11-11 03:00:00Z (10h ago)" in result
+        assert "snapshots of tank/media itself: 4 snapshots" in result
+
+    def test_disabled_task_without_state(self) -> None:
+        task: TruenasSnapshotTaskEntry = {"dataset": "tank/scratch", "enabled": False}
+        result = _format_snapshots([task], [], {}, {}, NOW)
+        assert "tank/scratch (DISABLED, keep ? ?, schedule no schedule)" in result
+        assert "last run: not reported by TrueNAS" in result
+
+    def test_dataset_count_shown_when_dataset_given(self) -> None:
+        result = _format_snapshots([], [], {"tank": 10}, {"tank/media": 4}, NOW, dataset="tank/media")
+        assert "dataset tank/media (this dataset only, not its children): 4 snapshots" in result
 
     def test_replication_task(self) -> None:
         repl: TruenasReplicationEntry = {
@@ -307,13 +307,62 @@ class TestFormatSnapshots:
             "target_dataset": "backup/media",
             "state": {"state": "FINISHED"},
         }
-        result = _format_snapshots([], [], [repl])
-        assert "tank-to-backup" in result
-        assert "PUSH" in result
-        assert "LOCAL" in result
-        assert "tank/media" in result
-        assert "backup/media" in result
-        assert "FINISHED" in result
+        result = _format_snapshots([], [repl], {}, {}, NOW)
+        assert "tank-to-backup (enabled, PUSH, LOCAL): tank/media -> backup/media" in result
+        assert "last run: FINISHED (time not reported)" in result
+
+    def test_listing_appended(self) -> None:
+        result = _format_snapshots([], [], {}, {}, NOW, listing=["Snapshots of tank/media (all 0):", "  (none)"])
+        assert result.endswith("Snapshots of tank/media (all 0):\n  (none)")
+
+
+class TestFormatState:
+    def test_finished_with_time(self) -> None:
+        state = {"state": "FINISHED", "datetime": {"$date": 1794366000000}}
+        assert _format_state(state, NOW) == "FINISHED at 2026-11-11 03:00:00Z (10h ago)"
+
+    def test_missing_or_empty(self) -> None:
+        assert _format_state(None, NOW) == "not reported by TrueNAS"
+        assert _format_state({}, NOW) == "not reported by TrueNAS"
+        assert _format_state({"state": None}, NOW) == "not reported by TrueNAS"
+
+    def test_bad_datetime(self) -> None:
+        assert _format_state({"state": "RUNNING", "datetime": {"$date": "soon"}}, NOW) == "RUNNING (time not reported)"
+        assert _format_state({"state": "RUNNING", "datetime": None}, NOW) == "RUNNING (time not reported)"
+
+
+def _snap(name: str, creation: str | None, createtxg: str = "1") -> TruenasSnapshotEntry:
+    entry: TruenasSnapshotEntry = {"name": f"tank/media@{name}", "createtxg": createtxg, "properties": {}}
+    if creation is not None:
+        entry["properties"] = {"creation": {"value": "-", "rawvalue": creation}}
+    return entry
+
+
+class TestSortNewestFirst:
+    def test_sorts_by_creation_rawvalue_as_integer(self) -> None:
+        snaps = [_snap("a", "999", createtxg="987614"), _snap("b", "1000", createtxg="99")]
+        assert [s["name"] for s in _sort_newest_first(snaps)] == ["tank/media@b", "tank/media@a"]
+
+    def test_entries_without_creation_go_last_by_name(self) -> None:
+        snaps = [_snap("auto-01", None), _snap("x", "5"), _snap("auto-02", None), _snap("y", "not-a-number")]
+        names = [s["name"] for s in _sort_newest_first(snaps)]
+        assert names == ["tank/media@x", "tank/media@y", "tank/media@auto-02", "tank/media@auto-01"]
+
+
+class TestFormatSnapshotListing:
+    def test_unavailable(self) -> None:
+        assert _format_snapshot_listing("tank/media", "timed out", 5) == [
+            "Snapshots of tank/media: unavailable: timed out"
+        ]
+
+    def test_empty(self) -> None:
+        assert _format_snapshot_listing("tank/media", [], 5) == ["Snapshots of tank/media (all 0):", "  (none)"]
+
+    def test_creation_missing_and_used_shown(self) -> None:
+        snap = _snap("manual", None)
+        snap["properties"] = {"used": {"rawvalue": str(int(7.9 * 1024**3))}}
+        lines = _format_snapshot_listing("tank/media", [snap], 5)
+        assert lines[1] == "  tank/media@manual (creation time not reported, used 7.9 GiB)"
 
 
 class TestFormatCronSchedule:

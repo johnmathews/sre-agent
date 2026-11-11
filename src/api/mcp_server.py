@@ -138,9 +138,9 @@ def _register_truenas_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(name="truenas_snapshots", description=truenas_snapshots.description)
     async def truenas_snapshots_mcp(  # pyright: ignore[reportUnusedFunction]
-        dataset: str | None = None, limit: int = 50
+        dataset: str | None = None, limit: int = 50, list_snapshots: bool = False
     ) -> str:
-        return await _call_async(truenas_snapshots, dataset=dataset, limit=limit)
+        return await _call_async(truenas_snapshots, dataset=dataset, limit=limit, list_snapshots=list_snapshots)
 
     @mcp.tool(name="truenas_system_status", description=truenas_system_status.description)
     async def truenas_system_status_mcp() -> str:  # pyright: ignore[reportUnusedFunction]

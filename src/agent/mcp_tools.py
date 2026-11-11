@@ -324,6 +324,7 @@ def _truenas_tools() -> list[SdkMcpTool[Any]]:
             truenas_snapshots,
             dataset=args.get("dataset"),
             limit=args.get("limit", 50),
+            list_snapshots=bool(args.get("list_snapshots", False)),
         )
 
     tools.append(

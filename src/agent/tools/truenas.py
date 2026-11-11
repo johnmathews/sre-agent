@@ -1,15 +1,18 @@
 """LangChain tools for querying the TrueNAS SCALE REST API."""
 
-import json
+import asyncio
 import logging
 import ssl
+from datetime import UTC, datetime
 from typing import TypedDict
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import format_age, format_bytes, format_utc
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,20 @@ def _truenas_headers() -> dict[str, str]:
 
 # --- HTTP helper ---
 
+HTTPS_REQUIRED_MESSAGE = "TrueNAS URL must be https; refusing to send the API key over plain http"
+
+
+def _truenas_api_url(path: str) -> str:
+    """Build the REST v2.0 URL, refusing any base URL that is not https.
+
+    The API key is a bearer token: sent over plain http (or ws://) it can be read on the wire, and
+    TrueNAS revokes a key it sees used insecurely. The check runs before any client is built.
+    """
+    base = get_settings().truenas_url
+    if urlsplit(base).scheme.lower() != "https":
+        raise ToolException(HTTPS_REQUIRED_MESSAGE)
+    return f"{base}/api/v2.0{path}"
+
 
 async def _truenas_get(
     path: str,
@@ -56,9 +73,10 @@ async def _truenas_get(
 ) -> object:
     """Make an authenticated GET request to the TrueNAS SCALE API.
 
-    TrueNAS returns plain JSON (arrays or objects), NOT wrapped in ``{"data": ...}``.
+    TrueNAS returns plain JSON (arrays, objects or, for ``count=true``, a bare integer),
+    NOT wrapped in ``{"data": ...}``. Raises ``ToolException`` for a non-https URL.
     """
-    url = f"{get_settings().truenas_url}/api/v2.0{path}"
+    url = _truenas_api_url(path)
     async with httpx.AsyncClient(
         timeout=timeout or DEFAULT_TIMEOUT_SECONDS,
         verify=_truenas_ssl_verify(),
@@ -72,9 +90,10 @@ async def _truenas_get(
 async def _truenas_post(path: str, body: dict[str, object] | None = None) -> object:
     """Make an authenticated POST request to the TrueNAS SCALE API.
 
-    Some TrueNAS middleware methods (e.g. smb.status) require POST.
+    Some TrueNAS middleware methods (e.g. smb.status) require POST. Raises ``ToolException``
+    for a non-https URL.
     """
-    url = f"{get_settings().truenas_url}/api/v2.0{path}"
+    url = _truenas_api_url(path)
     async with httpx.AsyncClient(
         timeout=DEFAULT_TIMEOUT_SECONDS,
         verify=_truenas_ssl_verify(),
@@ -156,10 +175,15 @@ class TruenasSmbSessionEntry(TypedDict, total=False):
 
 
 class TruenasSnapshotEntry(TypedDict, total=False):
+    """One entry of GET /zfs/snapshot. ``properties`` maps a ZFS property name to
+    ``{"value": str, "rawvalue": str, ...}``; ``createtxg`` is a string, never sort on it."""
+
     id: str
     name: str
     dataset: str
+    pool: str
     snapshot_name: str
+    createtxg: str
     properties: dict[str, object]
     type: str
 
@@ -173,6 +197,8 @@ class TruenasSnapshotTaskEntry(TypedDict, total=False):
     naming_schema: str
     schedule: dict[str, str]
     recursive: bool
+    state: dict[str, object]
+    """Last run: ``{"state": "FINISHED", "datetime": {"$date": <ms epoch>}}``; may be absent."""
 
 
 class TruenasReplicationEntry(TypedDict, total=False):
@@ -239,15 +265,6 @@ class TruenasAppEntry(TypedDict, total=False):
 # --- Formatting helpers ---
 
 
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string."""
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024:
-            return f"{n:.1f} {unit}"
-        n = int(n / 1024)
-    return f"{n:.1f} PiB"
-
-
 def _extract_topology_disks(topology: dict[str, object]) -> list[tuple[str, str, str]]:
     """Extract (vdev_category, vdev_type, disk_name) tuples from pool topology.
 
@@ -302,9 +319,9 @@ def _format_pools(pools: list[TruenasPoolEntry], datasets: list[TruenasDatasetEn
         pct = (allocated / size) * 100 if size > 0 else 0.0
 
         lines.append(f"  {name} ({status}, {health_str}):")
-        lines.append(f"    Size: {_format_bytes(size)}")
-        lines.append(f"    Used: {_format_bytes(allocated)} ({pct:.1f}%)")
-        lines.append(f"    Free: {_format_bytes(free)}")
+        lines.append(f"    Size: {format_bytes(size)}")
+        lines.append(f"    Used: {format_bytes(allocated)} ({pct:.1f}%)")
+        lines.append(f"    Free: {format_bytes(free)}")
 
         # Show disk topology — which disks are in which vdev category
         topology = pool.get("topology")
@@ -338,7 +355,7 @@ def _format_pools(pools: list[TruenasPoolEntry], datasets: list[TruenasDatasetEn
                 avail_raw = ds.get("available", {})
                 used_val = int(used_raw.get("rawvalue", 0)) if isinstance(used_raw, dict) else 0  # type: ignore[call-overload]  # pyright: ignore[reportAny]
                 avail_val = int(avail_raw.get("rawvalue", 0)) if isinstance(avail_raw, dict) else 0  # type: ignore[call-overload]  # pyright: ignore[reportAny]
-                lines.append(f"      {ds_id}: used={_format_bytes(used_val)}, avail={_format_bytes(avail_val)}")
+                lines.append(f"      {ds_id}: used={format_bytes(used_val)}, avail={format_bytes(avail_val)}")
 
     return "\n".join(lines)
 
@@ -419,38 +436,126 @@ def _format_shares(
     return "\n".join(lines)
 
 
+SnapshotCount = int | str
+"""A snapshot count, or the reason it is unavailable."""
+
+
+def _state_datetime(state: dict[str, object]) -> datetime | None:
+    """The time in a TrueNAS job state: ``{"datetime": {"$date": <ms epoch>}}``."""
+    raw = state.get("datetime")
+    millis = raw.get("$date") if isinstance(raw, dict) else None  # pyright: ignore[reportUnknownMemberType]
+    if isinstance(millis, int | float) and not isinstance(millis, bool):
+        return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    return None
+
+
+def _format_state(state: object, now: datetime) -> str:
+    """``FINISHED at 2026-11-11 00:00:05Z (13h ago)``, or say that TrueNAS did not report it."""
+    if not isinstance(state, dict) or not state.get("state"):
+        return "not reported by TrueNAS"
+    text = str(state.get("state"))  # pyright: ignore[reportUnknownArgumentType]
+    when = _state_datetime(state)  # pyright: ignore[reportUnknownArgumentType]
+    text += f" at {format_utc(when)} ({format_age(when, now)})" if when else " (time not reported)"
+    error = state.get("error")  # pyright: ignore[reportUnknownMemberType]
+    if error:
+        text += f" — error: {str(error)[:200]}"  # pyright: ignore[reportUnknownArgumentType]
+    return text
+
+
+def _format_count(count: SnapshotCount) -> str:
+    return f"{count} snapshots" if isinstance(count, int) else f"unavailable: {count}"
+
+
+def _property_raw(snapshot: TruenasSnapshotEntry, name: str) -> str | None:
+    """``properties[name].rawvalue`` of a snapshot entry, if present."""
+    prop = snapshot.get("properties", {}).get(name)
+    raw = prop.get("rawvalue") if isinstance(prop, dict) else None  # pyright: ignore[reportUnknownMemberType]
+    return None if raw is None else str(raw)  # pyright: ignore[reportUnknownArgumentType]
+
+
+def _creation_epoch(snapshot: TruenasSnapshotEntry) -> int | None:
+    """Creation time in epoch seconds from ``properties.creation.rawvalue`` (a string)."""
+    raw = _property_raw(snapshot, "creation")
+    try:
+        return int(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def _snapshot_name(snapshot: TruenasSnapshotEntry) -> str:
+    return snapshot.get("name") or snapshot.get("id") or "unknown"
+
+
+def _sort_newest_first(snapshots: list[TruenasSnapshotEntry]) -> list[TruenasSnapshotEntry]:
+    """Newest first by creation time; entries without one go last, by name descending.
+
+    Never sorts on ``createtxg``: TrueNAS returns it as a string, so "99" would sort above "987614".
+    """
+
+    def key(snapshot: TruenasSnapshotEntry) -> tuple[bool, int, str]:
+        created = _creation_epoch(snapshot)
+        return (created is not None, created or 0, _snapshot_name(snapshot))
+
+    return sorted(snapshots, key=key, reverse=True)
+
+
+def _format_snapshot_listing(dataset: str, snapshots: list[TruenasSnapshotEntry] | str, limit: int) -> list[str]:
+    """The ``list_snapshots`` section: newest first, capped at ``limit``."""
+    if isinstance(snapshots, str):
+        return [f"Snapshots of {dataset}: unavailable: {snapshots}"]
+    total = len(snapshots)
+    shown = _sort_newest_first(snapshots)[:limit]
+    header = f"showing newest {len(shown)} of {total}" if len(shown) < total else f"all {total}"
+    lines = [f"Snapshots of {dataset} ({header}):"]
+    if not shown:
+        lines.append("  (none)")
+    for snap in shown:
+        created = _creation_epoch(snap)
+        created_str = f"created {format_utc(created)}" if created is not None else "creation time not reported"
+        used_raw = _property_raw(snap, "used")
+        used_str = f", used {format_bytes(int(used_raw))}" if used_raw and used_raw.isdigit() else ""
+        lines.append(f"  {_snapshot_name(snap)} ({created_str}{used_str})")
+    return lines
+
+
 def _format_snapshots(
-    snapshots: list[TruenasSnapshotEntry],
     tasks: list[TruenasSnapshotTaskEntry],
     replications: list[TruenasReplicationEntry],
+    pool_counts: dict[str, SnapshotCount],
+    dataset_counts: dict[str, SnapshotCount],
+    now: datetime,
+    dataset: str | None = None,
+    listing: list[str] | None = None,
 ) -> str:
-    """Format ZFS snapshots, snapshot tasks, and replication status."""
-    lines: list[str] = []
+    """Format snapshot counts, periodic snapshot tasks with their last run, and replication.
 
-    # Recent snapshots
-    lines.append(f"Recent snapshots ({len(snapshots)}):")
-    if not snapshots:
-        lines.append("  (none)")
-    for snap in snapshots[:MAX_SNAPSHOTS]:
-        snap_id = snap.get("id", "unknown")
-        lines.append(f"  {snap_id}")
-    if len(snapshots) > MAX_SNAPSHOTS:
-        lines.append(f"  (showing first {MAX_SNAPSHOTS} of {len(snapshots)})")
+    ``pool_counts`` and ``dataset_counts`` come from ``GET /zfs/snapshot?count=true``; a dataset
+    count covers that dataset only, not its children.
+    """
+    lines: list[str] = ["Snapshot counts (from TrueNAS count queries):"]
+    if not pool_counts and not dataset_counts:
+        lines.append("  (no pools found)")
+    for pool, count in pool_counts.items():
+        lines.append(f"  pool {pool}: {_format_count(count)}")
+    if dataset and dataset in dataset_counts:
+        lines.append(
+            f"  dataset {dataset} (this dataset only, not its children): {_format_count(dataset_counts[dataset])}"
+        )
 
-    # Snapshot schedules
-    lines.append(f"\nSnapshot schedules ({len(tasks)}):")
+    # Periodic snapshot tasks
+    lines.append(f"\nPeriodic snapshot tasks ({len(tasks)}):")
     if not tasks:
         lines.append("  (none)")
     for task in tasks:
-        dataset = task.get("dataset", "?")
-        enabled = task.get("enabled", False)
-        lifetime = f"{task.get('lifetime_value', '?')}{task.get('lifetime_unit', '?')}"
-        recursive = task.get("recursive", False)
-        schedule = task.get("schedule", {})
-        sched_str = _format_cron_schedule(schedule)
-        status = "enabled" if enabled else "DISABLED"
-        rec_str = ", recursive" if recursive else ""
-        lines.append(f"  {dataset} ({status}, keep {lifetime}{rec_str}) — {sched_str}")
+        task_dataset = task.get("dataset", "?")
+        status = "enabled" if task.get("enabled", False) else "DISABLED"
+        rec_str = ", recursive" if task.get("recursive", False) else ""
+        retention = f"{task.get('lifetime_value', '?')} {task.get('lifetime_unit', '?')}"
+        sched_str = _format_cron_schedule(task.get("schedule", {}))
+        lines.append(f"  {task_dataset} ({status}{rec_str}, keep {retention}, schedule {sched_str})")
+        lines.append(f"    last run: {_format_state(task.get('state'), now)}")
+        if task_dataset in dataset_counts:
+            lines.append(f"    snapshots of {task_dataset} itself: {_format_count(dataset_counts[task_dataset])}")
 
     # Replication tasks
     lines.append(f"\nReplication tasks ({len(replications)}):")
@@ -458,16 +563,18 @@ def _format_snapshots(
         lines.append("  (none)")
     for repl in replications:
         name = repl.get("name", "?")
-        enabled = repl.get("enabled", False)
+        status = "enabled" if repl.get("enabled", False) else "DISABLED"
         direction = repl.get("direction", "?")
         transport = repl.get("transport", "?")
         sources = repl.get("source_datasets", [])
         target = repl.get("target_dataset", "?")
-        state = repl.get("state", {})
-        state_str = state.get("state", "UNKNOWN") if isinstance(state, dict) else "UNKNOWN"  # pyright: ignore[reportAny]
-        status = "enabled" if enabled else "DISABLED"
         src_str = ", ".join(str(s) for s in sources) if sources else "?"
-        lines.append(f"  {name} ({status}, {direction}, {transport}): {src_str} -> {target} [state={state_str}]")
+        lines.append(f"  {name} ({status}, {direction}, {transport}): {src_str} -> {target}")
+        lines.append(f"    last run: {_format_state(repl.get('state'), now)}")
+
+    if listing is not None:
+        lines.append("")
+        lines.extend(listing)
 
     return "\n".join(lines)
 
@@ -509,7 +616,7 @@ def _format_system_status(
     lines.append(f"  Hostname: {hostname}")
     lines.append(f"  Uptime: {uptime_days}d {uptime_hours}h")
     lines.append(f"  Hardware: {product}")
-    lines.append(f"  Memory: {_format_bytes(mem)} ({'ECC' if ecc else 'non-ECC'})")
+    lines.append(f"  Memory: {format_bytes(mem)} ({'ECC' if ecc else 'non-ECC'})")
     if cores:
         lines.append(f"  CPU cores: {cores}")
     if loadavg and isinstance(loadavg, list) and len(loadavg) >= 3:
@@ -552,7 +659,7 @@ def _format_system_status(
         standby = disk.get("hddstandby", "")
         pool_str = f", pool={pool}" if pool else ""
         standby_str = f", standby={standby}" if standby and standby != "ALWAYS ON" else ""
-        lines.append(f"  {name}: {model} ({dtype}, {_format_bytes(size)}, serial={serial}{pool_str}{standby_str})")
+        lines.append(f"  {name}: {model} ({dtype}, {format_bytes(size)}, serial={serial}{pool_str}{standby_str})")
 
     return "\n".join(lines)
 
@@ -606,15 +713,25 @@ class ListSharesInput(BaseModel):
 
 
 class SnapshotsInput(BaseModel):
-    """Input for listing TrueNAS ZFS snapshots, schedules, and replication."""
+    """Input for TrueNAS snapshot counts, snapshot tasks, replication and an optional listing."""
 
     dataset: str | None = Field(
         default=None,
-        description="Filter snapshots by dataset name (e.g. 'tank/media'). Omit to list all.",
+        description=(
+            "Dataset name (e.g. 'tank/media'). Adds that dataset's own snapshot count and its pool's. "
+            "Required when list_snapshots is true."
+        ),
+    )
+    list_snapshots: bool = Field(
+        default=False,
+        description=(
+            "List the dataset's snapshots, newest first (needs dataset). Slow: about 20 s. "
+            "Counts and last-run times are fast and are always returned without it."
+        ),
     )
     limit: int = Field(
         default=50,
-        description="Maximum number of snapshots to return (default 50).",
+        description="With list_snapshots, how many of the newest snapshots to show (default 50).",
         ge=1,
         le=200,
     )
@@ -658,13 +775,15 @@ TOOL_DESCRIPTION_LIST_SHARES = HOMELAB_CONTEXT + (
 )
 
 TOOL_DESCRIPTION_SNAPSHOTS = HOMELAB_CONTEXT + (
-    "List ZFS snapshots, snapshot schedules, and replication tasks on TrueNAS. "
-    "Use this to answer questions like 'when was the last snapshot of tank/media?', "
-    "'is replication running?', 'what snapshot schedules exist?', "
-    "or 'how many snapshots does tank have?'.\n\n"
-    "Returns recent snapshots (optionally filtered by dataset), "
-    "periodic snapshot task schedules with retention policy, "
-    "and replication task status with source/target datasets."
+    "Report ZFS snapshot counts, periodic snapshot tasks with their last run, and replication tasks on "
+    "TrueNAS. Use this to answer questions like 'when did the tank/media snapshot task last run?', "
+    "'how many snapshots does tank have?', 'is replication running?' or 'what snapshot schedules exist?'.\n\n"
+    "Always returns (fast): the snapshot count per pool; each periodic snapshot task's last run (state and "
+    "time), schedule, retention, recursive flag and the snapshot count of its dataset; and each replication "
+    "task's state with its time. Give dataset (e.g. 'tank/media') to add that dataset's own count and its "
+    "pool's.\n\n"
+    "Set list_snapshots=true together with dataset to also list that dataset's snapshots, newest first, "
+    "up to limit. The listing takes about 20 s."
 )
 
 TOOL_DESCRIPTION_SYSTEM_STATUS = HOMELAB_CONTEXT + (
@@ -765,55 +884,119 @@ truenas_list_shares.description = TOOL_DESCRIPTION_LIST_SHARES
 truenas_list_shares.handle_tool_error = True
 
 
-SNAPSHOT_TIMEOUT_SECONDS = 30
+SNAPSHOT_COUNT_TIMEOUT_SECONDS = 30
+SNAPSHOT_LIST_TIMEOUT_SECONDS = 45
+
+
+def _describe_error(exc: Exception, timeout: int) -> str:
+    """A short reason for a failed TrueNAS request, for an 'unavailable: <reason>' line."""
+    if isinstance(exc, httpx.TimeoutException):
+        return f"TrueNAS request timed out after {timeout}s"
+    if isinstance(exc, httpx.ConnectError):
+        return f"cannot connect to TrueNAS: {exc}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"TrueNAS API error: HTTP {exc.response.status_code} - {exc.response.text[:200]}"
+    if isinstance(exc, httpx.HTTPError):
+        return f"TrueNAS request failed ({type(exc).__name__}: {exc})"
+    if isinstance(exc, ValueError):
+        return "TrueNAS response was not JSON"
+    return str(exc)
+
+
+async def _snapshot_count(params: dict[str, str]) -> SnapshotCount:
+    """``GET /zfs/snapshot?count=true&<field>=<value>``: TrueNAS answers with a bare integer.
+
+    Returns the count, or the reason it is unavailable (also logged).
+    """
+    try:
+        raw = await _truenas_get(
+            "/zfs/snapshot", params={"count": "true", **params}, timeout=SNAPSHOT_COUNT_TIMEOUT_SECONDS
+        )
+    except (httpx.HTTPError, ToolException, ValueError) as e:
+        reason = _describe_error(e, SNAPSHOT_COUNT_TIMEOUT_SECONDS)
+        logger.warning("TrueNAS snapshot count failed (%s): %s", params, reason)
+        return reason
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    logger.warning("TrueNAS snapshot count (%s) returned %r, not an integer", params, raw)
+    return f"unexpected TrueNAS response {str(raw)[:80]!r} (expected an integer)"
+
+
+async def _snapshot_listing(dataset: str) -> list[TruenasSnapshotEntry] | str:
+    """``GET /zfs/snapshot?dataset=<d>`` with no limit (sorted client-side). Slow: about 20 s.
+
+    Returns the entries, or the reason the listing is unavailable (also logged).
+    """
+    try:
+        raw = await _truenas_get("/zfs/snapshot", params={"dataset": dataset}, timeout=SNAPSHOT_LIST_TIMEOUT_SECONDS)
+    except (httpx.HTTPError, ToolException, ValueError) as e:
+        reason = _describe_error(e, SNAPSHOT_LIST_TIMEOUT_SECONDS)
+        logger.warning("TrueNAS snapshot listing for %s failed: %s", dataset, reason)
+        return reason
+    if not isinstance(raw, list):
+        logger.warning("TrueNAS snapshot listing for %s returned %s, not a list", dataset, type(raw).__name__)
+        return "unexpected TrueNAS response (expected a list)"
+    entries: list[TruenasSnapshotEntry] = [entry for entry in raw if isinstance(entry, dict)]  # type: ignore[misc]  # pyright: ignore[reportUnknownVariableType]
+    return entries
+
+
+async def _no_listing() -> None:
+    return None
 
 
 @tool("truenas_snapshots", args_schema=SnapshotsInput)  # pyright: ignore[reportUnknownParameterType]
-async def truenas_snapshots(dataset: str | None = None, limit: int = 50) -> str:
-    """List ZFS snapshots, schedules, and replication. See TOOL_DESCRIPTION_SNAPSHOTS."""
+async def truenas_snapshots(dataset: str | None = None, list_snapshots: bool = False, limit: int = 50) -> str:
+    """Snapshot counts, snapshot tasks and replication. See TOOL_DESCRIPTION_SNAPSHOTS."""
     settings = get_settings()
     if not settings.truenas_url:
         raise ToolException("TrueNAS is not configured (TRUENAS_URL is empty).")
+    if list_snapshots and not dataset:
+        raise ToolException(
+            "list_snapshots needs dataset (e.g. 'tank/media'). "
+            + "Leave list_snapshots off for counts and last-run times across all pools."
+        )
 
-    logger.info("Fetching TrueNAS snapshots (dataset=%s, limit=%d)", dataset, limit)
+    logger.info(
+        "Fetching TrueNAS snapshot status (dataset=%s, list_snapshots=%s, limit=%d)", dataset, list_snapshots, limit
+    )
 
     try:
-        # Build TrueNAS query-filters and query-options as JSON query params.
-        # The /zfs/snapshot endpoint is a query-type method that supports:
-        #   query-filters: [[field, op, value], ...]
-        #   query-options: {limit, offset, order_by, select, extra}
-        # Plain "limit=50" params are ignored; must use the JSON format.
-        snap_params: dict[str, str] = {}
-
-        query_filters: list[list[str]] = []
-        if dataset:
-            query_filters.append(["dataset", "=", dataset])
-        if query_filters:
-            snap_params["query-filters"] = json.dumps(query_filters)
-
-        query_options: dict[str, object] = {
-            "limit": limit,
-            "order_by": ["-id"],
-            "select": ["id", "name", "dataset", "snapshot_name", "type"],
-        }
-        snap_params["query-options"] = json.dumps(query_options)
-
-        snaps_raw = await _truenas_get("/zfs/snapshot", params=snap_params, timeout=SNAPSHOT_TIMEOUT_SECONDS)
-        snapshots: list[TruenasSnapshotEntry] = snaps_raw if isinstance(snaps_raw, list) else []
-
         tasks_raw = await _truenas_get("/pool/snapshottask")
-        tasks: list[TruenasSnapshotTaskEntry] = tasks_raw if isinstance(tasks_raw, list) else []
-
         repl_raw = await _truenas_get("/replication")
-        replications: list[TruenasReplicationEntry] = repl_raw if isinstance(repl_raw, list) else []
+        pools_raw = await _truenas_get("/pool")
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to TrueNAS at {settings.truenas_url}: {e}") from e
     except httpx.TimeoutException as e:
-        raise ToolException(f"TrueNAS request timed out after {SNAPSHOT_TIMEOUT_SECONDS}s: {e}") from e
+        raise ToolException(f"TrueNAS request timed out after {DEFAULT_TIMEOUT_SECONDS}s: {e}") from e
     except httpx.HTTPStatusError as e:
         raise ToolException(f"TrueNAS API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
 
-    return _format_snapshots(snapshots, tasks, replications)
+    tasks: list[TruenasSnapshotTaskEntry] = tasks_raw if isinstance(tasks_raw, list) else []
+    replications: list[TruenasReplicationEntry] = repl_raw if isinstance(repl_raw, list) else []
+    pools: list[TruenasPoolEntry] = pools_raw if isinstance(pools_raw, list) else []
+
+    pool_names: list[str] = [p["name"] for p in pools if isinstance(p, dict) and p.get("name")]
+    count_datasets: list[str] = [t["dataset"] for t in tasks if isinstance(t, dict) and t.get("dataset")]
+    if dataset:
+        pool_of_dataset = dataset.split("/", 1)[0]
+        if pool_of_dataset not in pool_names:
+            pool_names.append(pool_of_dataset)
+        count_datasets.append(dataset)
+    pool_names = list(dict.fromkeys(pool_names))
+    count_datasets = list(dict.fromkeys(count_datasets))
+
+    count_jobs = [_snapshot_count({"pool": p}) for p in pool_names]
+    count_jobs += [_snapshot_count({"dataset": d}) for d in count_datasets]
+    listing_job = _snapshot_listing(dataset) if list_snapshots and dataset else _no_listing()
+    counts, listing_raw = await asyncio.gather(asyncio.gather(*count_jobs), listing_job)
+
+    pool_counts = dict(zip(pool_names, counts[: len(pool_names)], strict=True))
+    dataset_counts = dict(zip(count_datasets, counts[len(pool_names) :], strict=True))
+    listing = _format_snapshot_listing(dataset, listing_raw, limit) if dataset and listing_raw is not None else None
+
+    return _format_snapshots(
+        tasks, replications, pool_counts, dataset_counts, datetime.now(UTC), dataset=dataset, listing=listing
+    )
 
 
 truenas_snapshots.description = TOOL_DESCRIPTION_SNAPSHOTS

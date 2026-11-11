@@ -507,3 +507,23 @@ class TestToolSuccessExcludesClientErrors:
 
         assert result["tool_errors"] == {"prometheus_instant_query": 1, "grafana_get_alerts": 4}
         assert result["tool_calls"] == {"prometheus_instant_query": 136, "grafana_get_alerts": 4, "unknown": 10}
+
+
+async def test_report_cron_runs_in_user_timezone(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    import src.report.scheduler as sched_mod
+
+    mock_settings.report_schedule_cron = "0 8 * * 1"
+    mock_settings.user_timezone = "Pacific/Auckland"
+    mock_settings.upgrade_advisor_cron = ""
+    with caplog.at_level(logging.INFO, logger="src.report.scheduler"):
+        sched_mod.start_scheduler()
+    try:
+        assert sched_mod._scheduler is not None
+        job = sched_mod._scheduler.get_job("weekly_report")
+        assert job is not None
+        assert str(job.trigger.timezone) == mock_settings.user_timezone
+        assert "Pacific/Auckland" in caplog.text
+    finally:
+        sched_mod.stop_scheduler()

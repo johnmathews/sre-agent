@@ -7,7 +7,9 @@ import re
 import time
 from typing import Any
 
+import anthropic
 import httpx
+import openai
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -138,13 +140,24 @@ def create_llm(
     )
 
 
+_TRANSIENT_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.TransportError,
+    OSError,
+    ConnectionError,
+    TimeoutError,
+    anthropic.APIConnectionError,
+    openai.APIConnectionError,
+)
+
+
 def _is_retryable_llm_error(exc: Exception) -> bool:
     """Return True if *exc* is a transient LLM error worth retrying.
 
     Retryable errors:
       - HTTP 429 (rate limit) from Anthropic or OpenAI SDKs
       - HTTP 5xx (server-side) from Anthropic or OpenAI SDKs
-      - Network / connection errors (httpx, OSError)
+      - Network / connection errors (httpx, OSError) and the SDKs' own ``APIConnectionError`` (its
+        ``APITimeoutError`` subclasses it), including when found on the ``__cause__`` chain
 
     Non-retryable: auth errors (401/403), validation errors (400/422), etc.
     """
@@ -153,8 +166,16 @@ def _is_retryable_llm_error(exc: Exception) -> bool:
     if isinstance(status_code, int):
         return status_code == 429 or status_code >= 500
 
-    # Network-level failures (connection refused, DNS, timeout, etc.)
-    return isinstance(exc, (httpx.TransportError, OSError, ConnectionError, TimeoutError))
+    # Network-level failures (connection refused, DNS, timeout, etc.), including the SDKs' own
+    # connection and timeout errors (APITimeoutError subclasses APIConnectionError in both SDKs).
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while isinstance(current, Exception) and id(current) not in seen:
+        if isinstance(current, _TRANSIENT_NETWORK_ERRORS):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
 
 
 def response_text(content: object) -> str:

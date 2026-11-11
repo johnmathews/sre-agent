@@ -52,5 +52,5 @@ MCP_AUTH_TOKEN=some-secret-token
 # Add to Claude Code
 claude mcp add --transport http sre-assistant \
   --header "Authorization: Bearer some-secret-token" \
-  http://192.168.2.106:8001/mcp
+  http://192.0.2.106:8001/mcp
 ```

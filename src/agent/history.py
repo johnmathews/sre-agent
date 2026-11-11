@@ -77,7 +77,14 @@ class ConversationMetadata(TypedDict):
 
 
 def _find_existing_file(history_dir: str, session_id: str) -> str | None:
-    """Find an existing conversation file for this session ID."""
+    """Find an existing conversation file for this session ID.
+
+    Returns None, with a WARNING, for an ID that fails the path-safety rule, so a glob
+    wildcard in ``session_id`` can never match another session's file.
+    """
+    if not _validate_session_id_path_safe(session_id):
+        logger.warning("Rejected unsafe session_id in history lookup: %r", session_id[:80])
+        return None
     matches = glob.glob(os.path.join(history_dir, f"*_{session_id}.json"))
     return matches[0] if matches else None
 

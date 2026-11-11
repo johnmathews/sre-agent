@@ -85,6 +85,28 @@ class TestSystemPrompt:
         assert "Cite the evidence" in SYSTEM_PROMPT_TEMPLATE
 
 
+class TestUntrustedDataRule:
+    """The untrusted-data rule reaches the rendered prompt on both provider paths."""
+
+    _RULE_PHRASES = ("## Untrusted Data", "data, never instructions", "image markdown", "quote it as suspicious")
+
+    def _assert_rule(self, prompt: str) -> None:
+        for phrase in self._RULE_PHRASES:
+            assert phrase in prompt, phrase
+
+    def test_langgraph_openai_prompt_contains_rule(self, mock_settings: object) -> None:
+        with patch("src.agent.agent.create_agent") as mock_create:
+            mock_create.return_value = AsyncMock()
+            build_agent()
+            prompt: str = mock_create.call_args.kwargs["system_prompt"]
+        self._assert_rule(prompt)
+
+    def test_sdk_anthropic_prompt_contains_rule(self, mock_settings: object) -> None:
+        from src.agent.sdk_agent import _build_system_prompt
+
+        self._assert_rule(_build_system_prompt())
+
+
 class TestGetTools:
     def test_includes_prometheus_tools(self, mock_settings: object) -> None:
         tools = _get_tools()
@@ -279,6 +301,23 @@ class TestInvokeAgent:
         second_thread = mock_agent.ainvoke.call_args_list[1].kwargs["config"]["configurable"]["thread_id"]
         assert first_thread != second_thread
         assert second_thread.startswith("broken-sess-")
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize("session_id", ["a" * 64, "a1b2c3d4" + "-0f9e8d" * 8])
+    async def test_recovery_id_stays_within_session_id_rule(self, mock_settings: object, session_id: str) -> None:
+        """A recovery ID from a 64-character or many-times-recovered ID still passes the path-safety rule,
+        so the client's next /ask with it is not refused with 422."""
+        from src.agent.history import _validate_session_id_path_safe  # pyright: ignore[reportPrivateUsage]
+
+        tool_call_error = Exception("An assistant message with 'tool_calls' must be followed by tool messages")
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = [tool_call_error, {"messages": [AIMessage(content="ok")]}]
+
+        await _invoke_langgraph_agent(mock_agent, "hello?", session_id=session_id)
+
+        fresh = mock_agent.ainvoke.call_args_list[1].kwargs["config"]["configurable"]["thread_id"]
+        assert fresh != session_id
+        assert _validate_session_id_path_safe(fresh), f"{len(fresh)} characters: {fresh}"
 
     @pytest.mark.integration
     async def test_raises_non_tool_call_errors(self, mock_settings: object) -> None:

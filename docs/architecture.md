@@ -147,6 +147,15 @@ Mitigations applied:
   summaries (e.g., "Querying Prometheus — up{job='node'}"); and `tool_end` events for each completed tool. These give
   the frontend enough signal to show live progress and eliminate long silent periods.
 
+### Untrusted data
+
+Tool results, log lines, alert text and runbook text can carry instructions written by third parties. The system prompt
+(`src/agent/system_prompt.md`, section "Untrusted Data") tells the model to treat all of it as data, never to emit image
+markdown or links that carry query data, and to quote a suspicious instruction instead of following it. Both provider
+paths render the same template, so the rule reaches the OpenAI/LangGraph and the Anthropic/SDK agents alike; a test per
+path pins it. The prompt is a mitigation, not a boundary: the agent has no write or deploy tools, and the webapp half
+(CSP, remote images) is tracked separately.
+
 ### Query Correctness Safeguards
 
 The Prometheus tools include defense-in-depth against common query mistakes:
@@ -560,7 +569,7 @@ for that section — the report is always generated, even with partial data.
 ### Delivery
 
 - **On-demand** — `POST /report` endpoint returns markdown + optional email delivery
-- **Scheduled** — APScheduler `AsyncIOScheduler` with configurable cron expression (`REPORT_SCHEDULE_CRON`)
+- **Scheduled** — APScheduler `AsyncIOScheduler` with configurable cron expression (`REPORT_SCHEDULE_CRON`, evaluated in `USER_TIMEZONE`)
 - **CLI** — `make report` prints markdown to stdout
 - **Email** — multipart/alternative (HTML + plain-text fallback) via Gmail SMTP with STARTTLS (if `SMTP_*` configured). HTML uses inline CSS for email-client compatibility with styled tables, colored PASS/FAIL badges, and delta indicators.
 

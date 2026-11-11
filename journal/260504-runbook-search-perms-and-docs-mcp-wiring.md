@@ -99,7 +99,7 @@ the conditional skipped registration silently, and the system prompt was
 lying to the model about its tools. The docs server was healthy and
 reachable from the agent's network the whole time.
 
-Fix: added `DOCUMENTATION_MCP_URL=http://192.168.2.106:8085/mcp` to prod
+Fix: added `DOCUMENTATION_MCP_URL=http://192.0.2.106:8085/mcp` to prod
 `.env` and restarted. (The internal DNS form `http://documentation-server:8080/mcp`
 is preferable — fewer hops, host-IP-independent — but both work.)
 

@@ -1,4 +1,4 @@
-# MCP Client Config + Domain Rename (itsa.pizza -> itsa-pizza.com)
+# MCP Client Config + Domain Rename
 
 **Date:** 2026-04-06
 
@@ -21,7 +21,7 @@ references throughout the repo.
    in a multi-service environment. Used Pydantic `AliasChoices` so both names work (new name
    preferred, old name as fallback).
 
-3. **Domain rename: `itsa.pizza` -> `itsa-pizza.com`.** The old domain was referenced in the
+3. **Domain rename.** The old root domain was referenced in the
    Docker MCP config (`~/.docker/mcp/config.yaml`), runbooks (traefik, cloudflared), and docs.
    All updated.
 
@@ -33,8 +33,8 @@ references throughout the repo.
 - `docker-compose.yml` / `docker-compose.demo.yml` — renamed `sre-api` service to `sre-agent`,
   fixed `API_UPSTREAM` DNS reference that would have broken webapp->API connectivity
 - `readme.md`, `docs/architecture.md` — updated all `sre-api` references to `sre-agent`
-- `runbooks/traefik-reverse-proxy.md`, `runbooks/cloudflared-tunnel.md` — `itsa.pizza` ->
-  `itsa-pizza.com`
+- `runbooks/traefik-reverse-proxy.md`, `runbooks/cloudflared-tunnel.md` — old domain ->
+  new domain
 - `~/.docker/mcp/config.yaml` (local, not in repo) — updated Prometheus URL and added Grafana URL
 
 ## Claude Code MCP setup
@@ -42,10 +42,10 @@ references throughout the repo.
 ```bash
 claude mcp add -t http \
   -H "Authorization: Bearer <token>" \
-  -- sre-agent http://192.168.2.106:8001/mcp
+  -- sre-agent http://192.0.2.106:8001/mcp
 ```
 
-Note: external access via `https://sre.itsa-pizza.com` requires Cloudflare Access service token
+Note: external access via `https://<sre-mcp-host>` requires Cloudflare Access service token
 headers (`CF-Access-Client-Id`, `CF-Access-Client-Secret`) — not yet configured.
 
 ## Still TODO

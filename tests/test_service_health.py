@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from src.agent.tools.containers import ContainerRecord, ContainerReport, ExporterStatus, Sample
 from src.agent.tools.grafana_alerts import GrafanaAlert
 from src.agent.tools.service_health import (
+    SOURCE_NAMES,
     ServiceHealthInput,
     SourceResult,
     blackbox_source,
@@ -214,6 +215,28 @@ class TestGrafana:
         ]
         assert len(grafana_source(alerts, "jellyfin").degraded) == 1
         assert grafana_source(alerts, "home assistant").degraded == ["Grafana alert EndpointDown is active"]
+
+    @pytest.mark.parametrize("severity", ["none", "info", "INFO"])
+    def test_informational_alert_listed_but_not_degraded(self, severity: str) -> None:
+        alert = _alert("App update available", summary="Update available for jellyfin on jellyfin lxc")
+        alert["labels"]["severity"] = severity
+        result = grafana_source([("Containers", alert)], "jellyfin")
+        assert result.status == "ok"
+        assert result.degraded == []
+        assert f"App update available (severity={severity}, informational) active" in result.detail
+
+    def test_alert_without_severity_still_degraded(self) -> None:
+        alert = _alert("NanoClaw down", container_name="jellyfin")
+        del alert["labels"]["severity"]
+        result = grafana_source([("Containers", alert)], "jellyfin")
+        assert result.degraded == ["Grafana alert NanoClaw down is active"]
+        assert result.detail == "NanoClaw down (no severity) active"
+
+    def test_informational_alert_alone_gives_up(self) -> None:
+        alert = _alert("App update available", container_name="jellyfin", severity="info")
+        results = {key: SourceResult("no match") for key in SOURCE_NAMES}
+        results["grafana"] = grafana_source([("Containers", alert)], "jellyfin")
+        assert format_health("jellyfin", "1h", results).startswith("UP: jellyfin over 1h")
 
     def test_internal_labels_ignored(self) -> None:
         alerts = [("Apps", _alert("DiskFull", __alert_rule_uid__="jellyfin-uid"))]

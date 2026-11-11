@@ -434,7 +434,7 @@ POST /report {lookback_days: 7}
 
 ```
 start_scheduler()  (called in FastAPI lifespan)
-  -> CronTrigger.from_crontab(settings.report_schedule_cron)
+  -> CronTrigger.from_crontab(settings.report_schedule_cron, timezone=settings.user_timezone)
   -> AsyncIOScheduler.add_job(_scheduled_report_job)
   -> _scheduled_report_job()  (fires on cron schedule)
        -> generate_report(max_narrative_retry_seconds=21600)
@@ -448,7 +448,7 @@ start_scheduler()  (called in FastAPI lifespan)
 ### Narrative Retry (Exponential Backoff)
 
 The `_generate_narrative()` function accepts a `max_retry_seconds` budget. When a transient LLM error occurs (HTTP 429
-rate limit, 5xx server error, or network failure), it retries with exponential backoff:
+rate limit, 5xx server error, or network failure, including the SDKs' own connection and timeout errors), it retries with exponential backoff:
 
 - **Initial delay:** 30 seconds
 - **Backoff factor:** 2x per retry (30s → 60s → 120s → 240s → ...)

@@ -212,6 +212,25 @@ class TestLoadTurns:
         assert load_turns(history_dir, "s1") == []
 
 
+class TestSessionIdValidation:
+    """Session IDs are checked before any glob, so wildcards never match files."""
+
+    @pytest.mark.parametrize("bad_id", ["*", "?", "[a-z]*", "../x", "a/b", "", "x" * 65])
+    def test_load_turns_rejects_unsafe_id(self, tmp_path: Any, caplog: pytest.LogCaptureFixture, bad_id: str) -> None:
+        history_dir = str(tmp_path)
+        save_turn(history_dir, "s1", "user", "q", "m", "openai")
+        with caplog.at_level("WARNING", logger="src.agent.history"):
+            assert load_turns(history_dir, bad_id) == []
+        assert any(r.levelname == "WARNING" and "session_id" in r.getMessage() for r in caplog.records)
+
+    def test_valid_ids_still_load(self, tmp_path: Any) -> None:
+        """Pin: IDs the app creates (8 hex, hyphenated recovery suffix) still load."""
+        history_dir = str(tmp_path)
+        for sid in ("a1b2c3d4", "a1b2c3d4-0f9e8d", "default"):
+            save_turn(history_dir, sid, "user", "q", "m", "openai")
+            assert len(load_turns(history_dir, sid)) == 1
+
+
 class TestLoadTurnsAsLangchainMessages:
     def test_empty_when_no_file(self, tmp_path: Any) -> None:
         assert load_turns_as_langchain_messages(str(tmp_path), "missing") == []

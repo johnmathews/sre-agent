@@ -65,7 +65,7 @@ contract snapshot with
 claude mcp add --transport http \
   --header "CF-Access-Client-Id: <id>" \
   --header "CF-Access-Client-Secret: <secret>" \
-  -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
+  -- sre-agent https://<sre-mcp-host>/mcp
 ```
 
 ## Time (always enabled)
@@ -272,7 +272,8 @@ verdict.
      case-insensitive substring of the container name, with restarts counted over the window.
   3. **Blackbox probes:** `probe_success` whose `instance` (the probed URL) contains `name`, ignoring case.
   4. **Grafana alerts:** active alerts whose alert name, a label value (`container_name`, `exported_hostname`, ...) or
-     summary contains `name`, ignoring case.
+     summary contains `name`, ignoring case. An alert labelled `severity` `info` or `none` shows as `informational`
+     and does not decide the verdict. An alert with no `severity` label does.
   5. **Loki errors:** `sum by (service_name) (count_over_time({service_name=~"(?i).*<name>.*",
      detected_level=~"error|err|fatal|critical|crit"}[window]))`. The name is regex-escaped, so `a.b(c)` matches only
      itself. Without `LOKI_URL` this source reads `unavailable: LOKI_URL not set`. No error lines reads `no match`.
@@ -280,7 +281,7 @@ verdict.
   - `DOWN`: a matched Gatus endpoint is failing now, or a matched container is not running.
   - `DEGRADED`: a matched container is unhealthy or restarted in the window, a Gatus success ratio is below 1 over
     the window, a matched probe's `probe_success` is 0 now (`probe <instance> failing now`), a matched Grafana alert
-    is active, or Loki counts error lines.
+    not labelled `severity` `info` or `none` is active, or Loki counts error lines.
   - `UP`: at least one source matched and none of the above holds.
   - `UNKNOWN`: no source matched.
 - **Example questions:** "Is jellyfin healthy?", "Has Home Assistant had problems in the last day?"

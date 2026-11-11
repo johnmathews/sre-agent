@@ -65,7 +65,7 @@ uv run pytest tests/test_foo.py::test_bar  # Run a single test
 Three test tiers:
 - **Unit tests** (`tests/test_*.py`) — pure functions (parsing, validation, formatting). No mocks, no IO.
 - **Integration tests** (`tests/test_*_integration.py`, `@pytest.mark.integration`) — test tool functions with mocked HTTP via `respx`. Verify API calls, response handling, and error paths without real services.
-- **E2E tests** (`@pytest.mark.e2e`) — hit real Prometheus/Alertmanager/LLM. Skipped by default, run with `--run-e2e`. Requires `.env`.
+- **E2E tests** (`tests/test_e2e_live.py`, `@pytest.mark.e2e`) — hit real Prometheus/Grafana/LLM. Skipped by default, run with `--run-e2e`. Requires `.env`. Each test skips with a reason when its inputs are unset: the `/mcp` test needs `SRE_MCP_URL` plus an Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`); the model call runs only with `E2E_LLM=1`.
 
 `make test` runs unit + integration (safe for CI) under `coverage` with `-rf`, then prints the report (`src/` only). The
 floor is `fail_under` in `pyproject.toml` (91 against a 92.43% baseline); `make test` exits non-zero below it. Raise it

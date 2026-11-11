@@ -100,12 +100,12 @@ def start_scheduler() -> None:
     if settings.report_schedule_cron:
         _scheduler.add_job(
             _scheduled_report_job,
-            trigger=CronTrigger.from_crontab(settings.report_schedule_cron),
+            trigger=CronTrigger.from_crontab(settings.report_schedule_cron, timezone=settings.user_timezone),
             id="weekly_report",
             name="Weekly Reliability Report",
             replace_existing=True,
         )
-        logger.info("Report job scheduled with cron: %s", settings.report_schedule_cron)
+        logger.info("Report job scheduled with cron: %s (%s)", settings.report_schedule_cron, settings.user_timezone)
     if advisor_enabled:
         _scheduler.add_job(
             _scheduled_advisor_job,
@@ -114,7 +114,7 @@ def start_scheduler() -> None:
             name="Upgrade Advisor",
             replace_existing=True,
         )
-        logger.info("Upgrade advisor job scheduled with cron: %s", advisor_cron)
+        logger.info("Upgrade advisor job scheduled with cron: %s (%s)", advisor_cron, settings.user_timezone)
     _scheduler.start()
 
 

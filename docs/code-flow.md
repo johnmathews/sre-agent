@@ -154,19 +154,48 @@ agent.ainvoke() returns {"messages": [...]}
 
 ## Tool Registration
 
-Tools are registered in `src/agent/agent.py::_get_tools()`:
+Every tool is listed once in `TOOL_SPECS` in `src/agent/tool_registry.py`. A `ToolSpec` holds the LangChain tool, the
+setting that enables it (`enabled(settings)`), its progress label, its group (for logging), whether it only reads
+(`read_only`) or reaches a remote system (`open_world`), and the surfaces it belongs to (`"mcp"`, `"agent"`). The
+tool modules are imported unconditionally, so a module that fails to import fails startup instead of silently
+dropping its tools.
+
+The registry's helpers:
+
+- `enabled_specs(settings, surface, exclude=...)` returns the enabled specs in registry order, and logs each
+  disabled group once at INFO with the tools and the reason (for example `PROXMOX_URL not set`).
+- `input_schema(spec)` is the tool's `args_schema` as JSON Schema, minus Pydantic's titles. It keeps every
+  parameter's description and limits.
+- `run_tool(spec, arguments)` validates with `args_schema.model_validate`, then calls the raw function (the
+  coroutine, or the sync function in a worker thread). It does not use `ainvoke`, because `handle_tool_error=True`
+  would turn a `ToolException` into a success string. Invalid arguments raise `ToolError("Invalid arguments for
+  <tool>: <field>: <message>; ...")`; a `ToolException` propagates unchanged.
+- `tool_label(name)` is the human-readable progress label.
+
+`/mcp` is built from it: `src/api/mcp_server.py::build_fastmcp_server()` adds one `RegistryTool` (a
+`fastmcp.tools.Tool` subclass) per spec in `enabled_specs(settings, "mcp")`, with the spec's input schema,
+`output_schema=None` and MCP annotations (`readOnlyHint`, and for `memory_record_incident` `destructiveHint` and
+`idempotentHint` false). Its `run()` calls `run_tool` and turns a `ToolException` into a `ToolError`, so the client
+gets an `isError` result with the tool's message. The contract `/mcp` presents (names, parameters, defaults, limits,
+annotations) is pinned by `tests/snapshots/mcp_tools_contract.json`.
+
+The agent (`src/agent/agent.py::_get_tools()`) and the SDK tool server (`src/agent/mcp_tools.py::build_mcp_server()`)
+still assemble their own lists with the same conditions. W10 moves both onto the registry. Today
+`_get_tools()` includes:
 
 ```
 Always included:
+  - get_current_time
   - prometheus_search_metrics, prometheus_instant_query, prometheus_range_query
   - grafana_get_alerts, grafana_get_alert_rules
+  - grafana_get_dashboard, grafana_search_dashboards
 
 Conditional (config-dependent):
-  - truenas_* tools  (if TRUENAS_URL is set)
+  - truenas_* tools and hdd_power_status  (if TRUENAS_URL is set)
   - loki_* tools     (if LOKI_URL is set)
   - proxmox_* tools  (if PROXMOX_URL is set)
   - pbs_* tools      (if PBS_URL is set)
-  - runbook_search   (if vector store directory exists)
+  - runbook_search   (if its module imports; a missing vector store is reported when it is called)
   - memory_* tools   (if MEMORY_DB_PATH is set)
 ```
 

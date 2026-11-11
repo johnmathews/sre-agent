@@ -146,6 +146,19 @@ The conversation data is also accessible via the MCP server at `/mcp`:
 - **`sre_agent_get_conversation`** — equivalent to `GET /conversations/{session_id}` (returns full dialogue)
 
 These allow MCP clients like Claude Code to browse past agent conversations without calling the HTTP API directly.
+They are registered only when `CONVERSATION_HISTORY_DIR` is set, and only on `/mcp` (not in the agent loop). They
+live in `src/agent/tools/conversations.py` and reach `/mcp` through the tool registry (`src/agent/tool_registry.py`).
+
+Validation happens before any file is read. A call that breaks a rule gets an `isError` result that names the field,
+for example `Invalid arguments for sre_agent_get_conversation: session_id: String should match pattern
+'^[A-Za-z0-9_-]{1,64}$'`:
+
+| Tool                           | Parameter    | Rule                                                              |
+|--------------------------------|--------------|-------------------------------------------------------------------|
+| `sre_agent_list_conversations` | `limit`      | Integer from 1 to 100, default 20                                 |
+| `sre_agent_get_conversation`   | `session_id` | Required; matches `^[A-Za-z0-9_-]{1,64}$`, so `*` and paths are rejected |
+
+Both tools read files, so they run in a worker thread and never block the server's event loop.
 
 ## Migration
 

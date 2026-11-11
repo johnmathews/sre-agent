@@ -1,10 +1,39 @@
 import os
+import re
 from functools import lru_cache
-from typing import ClassVar
+from typing import ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# A client name as it appears in logs and metric labels (MCP_CLIENT_NAMES).
+CLIENT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,31}")
+
+
+def parse_client_names(raw: str) -> dict[str, str]:
+    """Parse ``MCP_CLIENT_NAMES`` (``identity=name`` pairs, comma-separated) into lowercased identity -> name.
+
+    Whitespace around pairs, identities and names is trimmed, and empty items (a trailing comma) are skipped. A
+    malformed pair raises ``ValueError``. The message gives the pair's position only, never its text: an identity is a
+    service token's Client ID or a person's email.
+    """
+    names: dict[str, str] = {}
+    for position, item in enumerate(raw.split(","), start=1):
+        pair = item.strip()
+        if not pair:
+            continue
+        identity, sep, name = pair.rpartition("=")
+        identity, name = identity.strip(), name.strip()
+        if not sep or not identity:
+            raise ValueError(f"MCP_CLIENT_NAMES pair {position} is not identity=name")
+        if not CLIENT_NAME_RE.fullmatch(name):
+            raise ValueError(f"MCP_CLIENT_NAMES pair {position}: the name must match {CLIENT_NAME_RE.pattern}")
+        key = identity.lower()
+        if key in names:
+            raise ValueError(f"MCP_CLIENT_NAMES pair {position} repeats an identity named earlier")
+        names[key] = name
+    return names
 
 
 class Settings(BaseSettings):
@@ -116,12 +145,28 @@ class Settings(BaseSettings):
     pushover_app_token: str = ""  # the explainer's own Pushover application token
     pushover_user_key: str = ""  # the Pushover user (or group) key to notify
 
+    # Cloudflare Access check on /mcp (src/api/mcp_identity.py). The team domain is CF_ACCESS_TEAM_DOMAIN.
+    # off: no check. log: verify and name the client, never reject. enforce: reject a request without a valid JWT.
+    mcp_access_mode: Literal["off", "log", "enforce"] = "log"
+    # Comma-separated AUD tags of the Access application(s) in front of /mcp. No fallback to CF_ACCESS_AUD.
+    mcp_cf_access_aud: str = ""
+    # identity=name pairs, comma-separated: a service token's Client ID or a user's email, mapped to the client name
+    # used in logs and metrics. Names match [a-z0-9][a-z0-9_.-]{0,31}. Unmapped callers get a generic label.
+    mcp_client_names: str = ""
+
     @field_validator("upgrade_advisor_public_base_url")
     @classmethod
     def _validate_advisor_base_url(cls, value: str) -> str:
         """The approve link carries a bearer token, so it must be https."""
         if value and not value.startswith("https://"):
             raise ValueError("UPGRADE_ADVISOR_PUBLIC_BASE_URL must start with https://")
+        return value
+
+    @field_validator("mcp_client_names")
+    @classmethod
+    def _validate_mcp_client_names(cls, value: str) -> str:
+        """A malformed pair fails at load; the error never quotes the value (see ``hide_input_in_errors``)."""
+        parse_client_names(value)
         return value
 
     @field_validator("user_timezone")
@@ -154,8 +199,10 @@ class Settings(BaseSettings):
             del os.environ["OPENAI_BASE_URL"]
         return self
 
+    # hide_input_in_errors: a ValidationError would otherwise quote the raw input (input_value=...), which for a
+    # model validator is the dict of every setting, secrets included, and for MCP_CLIENT_NAMES is the client IDs.
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
     )
 
 

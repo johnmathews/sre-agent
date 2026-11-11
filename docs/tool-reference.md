@@ -26,8 +26,29 @@ Health checks (`GET /health`) also follow this pattern — only configured servi
 
 ## MCP Server Endpoint
 
-All tools (except Documentation) are also exposed as a Streamable HTTP MCP server at `/mcp`. This allows MCP clients
-to call individual tools directly without the agent loop. Auth is handled by Cloudflare Access.
+Every tool in the table above except Documentation is also served by a Streamable HTTP MCP server at `/mcp`, under
+the same conditions, together with the two conversation history tools, which are on `/mcp` only. This allows MCP
+clients to call individual tools directly without the agent loop. Auth is handled by Cloudflare Access.
+
+**How a tool reaches `/mcp`:** each tool is listed once in `TOOL_SPECS` in `src/agent/tool_registry.py`, with the
+setting that enables it. `src/api/mcp_server.py` adds one MCP tool per enabled spec:
+
+- Name and description are the LangChain tool's own. The input schema is its Pydantic `args_schema`, so every
+  parameter carries its description and its limits (`minimum`, `maximum`, `minLength`, `pattern`, ...).
+- No output schema: results are plain text.
+- Annotations: `readOnlyHint: true` on every tool except `memory_record_incident` (`readOnlyHint: false`,
+  `destructiveHint: false`, `idempotentHint: false`). `openWorldHint: false` on the tools that read only local state
+  (`get_current_time`, `runbook_search`, the memory and conversation tools).
+- Every call is validated against the schema before the tool runs. Invalid arguments get an `isError` result that
+  names each field, e.g. `Invalid arguments for loki_query_logs: limit: Input should be less than or equal to 1000`.
+- Argument names the schema does not declare are refused too (each schema says `additionalProperties: false`), and
+  the error lists the accepted names, so a guessed name such as `since` never silently falls back to defaults.
+  A tool's own failure (`ToolException`) gets an `isError` result with its message.
+
+To add a tool: write it as a LangChain `@tool` with a Pydantic `args_schema` whose fields all have descriptions, add a
+`ToolSpec` to `TOOL_SPECS`, add its name to `EXPECTED_NAMES` in `tests/test_tool_registry.py`, and regenerate the
+contract snapshot with
+`UPDATE_MCP_SNAPSHOT=1 uv run pytest tests/test_mcp_server_integration.py -k test_mcp_contract_matches_snapshot`.
 
 **Access patterns:**
 - **`POST /ask`** — question → agent selects tools → synthesized answer (full SRE experience)

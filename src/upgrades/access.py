@@ -1,14 +1,22 @@
-"""Verify the Cloudflare Access JWT (``Cf-Access-Jwt-Assertion``) on the approval endpoints.
+"""Verify the Cloudflare Access JWT (``Cf-Access-Jwt-Assertion``) on the approval endpoints and on ``/mcp``.
 
 The endpoint does not trust that Cloudflare sits in front of it: every request must carry a JWT signed (RS256) by one
 of the team's Access keys, for this application's audience, issued by the team domain. Anything else is
 ``AccessDenied``. Log lines and exception messages name the reason only, never the token or its claims.
+
+Two entry points share one decode (``_decode_claims``):
+
+- ``verify_access_jwt`` is the approval check. It reads ``CF_ACCESS_AUD`` and requires an ``email`` claim, so a
+  service token (which carries ``common_name`` and no ``email``) can never approve an upgrade.
+- ``verify_access_identity`` names the caller of ``/mcp``. The caller passes the audiences, and either an ``email``
+  (a person) or a ``common_name`` (a service token's Client ID) is accepted.
 """
 
 import logging
 import re
 import time
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import httpx
 import jwt
@@ -28,6 +36,7 @@ JWKS_MAX_BYTES = 256 * 1024
 LEEWAY_SECONDS = 60
 MAX_TOKEN_CHARS = 16 * 1024
 MAX_EMAIL_CHARS = 320
+MAX_COMMON_NAME_CHARS = 256
 # A bare hostname (lowercase labels, no scheme, port, path or userinfo) under cloudflareaccess.com.
 _TEAM_DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudflareaccess\.com")
 
@@ -35,11 +44,37 @@ _TEAM_DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudf
 _jwks_cache: dict[str, tuple[float, dict[str, jwt.PyJWK]]] = {}
 # team domain -> monotonic time of the last fetch attempt (successful or not)
 _last_fetch_attempt: dict[str, float] = {}
-_logged_config_errors: set[str] = set()
+# (context, reason) pairs already logged at error level
+_logged_config_errors: set[tuple[str, str]] = set()
 
 
 class AccessDenied(Exception):
     """The request carries no valid Cloudflare Access JWT. The message is a reason, never token text."""
+
+
+@dataclass(frozen=True)
+class _Context:
+    """Which check a decode serves: names it in config-error logs and names its audience setting."""
+
+    name: str
+    aud_setting: str
+    consequence: str
+
+
+_APPROVAL = _Context("approval", "CF_ACCESS_AUD", "every approval request is denied")
+_MCP = _Context("mcp", "MCP_CF_ACCESS_AUD", "no /mcp caller can be verified")
+
+
+@dataclass(frozen=True)
+class AccessIdentity:
+    """A verified caller: ``user`` (the ``email`` claim) or ``service`` (a service token's ``common_name``).
+
+    ``value`` is credential-adjacent (a service token's Client ID), so it is left out of ``repr``; log
+    ``src.api.mcp_identity.identity_ref`` instead.
+    """
+
+    kind: Literal["user", "service"]
+    value: str = field(repr=False)
 
 
 def _monotonic() -> float:
@@ -53,20 +88,21 @@ def _reset_state() -> None:
     _logged_config_errors.clear()
 
 
-def _config_error(reason: str) -> AccessDenied:
-    """A misconfiguration denies every request; log it at error level once per reason, not per request."""
-    if reason not in _logged_config_errors:
-        _logged_config_errors.add(reason)
-        logger.error("Cloudflare Access verification misconfigured (%s); every approval request is denied", reason)
+def _config_error(reason: str, context: _Context) -> AccessDenied:
+    """A misconfiguration denies every request; log it at error level once per (context, reason), not per request.
+    The log line names the check it is about (approval or /mcp)."""
+    if (context.name, reason) not in _logged_config_errors:
+        _logged_config_errors.add((context.name, reason))
+        logger.error("Cloudflare Access verification misconfigured (%s); %s", reason, context.consequence)
     return AccessDenied(reason)
 
 
-def _team_domain() -> str:
+def _team_domain(context: _Context) -> str:
     team = get_settings().cf_access_team_domain
     if not team:
-        raise _config_error("CF_ACCESS_TEAM_DOMAIN is empty")
+        raise _config_error("CF_ACCESS_TEAM_DOMAIN is empty", context)
     if len(team) > 253 or not _TEAM_DOMAIN_RE.fullmatch(team):
-        raise _config_error("CF_ACCESS_TEAM_DOMAIN is not a bare *.cloudflareaccess.com hostname")
+        raise _config_error("CF_ACCESS_TEAM_DOMAIN is not a bare *.cloudflareaccess.com hostname", context)
     return team
 
 
@@ -116,15 +152,17 @@ async def _key_for(team: str, kid: str) -> jwt.PyJWK:
     return keys[kid]
 
 
-async def _verify(token: str | None) -> str:
+async def _decode_claims(token: str | None, audiences: list[str], *, context: _Context) -> dict[str, Any]:
+    """The verified claims of an Access JWT: RS256 only, a known ``kid`` (JWKS cached, refetch rate-limited), the
+    team's issuer, one of ``audiences``, and ``exp``/``iat`` within leeway. Raises ``AccessDenied``."""
     if not token:
         raise AccessDenied("missing Cf-Access-Jwt-Assertion header")
     if len(token) > MAX_TOKEN_CHARS:
         raise AccessDenied("token too long")
-    team = _team_domain()
-    audience = get_settings().cf_access_aud
-    if not audience:
-        raise _config_error("CF_ACCESS_AUD is empty")
+    team = _team_domain(context)
+    audiences = [a for a in audiences if a]
+    if not audiences:
+        raise _config_error(f"{context.aud_setting} is empty", context)
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError as exc:
@@ -136,19 +174,31 @@ async def _verify(token: str | None) -> str:
         raise AccessDenied("token has no key id")
     key = await _key_for(team, kid)
     try:
-        claims = jwt.decode(
+        claims: dict[str, Any] = jwt.decode(
             token,
             key=key.key,
             algorithms=[ALGORITHM],
-            audience=audience,
+            audience=audiences,
             issuer=f"https://{team}",
             leeway=LEEWAY_SECONDS,
             options={"require": ["exp", "iat", "iss", "aud"]},
         )
     except jwt.PyJWTError as exc:
         raise AccessDenied(f"token rejected ({type(exc).__name__})") from None
-    email = claims.get("email")
-    if not isinstance(email, str) or not email or len(email) > MAX_EMAIL_CHARS:
+    return claims
+
+
+def _usable(claims: dict[str, Any], name: str, max_chars: int) -> str | None:
+    value = claims.get(name)
+    if not isinstance(value, str) or not value or len(value) > max_chars:
+        return None
+    return value
+
+
+async def _verify(token: str | None) -> str:
+    claims = await _decode_claims(token, [get_settings().cf_access_aud], context=_APPROVAL)
+    email = _usable(claims, "email", MAX_EMAIL_CHARS)
+    if email is None:
         raise AccessDenied("token has no usable email claim")
     return email
 
@@ -160,3 +210,21 @@ async def verify_access_jwt(token: str | None) -> str:
     except AccessDenied as exc:
         logger.warning("Cloudflare Access JWT rejected: %s", clean_text(str(exc)))
         raise
+
+
+async def verify_access_identity(token: str | None, audiences: list[str]) -> AccessIdentity:
+    """Return who a Cloudflare Access JWT for one of ``audiences`` speaks for, or raise ``AccessDenied``.
+
+    A usable ``email`` makes a ``user``; otherwise a non-empty ``common_name`` of at most 256 characters makes a
+    ``service`` (Cloudflare puts a service token's Client ID there and leaves ``email`` out). This never feeds the
+    approval path, which stays on ``verify_access_jwt``. Rejections are not logged here, except a misconfiguration
+    once: the caller decides how loudly to report a refused request.
+    """
+    claims = await _decode_claims(token, audiences, context=_MCP)
+    email = _usable(claims, "email", MAX_EMAIL_CHARS)
+    if email is not None:
+        return AccessIdentity(kind="user", value=email)
+    common_name = _usable(claims, "common_name", MAX_COMMON_NAME_CHARS)
+    if common_name is not None:
+        return AccessIdentity(kind="service", value=common_name)
+    raise AccessDenied("token has no usable email or common_name claim")

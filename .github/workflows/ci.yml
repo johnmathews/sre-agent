@@ -43,6 +43,9 @@ jobs:
         run: make test
 
   build:
+    # latest is a production deploy: the home server's WUD redeploys sre-agent within a minute
+    # of a new digest, so a commit that fails `check` must never publish an image.
+    needs: check
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -70,5 +73,9 @@ jobs:
           tags: |
             ghcr.io/johnmathews/sre-agent:latest
             ghcr.io/johnmathews/sre-agent:sha-${{ github.sha }}
+          # Read by the home server's deploy notifier to name the release and list what changed.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

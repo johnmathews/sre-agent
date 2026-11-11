@@ -1,13 +1,13 @@
 """Unit tests for agent assembly — system prompt, tool wiring, invocation."""
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from src.agent.agent import (
-    _TOOL_LABELS,
     SYSTEM_PROMPT_TEMPLATE,
     _extract_ai_text,
     _get_tools,
@@ -17,6 +17,7 @@ from src.agent.agent import (
     _summarize_tool_input,
     build_agent,
 )
+from src.agent.tool_registry import TOOL_SPECS, tool_label
 
 
 class TestSystemPrompt:
@@ -140,6 +141,42 @@ class TestGetTools:
             # _get_tools should still include it since import succeeds
             tools = _get_tools()
             assert len(tools) >= 4
+
+    def test_exclude(self, mock_settings: object) -> None:
+        names = [t.name for t in _get_tools(exclude={"runbook_search"})]
+        assert "runbook_search" not in names
+        assert "get_current_time" in names
+
+
+class TestEvalRunner:
+    @pytest.mark.integration
+    async def test_eval_runner_excludes_runbook_explicitly(self) -> None:
+        """An eval case builds the agent without runbook_search, through the registry's exclude."""
+        from src.eval.models import EvalCase, ExpectedTools
+        from src.eval.runner import run_eval_case
+
+        class _Built(Exception):
+            pass
+
+        built: dict[str, list[str]] = {}
+
+        def fake_create_agent(**kwargs: Any) -> None:
+            built["tools"] = [t.name for t in kwargs["tools"]]
+            raise _Built
+
+        case = EvalCase(
+            id="exclude-runbook",
+            description="d",
+            question="q",
+            expected_tools=ExpectedTools(must_call=[]),
+            mocks=[],
+            rubric="r",
+        )
+        with patch("src.agent.agent.create_agent", side_effect=fake_create_agent), pytest.raises(_Built):
+            await run_eval_case(case, openai_api_key="sk-fake", openai_model="gpt-4o-mini")
+
+        assert "runbook_search" not in built["tools"]
+        assert {"get_current_time", "prometheus_instant_query"} <= set(built["tools"])
 
 
 class TestBuildAgent:
@@ -285,24 +322,34 @@ class TestInvokeAgent:
 
 
 class TestToolLabels:
-    """Tool label dict covers all registered tools."""
-
-    def test_core_tools_have_labels(self) -> None:
-        core = [
-            "prometheus_instant_query",
-            "prometheus_range_query",
-            "prometheus_search_metrics",
-            "grafana_get_alerts",
-            "grafana_get_alert_rules",
-            "runbook_search",
-        ]
-        for name in core:
-            assert name in _TOOL_LABELS, f"Missing label for {name}"
+    """Every registry tool has a readable label, and the stream shows it."""
 
     def test_labels_are_human_readable(self) -> None:
-        for name, label in _TOOL_LABELS.items():
-            assert len(label) > 5, f"Label for {name} too short"
-            assert label[0].isupper(), f"Label for {name} should start uppercase"
+        for spec in TOOL_SPECS:
+            label = tool_label(spec.name)
+            assert len(label) > 5, f"Label for {spec.name} too short"
+            assert label[0].isupper(), f"Label for {spec.name} should start uppercase"
+
+    @pytest.mark.integration
+    async def test_every_tool_has_label(self, mock_settings: object) -> None:
+        """Each agent tool's tool_start and tool_end events carry its registry label."""
+        specs = [s for s in TOOL_SPECS if "agent" in s.surfaces]
+        mock_agent = AsyncMock()
+
+        async def fake_stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            for spec in specs:
+                yield {"event": "on_tool_start", "name": spec.name, "data": {"input": {}}}
+                yield {"event": "on_tool_end", "name": spec.name, "data": {"output": "ok"}}
+
+        mock_agent.astream_events = fake_stream
+        mock_agent.aget_state = AsyncMock(return_value=AsyncMock(values={"messages": [AIMessage(content="ok")]}))
+
+        events = [e async for e in _stream_langgraph_agent(mock_agent, "q", session_id="s1")]
+
+        starts = [(e["tool_name"], e["content"]) for e in events if e["type"] == "tool_start"]
+        ends = [(e["tool_name"], e["content"]) for e in events if e["type"] == "tool_end"]
+        assert starts == [(s.name, s.label) for s in specs]
+        assert ends == [(s.name, f"{s.label} — done") for s in specs]
 
 
 class TestSummarizeToolInput:
@@ -533,7 +580,7 @@ class TestStreamAgentRegressions:
     def test_tool_start_content_no_trailing_empty_summary(self) -> None:
         """Regression: tool_start content showed 'Label: ' with trailing colon+space
         when the summary was empty, because the format string was always applied."""
-        label = _TOOL_LABELS.get("grafana_get_alerts", "Checking Grafana alerts")
+        label = tool_label("grafana_get_alerts")
         summary = _summarize_tool_input("grafana_get_alerts", {})
         # This mirrors the logic in stream_agent
         content = f"{label}: {summary}" if summary else label

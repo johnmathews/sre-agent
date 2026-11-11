@@ -14,6 +14,9 @@ AUD = "0123456789abcdef" * 4
 ISSUER = f"https://{TEAM}"
 CERTS_URL = f"https://{TEAM}/cdn-cgi/access/certs"
 EMAIL = "admin@example.com"
+# A made-up service token Client ID. Cloudflare puts the Client ID in ``common_name`` and leaves ``sub`` empty and
+# ``email`` absent on a service-token JWT.
+SERVICE_CLIENT_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0.access"
 
 
 @cache
@@ -48,6 +51,12 @@ class Signer:
 
     def token(self, **overrides: Any) -> str:
         return jwt.encode(self.claims(**overrides), self.key, algorithm="RS256", headers={"kid": self.kid})
+
+    def service_token(self, **overrides: Any) -> str:
+        """A service-token-shaped JWT: ``common_name`` set, ``sub`` empty, no ``email``."""
+        claims: dict[str, Any] = {"email": None, "sub": "", "common_name": SERVICE_CLIENT_ID}
+        claims.update(overrides)
+        return self.token(**claims)
 
 
 def jwks(*signers: Signer) -> dict[str, Any]:

@@ -14,6 +14,7 @@ from prometheus_client import Counter, Gauge, Histogram, Info
 
 REQUEST_DURATION_BUCKETS = (0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
 TOOL_DURATION_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0)
+TOOL_RESULT_CHARS_BUCKETS = (500, 2_000, 8_000, 32_000, 128_000, 512_000)
 
 # ---------------------------------------------------------------------------
 # Request-level metrics
@@ -39,20 +40,33 @@ REQUESTS_IN_PROGRESS = Gauge(
 )
 
 # ---------------------------------------------------------------------------
-# Tool-call metrics (populated by callback handler)
+# Tool-call metrics (recorded by src.observability.tool_calls.observe_tool_call)
 # ---------------------------------------------------------------------------
 
 TOOL_CALL_DURATION = Histogram(
     "sre_assistant_tool_call_duration_seconds",
-    "Duration of individual tool calls in seconds",
-    labelnames=["tool_name"],
+    "Duration of individual tool calls in seconds, by source (mcp, agent)",
+    labelnames=["tool_name", "source"],
     buckets=TOOL_DURATION_BUCKETS,
 )
 
 TOOL_CALLS_TOTAL = Counter(
     "sre_assistant_tool_calls_total",
-    "Total number of tool calls",
-    labelnames=["tool_name", "status"],
+    "Tool calls by outcome (status), source (mcp, agent) and client",
+    labelnames=["tool_name", "status", "source", "client"],
+)
+
+TOOL_RESULT_CHARS = Histogram(
+    "sre_assistant_tool_result_chars",
+    "Characters of text returned by successful tool calls, by source (mcp, agent)",
+    labelnames=["tool_name", "source"],
+    buckets=TOOL_RESULT_CHARS_BUCKETS,
+)
+
+MCP_HTTP_REQUESTS_TOTAL = Counter(
+    "sre_assistant_mcp_http_requests_total",
+    "HTTP requests to /mcp by client label and Access check result (verified, missing, invalid, unconfigured, off)",
+    labelnames=["client", "access"],
 )
 
 # ---------------------------------------------------------------------------
@@ -84,6 +98,13 @@ COMPONENT_HEALTHY = Gauge(
     "sre_assistant_component_healthy",
     "Whether a dependency component is healthy (1=healthy, 0=unhealthy)",
     labelnames=["component"],
+)
+
+# 1 when MEMORY_DB_PATH is set and the database opens at startup; 0 when it is unset (the owner's choice)
+# or the open fails (a directory, a missing parent, a read-only mount). Set once by log_memory_status().
+MEMORY_STORE_ENABLED = Gauge(
+    "sre_assistant_memory_store_enabled",
+    "Whether the memory store is configured and usable (1=usable, 0=unset or broken)",
 )
 
 APP_INFO = Info(

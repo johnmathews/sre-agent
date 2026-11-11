@@ -298,6 +298,24 @@ class TestComputeBaselines:
         assert all(b["window_days"] == 7 for b in baselines)
 
     @respx.mock
+    async def test_baseline_queries_are_valid_and_exclude_client_errors(self, mock_settings: Any) -> None:
+        """Each query reaches Prometheus with single braces, and tool success leaves out client mistakes."""
+        route = respx.get("http://prometheus.test:9090/api/v1/query").mock(
+            return_value=httpx.Response(200, json=_prom_response(_prom_scalar(0.45)))
+        )
+
+        _ = await compute_baselines(7)
+
+        queries = [call.request.url.params["query"] for call in route.calls]
+        assert queries
+        assert not [q for q in queries if "{{" in q or "}}" in q or "{window}" in q]
+        [tool_success] = [q for q in queries if "sre_assistant_tool_calls_total" in q]
+        assert tool_success == (
+            'sum(increase(sre_assistant_tool_calls_total{status="success"}[7d]))'
+            ' / sum(increase(sre_assistant_tool_calls_total{status!~"invalid_args|unknown_tool"}[7d]))'
+        )
+
+    @respx.mock
     async def test_compute_prometheus_down(self, mock_settings: Any) -> None:
         respx.get("http://prometheus.test:9090/api/v1/query").mock(return_value=httpx.Response(503))
 

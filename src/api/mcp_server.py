@@ -1,410 +1,169 @@
 """Streamable HTTP MCP server exposing SRE tools.
 
-Wraps the same LangChain tool functions used by the agent as FastMCP tools,
-served over Streamable HTTP so MCP clients (Claude Code, Claude Desktop, etc.)
-can call them directly without going through the agent loop.
+Every tool comes from the registry (``src/agent/tool_registry.py``): its name, description and
+input schema (with each parameter's description and limits) are the LangChain tool's own, and
+each call is validated against that schema before the tool runs. Served over Streamable HTTP so
+MCP clients (Claude Code, the claude.ai connector, other homelab apps) can call the tools directly
+without going through the agent loop.
 
-Auth is handled externally by Cloudflare Access.
+Each ``tools/call`` passes through ``ToolCallObserver``, which writes the call's one ``tool_call`` log line and
+records the tool metrics (``src/observability/tool_calls.py``).
+
+Cloudflare Access guards the tunnel route, and ``McpAccessCheck`` (``src/api/mcp_access.py``) checks the Access JWT on
+every HTTP request in front of this server. It sets ``request.state.mcp_client`` (the client label) and, for a verified
+caller, ``request.state.mcp_identity_ref``, which ``ToolCallObserver`` passes into the ``tool_call`` line.
 """
 
-import asyncio
 import logging
+import time
 from typing import Any
 
+import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_http_request
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import Tool
+from fastmcp.tools.base import ToolResult
+from langchain_core.tools import ToolException
+from mcp.types import ToolAnnotations
+from pydantic import PrivateAttr
 
+from src.agent.tool_registry import ToolSpec, enabled_specs, input_schema, run_tool
+from src.api.mcp_access import STATE_CLIENT, STATE_IDENTITY_REF
 from src.config import Settings, get_settings
+from src.observability.tool_calls import classify_tool_error, observe_tool_call
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _call_sync(tool_obj: Any, **kwargs: Any) -> str:
-    """Call a sync LangChain @tool and return its string result."""
-    result: str = tool_obj.func(**kwargs)
-    return result
-
-
-async def _call_async(tool_obj: Any, **kwargs: Any) -> str:
-    """Call an async LangChain @tool and return its string result."""
-    result: str = await tool_obj.coroutine(**kwargs)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Tool registration factories
-# ---------------------------------------------------------------------------
-
-
-def _register_prometheus_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.prometheus import (
-        prometheus_instant_query,
-        prometheus_range_query,
-        prometheus_search_metrics,
+def tool_annotations(spec: ToolSpec) -> ToolAnnotations:
+    """MCP hints: read tools are read-only; the write tool is non-destructive and not idempotent."""
+    if spec.read_only:
+        return ToolAnnotations(readOnlyHint=True, openWorldHint=spec.open_world)
+    return ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=spec.open_world
     )
 
-    @mcp.tool(name="prometheus_search_metrics", description=prometheus_search_metrics.description)
-    async def prometheus_search_metrics_mcp(search_term: str) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(prometheus_search_metrics, search_term=search_term)
 
-    @mcp.tool(name="prometheus_instant_query", description=prometheus_instant_query.description)
-    async def prometheus_instant_query_mcp(query: str, time: str | None = None) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(prometheus_instant_query, query=query, time=time)
+class RegistryTool(Tool):
+    """A FastMCP tool that runs a registry spec.
 
-    @mcp.tool(name="prometheus_range_query", description=prometheus_range_query.description)
-    async def prometheus_range_query_mcp(  # pyright: ignore[reportUnusedFunction]
-        query: str, start: str, end: str, step: str = "60s"
-    ) -> str:
-        return await _call_async(prometheus_range_query, query=query, start=start, end=end, step=step)
+    ``output_schema`` is ``None``: the tools return text, and a declared ``{"result": string}``
+    schema makes clients show that text JSON-escaped.
+    """
 
+    _spec: ToolSpec = PrivateAttr()
 
-def _register_grafana_alert_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.grafana_alerts import grafana_get_alert_rules, grafana_get_alerts
-
-    @mcp.tool(name="grafana_get_alerts", description=grafana_get_alerts.description)
-    async def grafana_get_alerts_mcp(state: str | None = None) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(grafana_get_alerts, state=state)
-
-    @mcp.tool(name="grafana_get_alert_rules", description=grafana_get_alert_rules.description)
-    async def grafana_get_alert_rules_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(grafana_get_alert_rules)
-
-
-def _register_grafana_dashboard_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.grafana_dashboards import grafana_get_dashboard, grafana_search_dashboards
-
-    @mcp.tool(name="grafana_get_dashboard", description=grafana_get_dashboard.description)
-    async def grafana_get_dashboard_mcp(  # pyright: ignore[reportUnusedFunction]
-        dashboard: str, panel: str | None = None
-    ) -> str:
-        return await _call_async(grafana_get_dashboard, dashboard=dashboard, panel=panel)
-
-    @mcp.tool(name="grafana_search_dashboards", description=grafana_search_dashboards.description)
-    async def grafana_search_dashboards_mcp(query: str) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(grafana_search_dashboards, query=query)
-
-
-def _register_proxmox_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.proxmox import (
-        proxmox_get_guest_config,
-        proxmox_list_guests,
-        proxmox_list_tasks,
-        proxmox_node_status,
-    )
-
-    @mcp.tool(name="proxmox_list_guests", description=proxmox_list_guests.description)
-    async def proxmox_list_guests_mcp(guest_type: str | None = None) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(proxmox_list_guests, guest_type=guest_type)
-
-    @mcp.tool(name="proxmox_get_guest_config", description=proxmox_get_guest_config.description)
-    async def proxmox_get_guest_config_mcp(  # pyright: ignore[reportUnusedFunction]
-        vmid: int | None = None, name: str | None = None, guest_type: str = "qemu"
-    ) -> str:
-        return await _call_async(proxmox_get_guest_config, vmid=vmid, name=name, guest_type=guest_type)
-
-    @mcp.tool(name="proxmox_node_status", description=proxmox_node_status.description)
-    async def proxmox_node_status_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(proxmox_node_status)
-
-    @mcp.tool(name="proxmox_list_tasks", description=proxmox_list_tasks.description)
-    async def proxmox_list_tasks_mcp(  # pyright: ignore[reportUnusedFunction]
-        limit: int = 20, errors_only: bool = False
-    ) -> str:
-        return await _call_async(proxmox_list_tasks, limit=limit, errors_only=errors_only)
-
-
-def _register_truenas_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.truenas import (
-        truenas_apps,
-        truenas_list_shares,
-        truenas_pool_status,
-        truenas_snapshots,
-        truenas_system_status,
-    )
-
-    @mcp.tool(name="truenas_pool_status", description=truenas_pool_status.description)
-    async def truenas_pool_status_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(truenas_pool_status)
-
-    @mcp.tool(name="truenas_list_shares", description=truenas_list_shares.description)
-    async def truenas_list_shares_mcp(  # pyright: ignore[reportUnusedFunction]
-        share_type: str | None = None, include_sessions: bool = False
-    ) -> str:
-        return await _call_async(truenas_list_shares, share_type=share_type, include_sessions=include_sessions)
-
-    @mcp.tool(name="truenas_snapshots", description=truenas_snapshots.description)
-    async def truenas_snapshots_mcp(  # pyright: ignore[reportUnusedFunction]
-        dataset: str | None = None, limit: int = 50, list_snapshots: bool = False
-    ) -> str:
-        return await _call_async(truenas_snapshots, dataset=dataset, limit=limit, list_snapshots=list_snapshots)
-
-    @mcp.tool(name="truenas_system_status", description=truenas_system_status.description)
-    async def truenas_system_status_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(truenas_system_status)
-
-    @mcp.tool(name="truenas_apps", description=truenas_apps.description)
-    async def truenas_apps_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(truenas_apps)
-
-
-def _register_disk_status_tools(mcp: FastMCP) -> None:
-    try:
-        from src.agent.tools.disk_status import hdd_power_status
-    except Exception:
-        return
-
-    @mcp.tool(name="hdd_power_status", description=hdd_power_status.description)
-    async def hdd_power_status_mcp(  # pyright: ignore[reportUnusedFunction]
-        duration: str = "24h", pool: str | None = None
-    ) -> str:
-        return await _call_async(hdd_power_status, duration=duration, pool=pool)
-
-
-def _register_loki_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.loki import (
-        loki_correlate_changes,
-        loki_list_label_values,
-        loki_metric_query,
-        loki_query_logs,
-    )
-
-    @mcp.tool(name="loki_query_logs", description=loki_query_logs.description)
-    async def loki_query_logs_mcp(  # pyright: ignore[reportUnusedFunction]
-        query: str,
-        start: str = "1h",
-        end: str = "now",
-        limit: int = 100,
-        direction: str = "backward",
-    ) -> str:
-        return await _call_async(loki_query_logs, query=query, start=start, end=end, limit=limit, direction=direction)
-
-    @mcp.tool(name="loki_metric_query", description=loki_metric_query.description)
-    async def loki_metric_query_mcp(  # pyright: ignore[reportUnusedFunction]
-        query: str, start: str = "1h", end: str = "now", step: str | None = None
-    ) -> str:
-        return await _call_async(loki_metric_query, query=query, start=start, end=end, step=step)
-
-    @mcp.tool(name="loki_list_label_values", description=loki_list_label_values.description)
-    async def loki_list_label_values_mcp(  # pyright: ignore[reportUnusedFunction]
-        label: str, query: str | None = None, start: str = "6h", end: str = "now"
-    ) -> str:
-        return await _call_async(loki_list_label_values, label=label, query=query, start=start, end=end)
-
-    @mcp.tool(name="loki_correlate_changes", description=loki_correlate_changes.description)
-    async def loki_correlate_changes_mcp(  # pyright: ignore[reportUnusedFunction]
-        reference_time: str,
-        window_minutes: int = 30,
-        hostname: str | None = None,
-        service_name: str | None = None,
-    ) -> str:
-        return await _call_async(
-            loki_correlate_changes,
-            reference_time=reference_time,
-            window_minutes=window_minutes,
-            hostname=hostname,
-            service_name=service_name,
+    @classmethod
+    def from_spec(cls, spec: ToolSpec) -> "RegistryTool":
+        tool = cls(
+            name=spec.name,
+            description=spec.tool.description,
+            parameters=input_schema(spec),
+            output_schema=None,
+            annotations=tool_annotations(spec),
         )
+        tool._spec = spec
+        return tool
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            text = await run_tool(self._spec, arguments)
+        except ToolException as e:
+            # The tool's own failure message (an upstream error, a bad name): an isError result. DEBUG, because
+            # FastMCP would log it at ERROR beside the tool_call line that already records it.
+            raise ToolError(str(e), log_level=logging.DEBUG) from e
+        return ToolResult(content=text)
 
 
-def _register_pbs_tools(mcp: FastMCP) -> None:
-    from src.agent.tools.pbs import pbs_datastore_status, pbs_list_backups, pbs_list_tasks
+def mcp_client_label() -> str:
+    """The caller's client label: ``request.state.mcp_client`` as the access check set it.
 
-    @mcp.tool(name="pbs_datastore_status", description=pbs_datastore_status.description)
-    async def pbs_datastore_status_mcp() -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(pbs_datastore_status)
-
-    @mcp.tool(name="pbs_list_backups", description=pbs_list_backups.description)
-    async def pbs_list_backups_mcp(datastore: str | None = None) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(pbs_list_backups, datastore=datastore)
-
-    @mcp.tool(name="pbs_list_tasks", description=pbs_list_tasks.description)
-    async def pbs_list_tasks_mcp(limit: int = 20, errors_only: bool = False) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await _call_async(pbs_list_tasks, limit=limit, errors_only=errors_only)
-
-
-def _register_runbook_tools(mcp: FastMCP) -> None:
+    ``unknown`` for an HTTP request without one, ``in-process`` for a call with no HTTP request (a test, or a client
+    in the same process).
+    """
     try:
-        from src.agent.retrieval.runbooks import runbook_search
-    except Exception:
-        return
-
-    @mcp.tool(name="runbook_search", description=runbook_search.description)
-    async def runbook_search_mcp(query: str, num_results: int = 4) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await asyncio.to_thread(_call_sync, runbook_search, query=query, num_results=num_results)
+        request = get_http_request()
+    except RuntimeError:
+        return "in-process"
+    client = getattr(request.state, STATE_CLIENT, None)
+    return client if isinstance(client, str) and client else "unknown"
 
 
-def _register_conversation_tools(mcp: FastMCP, history_dir: str) -> None:
-    import json
+def mcp_identity_ref() -> str | None:
+    """``request.state.mcp_identity_ref``: set by the access check for a verified caller only, else ``None``."""
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return None
+    ref = getattr(request.state, STATE_IDENTITY_REF, None)
+    return ref if isinstance(ref, str) and ref else None
 
-    from src.agent.history import (
-        get_conversation,
-        list_conversations,
-    )
-    from src.agent.tools import HOMELAB_CONTEXT
 
-    @mcp.tool(
-        name="sre_agent_list_conversations",
-        description=(
-            HOMELAB_CONTEXT + "List recent conversations the deployed SRE agent has had via the web UI or API. "
-            "Returns session IDs, titles (derived from the first user message), timestamps, "
-            "turn counts, and which LLM model/provider was used. "
-            "Most-recently-updated conversations appear first. "
-            "Use this to find a specific past conversation, then call sre_agent_get_conversation "
-            "with its session_id to read the full dialogue."
-        ),
-    )
-    async def sre_agent_list_conversations_mcp(limit: int = 20) -> str:  # pyright: ignore[reportUnusedFunction]
-        items = list_conversations(history_dir)
-        items = items[:limit]
-        if not items:
-            return "No conversations found."
-        lines = [f"Found {len(items)} conversation(s):\n"]
-        for item in items:
-            lines.append(
-                f"  [{item['session_id']}] {item['title'] or '(untitled)'} "
-                f"— {item['turn_count']} turn(s), {item['provider']}/{item['model']}, "
-                f"updated {item['updated_at']}"
+def _result_chars(result: Any) -> int:
+    """The total length of the text blocks in a tool result (0 for a background-task handle)."""
+    content = getattr(result, "content", None) or []
+    return sum(len(text) for block in content if isinstance(text := getattr(block, "text", None), str))
+
+
+class ToolCallObserver(Middleware):
+    """Times each ``tools/call``, then writes its log line and metrics with ``source=mcp``.
+
+    A failed call is classified (unknown tool, invalid arguments, timeout, the tool's own error, or internal) and
+    the exception re-raised unchanged, so the client gets the same error result as without the observer.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        name = context.message.name
+        arguments = context.message.arguments or {}
+        client = mcp_client_label()
+        ref = mcp_identity_ref()
+        start = time.monotonic()
+        try:
+            result = await call_next(context)
+        except Exception as e:
+            outcome, decided_by = classify_tool_error(e)
+            observe_tool_call(
+                tool=name,
+                source="mcp",
+                client=client,
+                outcome=outcome,
+                error_class=type(decided_by).__name__,
+                error=decided_by,
+                duration_s=time.monotonic() - start,
+                result_chars=0,
+                arguments=arguments,
+                identity_ref=ref,
             )
-        return "\n".join(lines)
-
-    @mcp.tool(
-        name="sre_agent_get_conversation",
-        description=(
-            HOMELAB_CONTEXT + "Retrieve the full dialogue of a specific deployed SRE agent conversation by session ID. "
-            "Returns all user and assistant turns with timestamps. "
-            "Use sre_agent_list_conversations first to find the session_id you need."
-        ),
-    )
-    async def sre_agent_get_conversation_mcp(session_id: str) -> str:  # pyright: ignore[reportUnusedFunction]
-        data = get_conversation(history_dir, session_id)
-        if data is None:
-            return f"Conversation '{session_id}' not found."
-        return json.dumps(data, indent=2, default=str)
-
-
-def _register_memory_tools(mcp: FastMCP) -> None:
-    try:
-        from src.memory.store import is_memory_configured
-
-        if not is_memory_configured():
-            return
-
-        from src.memory.tools import (
-            memory_check_baseline,
-            memory_get_previous_report,
-            memory_record_incident,
-            memory_search_incidents,
+            raise
+        observe_tool_call(
+            tool=name,
+            source="mcp",
+            client=client,
+            outcome="success",
+            error_class=None,
+            error=None,
+            duration_s=time.monotonic() - start,
+            result_chars=_result_chars(result),
+            arguments=arguments,
+            identity_ref=ref,
         )
-    except Exception:
-        return
-
-    @mcp.tool(name="memory_search_incidents", description=memory_search_incidents.description)
-    async def memory_search_incidents_mcp(  # pyright: ignore[reportUnusedFunction]
-        query: str | None = None,
-        alert_name: str | None = None,
-        service: str | None = None,
-        limit: int = 10,
-    ) -> str:
-        return await asyncio.to_thread(
-            _call_sync, memory_search_incidents, query=query, alert_name=alert_name, service=service, limit=limit
-        )
-
-    @mcp.tool(name="memory_record_incident", description=memory_record_incident.description)
-    async def memory_record_incident_mcp(  # pyright: ignore[reportUnusedFunction]
-        title: str,
-        description: str,
-        alert_name: str | None = None,
-        root_cause: str | None = None,
-        resolution: str | None = None,
-        severity: str = "info",
-        services: str = "",
-    ) -> str:
-        return await asyncio.to_thread(
-            _call_sync,
-            memory_record_incident,
-            title=title,
-            description=description,
-            alert_name=alert_name,
-            root_cause=root_cause,
-            resolution=resolution,
-            severity=severity,
-            services=services,
-        )
-
-    @mcp.tool(name="memory_get_previous_report", description=memory_get_previous_report.description)
-    async def memory_get_previous_report_mcp(count: int = 1) -> str:  # pyright: ignore[reportUnusedFunction]
-        return await asyncio.to_thread(_call_sync, memory_get_previous_report, count=count)
-
-    @mcp.tool(name="memory_check_baseline", description=memory_check_baseline.description)
-    async def memory_check_baseline_mcp(  # pyright: ignore[reportUnusedFunction]
-        metric_name: str, current_value: float, labels: str | None = None
-    ) -> str:
-        return await asyncio.to_thread(
-            _call_sync, memory_check_baseline, metric_name=metric_name, current_value=current_value, labels=labels
-        )
-
-
-# ---------------------------------------------------------------------------
-# Server builder
-# ---------------------------------------------------------------------------
+        return result
 
 
 def build_fastmcp_server(settings: Settings | None = None) -> FastMCP:
-    """Build a FastMCP server with all conditionally-registered SRE tools.
-
-    Follows the same conditional registration logic as ``build_mcp_server()``
-    in ``src/agent/mcp_tools.py`` and ``_get_tools()`` in ``src/agent/agent.py``.
-
-    The server uses ``ToolException`` from LangChain tools as the error signal.
-    FastMCP's ``@mcp.tool`` decorator catches exceptions and returns them as
-    MCP error results automatically.
-    """
+    """Build the FastMCP server from the registry's ``mcp`` surface, as ``settings`` enables it."""
     if settings is None:
         settings = get_settings()
 
-    mcp = FastMCP("sre-assistant")
-
-    # Always-on tools
-    _register_prometheus_tools(mcp)
-    _register_grafana_alert_tools(mcp)
-    _register_grafana_dashboard_tools(mcp)
-
-    # Conditional tools
-    if settings.proxmox_url:
-        _register_proxmox_tools(mcp)
-        logger.info("MCP: Proxmox VE tools registered")
-    else:
-        logger.info("MCP: Proxmox VE tools disabled — PROXMOX_URL not set")
-
-    if settings.truenas_url:
-        _register_truenas_tools(mcp)
-        if settings.prometheus_url:
-            _register_disk_status_tools(mcp)
-        logger.info("MCP: TrueNAS tools registered")
-    else:
-        logger.info("MCP: TrueNAS tools disabled — TRUENAS_URL not set")
-
-    if settings.loki_url:
-        _register_loki_tools(mcp)
-        logger.info("MCP: Loki tools registered")
-    else:
-        logger.info("MCP: Loki tools disabled — LOKI_URL not set")
-
-    if settings.pbs_url:
-        _register_pbs_tools(mcp)
-        logger.info("MCP: PBS tools registered")
-    else:
-        logger.info("MCP: PBS tools disabled — PBS_URL not set")
-
-    _register_runbook_tools(mcp)
-    _register_memory_tools(mcp)
-
-    if settings.conversation_history_dir:
-        _register_conversation_tools(mcp, settings.conversation_history_dir)
-        logger.info("MCP: Conversation history tools registered")
-
+    mcp = FastMCP("sre-assistant", middleware=[ToolCallObserver()])
+    specs = enabled_specs(settings, "mcp")
+    for spec in specs:
+        mcp.add_tool(RegistryTool.from_spec(spec))
+    logger.info("MCP: %d tools registered", len(specs))
     return mcp

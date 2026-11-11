@@ -130,6 +130,10 @@ def mock_settings() -> Generator[Any]:
             "gatus_public_url": "https://status.example.com",
             "pushover_app_token": "a-fake-pushover-app-token",
             "pushover_user_key": "u-fake-pushover-user-key",
+            # Cloudflare Access check on /mcp (no AUD = nothing to verify against)
+            "mcp_access_mode": "log",
+            "mcp_cf_access_aud": "",
+            "mcp_client_names": "",
         },
     )()
     patch_sites = [
@@ -145,6 +149,7 @@ def mock_settings() -> Generator[Any]:
         "src.agent.llm.get_settings",
         "src.agent.tools.disk_status.get_settings",
         "src.agent.tools.clock.get_settings",
+        "src.agent.tools.conversations.get_settings",
         "src.agent.retrieval.embeddings.get_settings",
         "src.api.main.get_settings",
         "src.report.generator.get_settings",
@@ -163,6 +168,8 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.access.get_settings",
         "src.upgrades.deploy.get_settings",
         "src.api.upgrades.get_settings",
+        "src.api.mcp_identity.get_settings",
+        "src.api.mcp_access.get_settings",
         "src.api.incidents.get_settings",
         "src.incidents.evidence.get_settings",
         "src.incidents.verdict.get_settings",

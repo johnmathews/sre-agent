@@ -250,6 +250,12 @@ async def _collect_alert_summary(lookback_days: int) -> AlertSummaryData:
     )
 
 
+# Tool call statuses that are the client's mistake (bad arguments, a made-up tool name). They count against neither
+# side of the tool success ratio; error, timeout and internal are the service's failures.
+CLIENT_ERROR_STATUSES = "invalid_args|unknown_tool"
+_NOT_FAILURE_STATUSES = f"success|{CLIENT_ERROR_STATUSES}"
+
+
 async def _collect_slo_status(lookback_days: int) -> SLOStatusData:
     """Collect SLO metrics from Prometheus over the lookback window."""
     settings = get_settings()
@@ -263,10 +269,12 @@ async def _collect_slo_status(lookback_days: int) -> SLOStatusData:
         )
         p95 = _scalar_value(p95_results)
 
-        # Tool success rate: 1 - (errors / total)
-        tool_total = await _prom_query(client, url, f"sum(increase(sre_assistant_tool_calls_total[{window}]))")
+        # Tool success rate: 1 - (service failures / calls that were not client mistakes)
+        tool_total = await _prom_query(
+            client, url, f'sum(increase(sre_assistant_tool_calls_total{{status!~"{CLIENT_ERROR_STATUSES}"}}[{window}]))'
+        )
         tool_errors = await _prom_query(
-            client, url, f'sum(increase(sre_assistant_tool_calls_total{{status="error"}}[{window}]))'
+            client, url, f'sum(increase(sre_assistant_tool_calls_total{{status!~"{_NOT_FAILURE_STATUSES}"}}[{window}]))'
         )
         total_val = _scalar_value(tool_total)
         error_val = _scalar_value(tool_errors)
@@ -320,11 +328,8 @@ async def _collect_tool_usage(lookback_days: int) -> ToolUsageData:
         total_results = await _prom_query(
             client, url, f"sum by (tool_name) (increase(sre_assistant_tool_calls_total[{window}]))"
         )
-        error_results = await _prom_query(
-            client,
-            url,
-            f'sum by (tool_name) (increase(sre_assistant_tool_calls_total{{status="error"}}[{window}]))',
-        )
+        failures = f'sre_assistant_tool_calls_total{{status!~"{_NOT_FAILURE_STATUSES}"}}'
+        error_results = await _prom_query(client, url, f"sum by (tool_name) (increase({failures}[{window}]))")
 
     tool_calls: dict[str, int] = {}
     for r in total_results:
@@ -1419,7 +1424,7 @@ def _load_previous_report() -> str | None:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Could not load previous report from memory store")
+        logger.warning("Could not load previous report from memory store", exc_info=True)
         return None
 
 
@@ -1454,7 +1459,7 @@ def _archive_report(report_data: ReportData, markdown: str) -> None:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to archive report to memory store")
+        logger.warning("Failed to archive report to memory store", exc_info=True)
 
 
 async def _compute_post_report_baselines(lookback_days: int) -> None:

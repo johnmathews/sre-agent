@@ -15,8 +15,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from jwt.algorithms import ECAlgorithm
 
 from src.upgrades import access
-from src.upgrades.access import AccessDenied, verify_access_jwt
-from tests.upgrades_access_helpers import AUD, CERTS_URL, EMAIL, TEAM, Signer, jwks
+from src.upgrades.access import AccessDenied, AccessIdentity, verify_access_identity, verify_access_jwt
+from tests.upgrades_access_helpers import AUD, CERTS_URL, EMAIL, SERVICE_CLIENT_ID, TEAM, Signer, jwks
 
 K1 = Signer("k1")
 K2 = Signer("k2")
@@ -337,3 +337,121 @@ async def test_token_never_logged(caplog: pytest.LogCaptureFixture) -> None:
         await verify_access_jwt(token)
     assert caplog.records, "a rejection must be logged"
     assert all(token not in r.getMessage() and token.split(".")[1] not in r.getMessage() for r in caplog.records)
+
+
+# --- Service tokens and the identity variant (MCP client identity) ---
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_service_token_rejected_for_approval() -> None:
+    """A service token (``common_name``, no ``email``) must never pass the approval check."""
+    _certs(K1)
+    with pytest.raises(AccessDenied, match="no usable email claim"):
+        await verify_access_jwt(K1.service_token())
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_accepts_service_token_common_name() -> None:
+    _certs(K1)
+    identity = await verify_access_identity(K1.service_token(), [AUD])
+    assert identity == AccessIdentity(kind="service", value=SERVICE_CLIENT_ID)
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_accepts_email() -> None:
+    _certs(K1)
+    assert await verify_access_identity(K1.token(), [AUD]) == AccessIdentity(kind="user", value=EMAIL)
+    # A token carrying both is a person: email wins.
+    both = K1.token(common_name=SERVICE_CLIENT_ID)
+    assert await verify_access_identity(both, [AUD]) == AccessIdentity(kind="user", value=EMAIL)
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_rejects_wrong_aud_list() -> None:
+    _certs(K1)
+    with pytest.raises(AccessDenied, match="InvalidAudienceError"):
+        await verify_access_identity(K1.service_token(), ["some-other-app", "another-app"])
+    # Any one of several configured audiences is enough.
+    other = K1.service_token(aud=["second-app"])
+    assert (await verify_access_identity(other, [AUD, "second-app"])).kind == "service"
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_does_not_read_the_approval_audience(mock_settings: Any) -> None:
+    """No fallback to CF_ACCESS_AUD: an empty audience list is a misconfiguration, even with CF_ACCESS_AUD set."""
+    route = _certs(K1)
+    assert mock_settings.cf_access_aud == AUD
+    with pytest.raises(AccessDenied, match="MCP_CF_ACCESS_AUD is empty"):
+        await verify_access_identity(K1.service_token(), [])
+    with pytest.raises(AccessDenied, match="MCP_CF_ACCESS_AUD is empty"):
+        await verify_access_identity(K1.service_token(), ["", ""])
+    assert route.call_count == 0
+
+
+@pytest.mark.integration
+@respx.mock
+@pytest.mark.parametrize("common_name", [None, "", "x" * 257, 12345])
+async def test_identity_rejects_token_without_usable_identity(common_name: object) -> None:
+    _certs(K1)
+    with pytest.raises(AccessDenied, match="no usable email or common_name claim"):
+        await verify_access_identity(K1.service_token(common_name=common_name), [AUD])
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_accepts_common_name_at_the_length_limit() -> None:
+    _certs(K1)
+    identity = await verify_access_identity(K1.service_token(common_name="x" * 256), [AUD])
+    assert identity == AccessIdentity(kind="service", value="x" * 256)
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_shares_the_signature_and_issuer_checks() -> None:
+    _certs(K1)
+    forged = jwt.encode(
+        K1.claims(email=None, common_name=SERVICE_CLIENT_ID), K2.key, algorithm="RS256", headers={"kid": "k1"}
+    )
+    with pytest.raises(AccessDenied):
+        await verify_access_identity(forged, [AUD])
+    with pytest.raises(AccessDenied):
+        await verify_access_identity(K1.service_token(iss="https://evil.cloudflareaccess.com"), [AUD])
+    with pytest.raises(AccessDenied):
+        await verify_access_identity(None, [AUD])
+    with pytest.raises(AccessDenied, match="token too long"):
+        await verify_access_identity("x" * (access.MAX_TOKEN_CHARS + 1), [AUD])
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_config_error_log_names_its_context(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    mock_settings.cf_access_team_domain = ""
+    caplog.set_level(logging.ERROR, logger="src.upgrades.access")
+    for _ in range(2):
+        with pytest.raises(AccessDenied):
+            await verify_access_jwt(K1.token())
+        with pytest.raises(AccessDenied):
+            await verify_access_identity(K1.service_token(), [AUD])
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert messages == [
+        "Cloudflare Access verification misconfigured (CF_ACCESS_TEAM_DOMAIN is empty); "
+        "every approval request is denied",
+        "Cloudflare Access verification misconfigured (CF_ACCESS_TEAM_DOMAIN is empty); no /mcp caller can be verified",
+    ]
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_identity_rejection_logs_nothing_and_repr_hides_value(caplog: pytest.LogCaptureFixture) -> None:
+    _certs(K1)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(AccessDenied):
+        await verify_access_identity(K1.service_token(aud=["wrong"]), [AUD])
+    assert not [r for r in caplog.records if r.name == "src.upgrades.access"]
+    identity = await verify_access_identity(K1.service_token(), [AUD])
+    assert SERVICE_CLIENT_ID not in repr(identity)

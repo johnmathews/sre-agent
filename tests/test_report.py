@@ -1,6 +1,11 @@
-"""Unit tests for the report module — pure function tests, no I/O."""
+"""Unit tests for the report module — pure function tests, no I/O (except the respx-mocked SLI query test)."""
 
+import re
 from typing import Any
+
+import httpx
+import pytest
+import respx
 
 from src.report.email import is_email_configured
 from src.report.generator import (
@@ -14,6 +19,8 @@ from src.report.generator import (
     SLOStatusData,
     ToolUsageData,
     _aggregate_by_normalized_name,
+    _collect_slo_status,
+    _collect_tool_usage,
     _format_slo_row,
     _normalize_service_name,
     format_report_html,
@@ -432,3 +439,71 @@ class TestIsEmailConfigured:
     def test_missing_recipient(self, mock_settings: Any) -> None:
         mock_settings.report_recipient_email = ""
         assert is_email_configured() is False
+
+
+# ---------------------------------------------------------------------------
+# Tool success excludes client errors
+# ---------------------------------------------------------------------------
+
+# Calls in the window by (tool_name, status). invalid_args and unknown_tool are the client's mistakes.
+_TOOL_CALLS: dict[tuple[str, str], float] = {
+    ("prometheus_instant_query", "success"): 95.0,
+    ("prometheus_instant_query", "timeout"): 1.0,
+    ("prometheus_instant_query", "invalid_args"): 40.0,
+    ("grafana_get_alerts", "error"): 3.0,
+    ("grafana_get_alerts", "internal"): 1.0,
+    ("unknown", "unknown_tool"): 10.0,
+}
+_SELECTOR = re.compile(r"sre_assistant_tool_calls_total(?:\{([^}]*)\})?\[")
+_MATCHER = re.compile(r'(\w+)(=~|!~|!=|=)"([^"]*)"')
+
+
+def _matches(op: str, actual: str, wanted: str) -> bool:
+    if op == "=":
+        return actual == wanted
+    if op == "!=":
+        return actual != wanted
+    hit = re.fullmatch(wanted, actual) is not None
+    return hit if op == "=~" else not hit
+
+
+def _fake_prometheus(request: httpx.Request) -> httpx.Response:
+    """Answer ``sum[ by (tool_name)](increase(sre_assistant_tool_calls_total{...}[w]))`` from ``_TOOL_CALLS``."""
+    query = request.url.params["query"]
+    selector = _SELECTOR.search(query)
+    result: list[dict[str, object]] = []
+    if selector:
+        matchers = _MATCHER.findall(selector.group(1) or "")
+        sums: dict[str, float] = {}
+        for (tool, status), value in _TOOL_CALLS.items():
+            labels = {"tool_name": tool, "status": status}
+            if all(_matches(op, labels[name], wanted) for name, op, wanted in matchers):
+                key = tool if "by (tool_name)" in query else ""
+                sums[key] = sums.get(key, 0.0) + value
+        result = [
+            {"metric": {"tool_name": key} if key else {}, "value": [1708300000, str(value)]}
+            for key, value in sums.items()
+        ]
+    return httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": result}})
+
+
+@pytest.mark.integration
+class TestToolSuccessExcludesClientErrors:
+    @respx.mock
+    async def test_report_tool_success_excludes_client_errors(self, mock_settings: Any) -> None:
+        """95 successes over the 100 calls that were not client mistakes: 95%, not 1 - 3/150."""
+        respx.get("http://prometheus.test:9090/api/v1/query").mock(side_effect=_fake_prometheus)
+
+        result = await _collect_slo_status(7)
+
+        assert result["tool_success_rate"] == pytest.approx(0.95)
+
+    @respx.mock
+    async def test_report_tool_errors_are_service_failures(self, mock_settings: Any) -> None:
+        """Per-tool errors are error, timeout and internal; every call still counts towards the tool's total."""
+        respx.get("http://prometheus.test:9090/api/v1/query").mock(side_effect=_fake_prometheus)
+
+        result = await _collect_tool_usage(7)
+
+        assert result["tool_errors"] == {"prometheus_instant_query": 1, "grafana_get_alerts": 4}
+        assert result["tool_calls"] == {"prometheus_instant_query": 136, "grafana_get_alerts": 4, "unknown": 10}

@@ -52,7 +52,7 @@ def get_open_incidents_context() -> str:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to load open incidents for context", exc_info=True)
+        logger.warning("Failed to load open incidents for context", exc_info=True)
         return ""
 
 
@@ -83,7 +83,7 @@ def get_recent_patterns_context() -> str:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to load query patterns for context", exc_info=True)
+        logger.warning("Failed to load query patterns for context", exc_info=True)
         return ""
 
 
@@ -128,7 +128,7 @@ def enrich_alerts_with_incident_history(
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to enrich alerts with incident history", exc_info=True)
+        logger.warning("Failed to enrich alerts with incident history", exc_info=True)
         return formatted_alerts
 
 
@@ -175,7 +175,7 @@ def enrich_with_baseline_context(
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to enrich with baseline context", exc_info=True)
+        logger.warning("Failed to enrich with baseline context", exc_info=True)
         return formatted_result
 
 

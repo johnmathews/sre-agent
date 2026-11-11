@@ -253,10 +253,122 @@ class TestHealthEndpoint:
             resp = client.get("/health")
 
         body = resp.json()
-        # MCP is always healthy (always mounted), so status is degraded not unhealthy
+        # The lifespan's MCP server lists all its tools, so status is degraded not unhealthy
         assert body["status"] == "degraded"
         non_mcp = [c for c in body["components"] if c["name"] != "mcp_server"]
         assert all(c["status"] == "unhealthy" for c in non_mcp)
+
+
+def _mock_dependencies_healthy() -> None:
+    """Every HTTP dependency /health pings answers 200 (inside a respx mock)."""
+    respx.route().mock(return_value=httpx.Response(200, json={}))
+
+
+def _mcp_component(client: TestClient) -> dict[str, Any]:
+    with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
+        mock_chroma_dir.is_dir.return_value = True
+        body = client.get("/health").json()
+    others = [c for c in body["components"] if c["name"] != "mcp_server"]
+    assert all(c["status"] == "healthy" for c in others), others
+    [mcp] = [c for c in body["components"] if c["name"] == "mcp_server"]
+    mcp["overall"] = body["status"]
+    return mcp
+
+
+class TestHealthMcpServer:
+    """mcp_server is healthy only when the server and its dispatch target exist and it lists every registered tool."""
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_health_mcp_healthy_lists_every_registered_tool(self, client: TestClient) -> None:
+        """Pin: the server the lifespan builds is healthy, so Gatus and Docker keep seeing a healthy /health."""
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        assert app.state.mcp_expected_tools > 0
+
+        mcp = _mcp_component(client)
+
+        assert mcp["status"] == "healthy"
+        assert mcp["overall"] == "healthy"
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_health_mcp_unhealthy_when_no_tools(self, client: TestClient) -> None:
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        with patch.object(app.state.mcp_server, "list_tools", new_callable=AsyncMock, return_value=[]):
+            mcp = _mcp_component(client)
+
+        assert mcp["status"] == "unhealthy"
+        assert mcp["overall"] == "degraded"
+        assert mcp["detail"] == f"0 tools listed, {app.state.mcp_expected_tools} registered"
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_health_mcp_unhealthy_when_tool_missing(self, client: TestClient) -> None:
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        expected = app.state.mcp_expected_tools
+        listed = [object()] * (expected - 1)
+        with patch.object(app.state.mcp_server, "list_tools", new_callable=AsyncMock, return_value=listed):
+            mcp = _mcp_component(client)
+
+        assert mcp["status"] == "unhealthy"
+        assert mcp["detail"] == f"{expected - 1} tools listed, {expected} registered"
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_health_mcp_unhealthy_when_none_registered(self, client: TestClient) -> None:
+        """An expected count of 0 is never healthy, even when the server lists 0 tools."""
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        expected = app.state.mcp_expected_tools
+        app.state.mcp_expected_tools = 0
+        try:
+            with patch.object(app.state.mcp_server, "list_tools", new_callable=AsyncMock, return_value=[]):
+                mcp = _mcp_component(client)
+        finally:
+            app.state.mcp_expected_tools = expected
+
+        assert mcp["status"] == "unhealthy"
+        assert mcp["detail"] == "no MCP tools registered"
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_health_mcp_unhealthy_when_list_tools_fails(self, client: TestClient) -> None:
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        with patch.object(
+            app.state.mcp_server, "list_tools", new_callable=AsyncMock, side_effect=RuntimeError("broken")
+        ):
+            mcp = _mcp_component(client)
+
+        assert mcp["status"] == "unhealthy"
+        assert mcp["detail"] == "list_tools failed: RuntimeError"
+
+    @pytest.mark.integration
+    @respx.mock
+    @pytest.mark.parametrize("unset", ["mcp_server", "mcp_app"])
+    def test_health_mcp_unhealthy_when_not_started(self, client: TestClient, unset: str) -> None:
+        """Without the server or the dispatch target /mcp cannot answer, so the component is unhealthy."""
+        from src.api.main import app
+
+        _mock_dependencies_healthy()
+        saved = getattr(app.state, unset)
+        setattr(app.state, unset, None)
+        try:
+            mcp = _mcp_component(client)
+        finally:
+            setattr(app.state, unset, saved)
+
+        assert mcp["status"] == "unhealthy"
+        assert mcp["detail"] == "MCP server not started"
+        assert mcp["overall"] == "degraded"
 
 
 # ---------------------------------------------------------------------------

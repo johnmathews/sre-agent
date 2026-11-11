@@ -227,35 +227,76 @@ Code, Claude Desktop, Cursor) to call individual tools directly without going th
 
 ### Configuration
 
-The MCP endpoint is always enabled at `/mcp`. Auth is handled externally by Cloudflare Access.
+The MCP endpoint is always enabled at `/mcp`. Cloudflare Access sits in front of it on the tunnel, and the app checks
+the Access JWT itself (see [Access check](#access-check)), because the container port is also reachable on the LAN.
 
 ```bash
-# Add to Claude Code (external access via Cloudflare tunnel)
+# Add to Claude Code (external access via Cloudflare tunnel, with an Access service token)
 claude mcp add --transport http \
   --header "CF-Access-Client-Id: <id>" \
   --header "CF-Access-Client-Secret: <secret>" \
-  -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
+  -- sre-agent https://<sre-mcp-host>/mcp
 ```
+
+### Access check
+
+`McpAccessCheck` (`src/api/mcp_access.py`) is ASGI middleware inside the mounted FastMCP app, passed to
+`http_app(middleware=...)`, so it runs on every HTTP request to `/mcp` before the MCP transport. It reads the
+`Cf-Access-Jwt-Assertion` header that Cloudflare Access adds and verifies it with
+`src/upgrades/access.py:verify_access_identity` against the AUD tags in `MCP_CF_ACCESS_AUD` and the team domain in
+`CF_ACCESS_TEAM_DOMAIN`. A verified JWT names the caller: a person's `email` or a service token's `common_name` (its
+Client ID). `MCP_CLIENT_NAMES` maps that identity to a client name (`src/api/mcp_identity.py:client_label`).
+
+`MCP_ACCESS_MODE` picks what happens:
+
+| Mode | Valid JWT | No JWT / invalid JWT |
+| --- | --- | --- |
+| `off` | not checked; client `unknown` | passes; client `unknown` |
+| `log` (default) | passes; client = mapped name or `unmapped-service-token` / `unmapped-user` | passes; client `anonymous` / `invalid`, one WARNING per (peer, reason) per 10 minutes |
+| `enforce` | passes; client as in `log` | 403 `{"error":"Cloudflare Access JWT required"}`, same WARNING |
+
+- The mode and configuration are read once, when the lifespan builds the MCP app, and logged at INFO:
+  `MCP access check: mode=log aud_configured=yes team_domain_configured=yes client_names=2`.
+- `enforce` with an empty `MCP_CF_ACCESS_AUD` or `CF_ACCESS_TEAM_DOMAIN` logs an ERROR at startup, and `/mcp` answers
+  503 `{"error":"MCP access check misconfigured"}` while the rest of the app keeps running.
+- `log` with either one empty logs one WARNING at startup and then checks nothing, like `off`.
+- A verified request also carries `identity_ref` (sha256[:8] of the identity) into its `tool_call` lines. Neither the
+  token, its claims nor the raw identity is ever logged or used as a label.
+- `sre_assistant_mcp_http_requests_total{client, access}` counts every HTTP request to `/mcp`. `access` is `verified`,
+  `missing` (no header), `invalid` (a header that failed verification), `unconfigured` (no AUD or team domain) or
+  `off`.
+- The mode switches back with `MCP_ACCESS_MODE=off` and a restart. The plan is to run `log` until only expected
+  clients show as `verified`, then switch to `enforce`.
 
 ### Architecture
 
 - **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
-- **Auth:** Cloudflare Access (service token headers)
+- **Auth:** Cloudflare Access on the tunnel, and the in-app JWT check above (`MCP_ACCESS_MODE`)
 - **Mount:** a small ASGI shim, `MCPDispatch` in `src/api/main.py`, is mounted once on the FastAPI app at `/mcp` when
   the module is imported. It forwards to `app.state.mcp_app`, which the lifespan sets at startup and clears at
   shutdown, and answers 503 `{"error":"MCP server not started"}` while that is unset. A second lifespan (a restart,
   or `TestClient` entered twice) therefore serves a fresh MCP app instead of a stale one.
   `tests/test_mcp_http_integration.py` drives initialize, tools/list and tools/call over real HTTP.
-- **Tools:** Same LangChain tool functions used by the agent, wrapped as FastMCP tools, plus 2 conversation
-  history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) only available via MCP
-- **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their
-  URLs are configured
+- **Health:** `/health` reports the `mcp_server` component healthy only when the lifespan has set both
+  `app.state.mcp_server` and `app.state.mcp_app`, and `list_tools()` returns exactly `app.state.mcp_expected_tools`
+  tools, a count above zero that the lifespan takes from the registry's enabled `mcp` specs. Otherwise the component
+  is unhealthy with a detail (`MCP server not started`, `list_tools failed: <class>`, `no MCP tools registered` or
+  `<n> tools listed, <m> registered`), and the overall status drops to `degraded`.
+- **Tools:** One registry, `TOOL_SPECS` in `src/agent/tool_registry.py`, builds all three tool surfaces: `/mcp`, the
+  LangGraph agent's tools and the SDK agent's in-process `sre` server. Each surface shows the same names, descriptions
+  and input schemas, and every call is validated against the schema before the tool runs.
+  `tests/test_tool_registry.py::test_surfaces_built_from_registry` fails if the surfaces drift apart. The 2
+  conversation history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) are only on `/mcp`.
+- **Conditional registration:** Each spec carries its enabling condition. Proxmox, TrueNAS, Loki, PBS, memory and
+  conversation tools are registered only when their settings are configured, and each disabled group is logged once
+  at INFO. A tool module that fails to import fails startup.
 
 ### Security
 
-The MCP endpoint exposes raw tool calls — any connected client can execute arbitrary PromQL
-(`prometheus_instant_query`) or LogQL (`loki_query_logs`). Restrict access to the local network or Tailscale. Do not
-expose through the public Cloudflare tunnel without additional auth (OAuth).
+The MCP endpoint exposes raw tool calls: any caller it accepts can run arbitrary PromQL (`prometheus_instant_query`) or
+LogQL (`loki_query_logs`). Cloudflare Access guards the tunnel route. The container port is also open on the LAN, so
+only `MCP_ACCESS_MODE=enforce` refuses a LAN caller without a valid Access JWT; `log` mode names callers but refuses
+none.
 
 ## Self-Instrumentation (Observability)
 
@@ -273,7 +314,49 @@ inherit the root level of WARNING: their per-request INFO lines stay hidden, the
 `fastmcp` has its Rich handler removed and propagates to the root handler, so its lines use the same format. A filter
 on that handler drops FastMCP's "Error calling tool" and "Error validating tool" tracebacks when the exception is a
 `ToolException`, a pydantic `ValidationError` or a `ToolError` wrapping one; unexpected exceptions keep their
-traceback.
+traceback. FastMCP logs a raised `ToolError` at the error's own level, with no traceback, so the registry raises
+expected tool errors (bad arguments, a tool's own failure) at DEBUG: the `tool_call` line below is their one record.
+
+### Tool call log line
+
+Every tool call writes exactly one line on the `src.observability.tool_calls` logger, from
+`src/observability/tool_calls.py:observe_tool_call`, which records the tool metrics in the same call:
+
+```
+tool_call tool=loki_query_logs source=mcp client=claude-code outcome=success duration_ms=184 result_chars=5120 args="limit=50 query='{job=\"nginx\"}'" identity_ref=1a2b3c4d
+tool_call tool=prometheus_range_query source=agent client=agent outcome=error duration_ms=12 result_chars=0 args="end='now' query='up' start='bad'" error_class=ToolException error="Invalid range query parameters: …"
+```
+
+- **`source`**: `mcp` for a call on `/mcp`, `agent` for the chat agent's own calls (the SDK tool server and the
+  LangGraph callback both use it).
+- **`client`**: who called. `agent` on the agent path. On `/mcp` the access check sets it in
+  `request.state.mcp_client`: the mapped client name, `unmapped-service-token` or `unmapped-user` for a verified JWT,
+  `anonymous` (no JWT) or `invalid` (a JWT that failed), and `unknown` when the check is off or unconfigured.
+  `in-process` means the call has no HTTP request (a test or an in-process client). Client values are fixed labels,
+  never a raw identity.
+- **`identity_ref`**: on a verified `/mcp` call only, sha256[:8] of the caller's identity, so one caller's lines can be
+  matched without naming it. Never a metric label.
+- **`outcome`**: `success`, `error` (the tool's own failure, a `ToolException`), `invalid_args` (argument validation or
+  an unknown argument name), `unknown_tool`, `timeout` (an `httpx.TimeoutException`) or `internal` (anything else).
+  `internal` logs at ERROR with the traceback; every other outcome logs at INFO.
+- **`args`**: the arguments, keys sorted, strings in single quotes, numbers and booleans bare, lists and objects as their
+  type name (`list`, `dict`). Control characters become spaces, each value is cut to 80 characters and the whole summary
+  to 400. Inside the quotes `"` and `\` are escaped, so `| logfmt` in Loki parses the line.
+- **`error_class`** and **`error`** appear only on a failure: the class of the exception that decided the outcome (the
+  wrapped cause where FastMCP wraps one) and its message, cut to 200 characters.
+- The tool's result is never logged, only its length (`result_chars`, 0 on a failure).
+
+On `/mcp`, `ToolCallObserver` (a FastMCP `Middleware` in `src/api/mcp_server.py`) times each `tools/call`, sums the text
+of the result and classifies an exception before re-raising it, so the client still gets the same error. The SDK tool
+server's handler (`src/agent/mcp_tools.py`) and the LangGraph callback (`src/observability/callbacks.py`) write the
+same line with `source=agent client=agent`.
+
+**Limit:** on the SDK path the `mcp` library behind `create_sdk_mcp_server` validates arguments against the tool's
+`inputSchema` before the handler runs. A call with an out-of-range value, a wrong type or an unknown argument name is
+refused there and writes no line. `/mcp` validates inside the tool, so its `invalid_args` calls are all logged.
+
+Metric labels stay bounded: `tool_name` is `unknown` for an `unknown_tool` call (the name the client sent appears only
+in the log line), and `client` holds only fixed values.
 
 ### Metrics
 
@@ -282,12 +365,15 @@ traceback.
 | `sre_assistant_request_duration_seconds`   | Histogram | `endpoint`                                             |
 | `sre_assistant_requests_total`             | Counter   | `endpoint`, `status`                                   |
 | `sre_assistant_requests_in_progress`       | Gauge     | `endpoint`                                             |
-| `sre_assistant_tool_call_duration_seconds` | Histogram | `tool_name`                                            |
-| `sre_assistant_tool_calls_total`           | Counter   | `tool_name`, `status`                                  |
+| `sre_assistant_tool_call_duration_seconds` | Histogram | `tool_name`, `source` (mcp/agent)                      |
+| `sre_assistant_tool_calls_total`           | Counter   | `tool_name`, `status` (the call's outcome), `source`, `client` |
+| `sre_assistant_tool_result_chars`          | Histogram | `tool_name`, `source` (successful calls only)          |
+| `sre_assistant_mcp_http_requests_total`    | Counter   | `client`, `access` (verified/missing/invalid/unconfigured/off) |
 | `sre_assistant_llm_calls_total`            | Counter   | `status`                                               |
 | `sre_assistant_llm_token_usage`            | Counter   | `type` (prompt/completion)                             |
 | `sre_assistant_llm_estimated_cost_dollars` | Counter   | —                                                      |
 | `sre_assistant_component_healthy`          | Gauge     | `component`                                            |
+| `sre_assistant_memory_store_enabled`       | Gauge     | — (1 = `MEMORY_DB_PATH` set and the database opened at startup; 0 = unset or failed to open) |
 | `sre_assistant_info`                       | Info      | `version`, `model`                                     |
 | `sre_assistant_reports_total`              | Counter   | `trigger` (scheduled/manual), `status` (success/error) |
 | `sre_assistant_report_duration_seconds`    | Histogram | —                                                      |
@@ -308,16 +394,21 @@ traceback.
 Three layers:
 
 1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons.
-   Twenty-two metrics are created once at import time and shared across the process. The twenty-third,
+   Twenty-four metrics are created once at import time and shared across the process. The twenty-fifth,
    `sre_assistant_claude_credentials_healthy`, is registered by the lifespan only on the anthropic path, because an
    unlabelled gauge exports 0 from the moment it exists and would read as "login needs renewing" where no login is
    in use. Histogram buckets are tuned for expected latencies:
-   request duration `[0.5s–60s]`, tool duration `[0.1s–15s]`.
+   request duration `[0.5s–60s]`, tool duration `[0.1s–15s]`, tool result size `[500–512k]` characters.
 
 2. **LangChain callback handler** (`src/observability/callbacks.py`) — `MetricsCallbackHandler(BaseCallbackHandler)`
    transparently captures tool calls and LLM usage inside LangGraph's execution loop. A fresh instance is created per
-   request (request-scoped `_start_times` dict) but writes to the shared module-level metric singletons. Key design
-   choices:
+   request (request-scoped `_start_times` dict) but writes to the shared module-level metric singletons. Each finished
+   tool call goes through `observe_tool_call`, so the LangGraph path writes the same log line and metrics as the SDK
+   tool server and `/mcp`. A tool with `handle_tool_error=True` turns its `ToolException` into a `ToolMessage` with
+   `status="error"` and LangGraph reports it through `on_tool_end`, so the handler records that call as outcome
+   `error`, `error_class=ToolException`, with the message text as `error`. On the SDK path,
+   `src/observability/sdk_metrics.py` records only LLM calls, tokens and cost; the SDK tool server's handler measures
+   each tool call itself. Key design choices:
    - **No tool code changes** — the handler hooks into LangGraph's callback system, so all 23 current tools (and any
      future tools) are automatically instrumented
    - **Works inside the agent loop** — LangGraph may call multiple tools in sequence before returning; the callback sees
@@ -330,13 +421,35 @@ Three layers:
    `/report` + `/metrics` endpoint + health gauge updates on `/health` + report metrics on `/report` + app info set at
    startup
 
+### SLIs
+
+Each SLI counts failures on every path, so each one can go red:
+
+- **Tool call success rate (> 99%):** `sre_assistant_tool_calls_total{status="success"}` divided by the calls whose
+  status is not `invalid_args` or `unknown_tool`, across both sources (`mcp` and `agent`). A client's bad arguments or
+  made-up tool name is the client's mistake, so it counts against neither side of the ratio; `error`, `timeout` and
+  `internal` count as failures. The dashboard, the weekly report and the memory store's baseline all use this
+  definition.
+- **LLM error rate (< 1%):** `sre_assistant_llm_calls_total{status="error"}` over all LLM calls. The LangGraph path
+  counts each model call through `on_llm_end` / `on_llm_error`. The SDK path counts one call per request: `error` when
+  the SDK returns no `ResultMessage`, returns one with `is_error`, or raises (counted once, in `stream_sdk_agent`'s
+  except branch or around `invoke_sdk_agent`'s query loop); otherwise `success`. A failure to record the SDK metrics
+  logs a WARNING.
+- **Availability (> 99.5%):** the average of `sre_assistant_component_healthy`, which `/health` sets for every
+  component it checks, `mcp_server` included (see [MCP Server Endpoint](#mcp-server-endpoint)).
+- **Latency p95:** recorded with no target.
+
 ### Grafana Dashboard
 
 `dashboards/sre-assistant-sli.json` provides a pre-built dashboard with:
 
-- SLO overview stats (availability, tool success rate, LLM success rate)
+- SLO overview stats (availability, tool success rate as defined above, LLM success rate)
 - Request latency percentiles (p50/p90/p95/p99)
-- Tool call rates and errors by tool name
+- Tool call rate by tool, service failures (`error`, `timeout`, `internal`) by tool and status, and call duration p95
+  by tool and source
+- Tool calls by `source` and by `client`
+- `/mcp` HTTP requests by Access result (`sre_assistant_mcp_http_requests_total`), which counts every HTTP request to
+  `/mcp` (initialize and tools/list too), not only tool calls
 - LLM token usage and estimated cost
 - Component health status
 
@@ -466,6 +579,19 @@ Phase 7 adds persistent memory via SQLite, enabling the agent to accumulate know
 
 SQLite database at the path configured by `MEMORY_DB_PATH` (empty = disabled). Uses WAL mode for concurrent reads,
 `CREATE TABLE IF NOT EXISTS` for idempotent schema initialization, and parameterized queries to prevent SQL injection.
+
+### Startup status
+
+`log_memory_status()` (`src/memory/store.py`) runs once in the app lifespan, beside the incident explainer status, and
+sets the `sre_assistant_memory_store_enabled` gauge:
+
+- `MEMORY_DB_PATH` empty: one WARNING naming `MEMORY_DB_PATH`, gauge 0. The store is off by choice, so request paths
+  return early and log nothing per request.
+- Path set and the database opens (a missing file is created, as on first use): INFO, gauge 1.
+- Path set but a directory, or any other open failure: ERROR (with the exception class), gauge 0.
+
+Once the store is configured, a failed read or write in the context helpers, the agent prompt builders or the report
+generator logs a WARNING with the traceback. `/health` does not report the memory store.
 
 ### Schema (4 tables)
 

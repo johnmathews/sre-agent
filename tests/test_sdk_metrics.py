@@ -1,9 +1,35 @@
 """Tests for SDK observability metrics extraction."""
 
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+import logging
+from unittest.mock import patch
 
-from src.observability.metrics import TOOL_CALL_DURATION
+import pytest
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+from prometheus_client import REGISTRY
+
 from src.observability.sdk_metrics import extract_tool_names, record_sdk_metrics
+
+
+def _llm_calls(status: str) -> float:
+    return REGISTRY.get_sample_value("sre_assistant_llm_calls_total", {"status": status}) or 0.0
+
+
+def _result(is_error: bool) -> ResultMessage:
+    return ResultMessage(
+        subtype="error_during_execution" if is_error else "success",
+        duration_ms=1000,
+        duration_api_ms=800,
+        is_error=is_error,
+        num_turns=1,
+        session_id="test",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 100, "output_tokens": 50},
+    )
+
+
+def _total(sample_name: str) -> float:
+    """The sum of every labelled sample with this name in the default registry."""
+    return sum(sample.value for metric in REGISTRY.collect() for sample in metric.samples if sample.name == sample_name)
 
 
 class TestExtractToolNames:
@@ -96,46 +122,61 @@ class TestRecordSdkMetrics:
     def test_handles_empty_messages(self) -> None:
         record_sdk_metrics([], None)
 
-    def test_records_tool_durations(self) -> None:
-        """Tool durations passed from the message loop are recorded in the histogram."""
-        messages = [
-            AssistantMessage(
-                content=[ToolUseBlock(id="1", name="mcp__sre__prometheus_instant_query", input={})],
-                model="claude-opus-4-6",
-            )
-        ]
-        # Get the sample count before
-        before = TOOL_CALL_DURATION.labels(tool_name="prometheus_instant_query")._sum.get()
-
-        tool_durations = [("prometheus_instant_query", 2.5)]
-        record_sdk_metrics(messages, None, tool_durations)
-
-        after = TOOL_CALL_DURATION.labels(tool_name="prometheus_instant_query")._sum.get()
-        assert after - before == 2.5
-
-    def test_records_multiple_tool_durations(self) -> None:
-        """Multiple tool durations from a single request are all recorded."""
+    def test_does_not_count_tool_calls(self) -> None:
+        """The SDK tool server's handler counts each call; counting ToolUseBlocks here as well would double it."""
         messages = [
             AssistantMessage(
                 content=[
-                    ToolUseBlock(id="1", name="mcp__sre__grafana_get_alerts", input={}),
-                    ToolUseBlock(id="2", name="mcp__sre__runbook_search", input={}),
+                    ToolUseBlock(id="1", name="mcp__sre__prometheus_instant_query", input={}),
+                    ToolUseBlock(id="2", name="mcp__sre__grafana_get_alerts", input={}),
                 ],
                 model="claude-opus-4-6",
             )
         ]
-        before_grafana = TOOL_CALL_DURATION.labels(tool_name="grafana_get_alerts")._sum.get()
-        before_runbook = TOOL_CALL_DURATION.labels(tool_name="runbook_search")._sum.get()
+        calls_before = _total("sre_assistant_tool_calls_total")
+        durations_before = _total("sre_assistant_tool_call_duration_seconds_count")
 
-        tool_durations = [("grafana_get_alerts", 1.0), ("runbook_search", 0.5)]
-        record_sdk_metrics(messages, None, tool_durations)
+        record_sdk_metrics(messages, None)
 
-        after_grafana = TOOL_CALL_DURATION.labels(tool_name="grafana_get_alerts")._sum.get()
-        after_runbook = TOOL_CALL_DURATION.labels(tool_name="runbook_search")._sum.get()
-        assert after_grafana - before_grafana == 1.0
-        assert after_runbook - before_runbook == 0.5
+        assert _total("sre_assistant_tool_calls_total") == calls_before
+        assert _total("sre_assistant_tool_call_duration_seconds_count") == durations_before
 
-    def test_no_durations_is_safe(self) -> None:
-        """Passing None or empty durations does not error."""
-        record_sdk_metrics([], None, None)
-        record_sdk_metrics([], None, [])
+
+class TestSdkLlmStatus:
+    """One LLM call per SDK request, counted as an error when the request did not produce a good result."""
+
+    def test_sdk_result_is_error_counts_llm_error(self) -> None:
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], _result(is_error=True))
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    def test_sdk_no_result_counts_llm_error(self) -> None:
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], None)
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    def test_sdk_good_result_counts_llm_success(self) -> None:
+        """Pin: a result without is_error is one successful LLM call."""
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], _result(is_error=False))
+
+        assert _llm_calls("success") - successes == 1.0
+        assert _llm_calls("error") - errors == 0.0
+
+    def test_recording_failure_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("src.observability.sdk_metrics._record_sdk_metrics_inner", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.DEBUG, logger="src.observability.sdk_metrics"),
+        ):
+            record_sdk_metrics([], None)
+
+        [record] = [r for r in caplog.records if r.name == "src.observability.sdk_metrics"]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is not None

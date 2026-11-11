@@ -1,0 +1,585 @@
+{
+  "tools": {
+    "get_current_time": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "grafana_get_alert_rules": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "grafana_get_alerts": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "state": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "grafana_get_dashboard": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "dashboard": {
+          "required": true,
+          "type": "string"
+        },
+        "panel": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "grafana_search_dashboards": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "query": {
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "hdd_power_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "duration": {
+          "default": "24h",
+          "required": false,
+          "type": "string"
+        },
+        "pool": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "loki_correlate_changes": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "hostname": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "reference_time": {
+          "required": true,
+          "type": "string"
+        },
+        "service_name": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "window_minutes": {
+          "default": 30,
+          "maximum": 1440,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
+    },
+    "loki_list_label_values": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "end": {
+          "default": "now",
+          "required": false,
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        },
+        "query": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "start": {
+          "default": "6h",
+          "required": false,
+          "type": "string"
+        }
+      }
+    },
+    "loki_metric_query": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "end": {
+          "default": "now",
+          "required": false,
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        },
+        "start": {
+          "default": "1h",
+          "required": false,
+          "type": "string"
+        },
+        "step": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "loki_query_logs": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "direction": {
+          "default": "backward",
+          "required": false,
+          "type": "string"
+        },
+        "end": {
+          "default": "now",
+          "required": false,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "maximum": 1000,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        },
+        "start": {
+          "default": "1h",
+          "required": false,
+          "type": "string"
+        }
+      }
+    },
+    "memory_check_baseline": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "current_value": {
+          "required": true,
+          "type": "number"
+        },
+        "labels": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "metric_name": {
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "memory_get_previous_report": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "count": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
+    },
+    "memory_record_incident": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "parameters": {
+        "alert_name": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "description": {
+          "required": true,
+          "type": "string"
+        },
+        "resolution": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "root_cause": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "services": {
+          "default": "",
+          "required": false,
+          "type": "string"
+        },
+        "severity": {
+          "default": "info",
+          "required": false,
+          "type": "string"
+        },
+        "title": {
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "memory_search_incidents": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "alert_name": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "limit": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "query": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "service": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "pbs_datastore_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "pbs_list_backups": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "datastore": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "pbs_list_tasks": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "errors_only": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 50,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
+    },
+    "prometheus_instant_query": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        },
+        "time": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "prometheus_range_query": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "end": {
+          "required": true,
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        },
+        "start": {
+          "required": true,
+          "type": "string"
+        },
+        "step": {
+          "default": "60s",
+          "required": false,
+          "type": "string"
+        }
+      }
+    },
+    "prometheus_search_metrics": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "search_term": {
+          "maxLength": 200,
+          "minLength": 1,
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "proxmox_get_guest_config": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "guest_type": {
+          "default": "qemu",
+          "required": false,
+          "type": "string"
+        },
+        "name": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "vmid": {
+          "default": null,
+          "required": false,
+          "type": "integer|null"
+        }
+      }
+    },
+    "proxmox_list_guests": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "guest_type": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "proxmox_list_tasks": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "errors_only": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 50,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
+    },
+    "proxmox_node_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "runbook_search": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "num_results": {
+          "default": 4,
+          "maximum": 10,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "query": {
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "sre_agent_get_conversation": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "session_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,64}$",
+          "required": true,
+          "type": "string"
+        }
+      }
+    },
+    "sre_agent_list_conversations": {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "limit": {
+          "default": 20,
+          "maximum": 100,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
+    },
+    "truenas_apps": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "truenas_list_shares": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "include_sessions": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        },
+        "share_type": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        }
+      }
+    },
+    "truenas_pool_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    },
+    "truenas_snapshots": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "dataset": {
+          "default": null,
+          "required": false,
+          "type": "string|null"
+        },
+        "limit": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "list_snapshots": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "truenas_system_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {}
+    }
+  }
+}

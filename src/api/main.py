@@ -13,12 +13,14 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, field_validator
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -33,11 +35,14 @@ from src.agent.history import (
     search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.agent.tool_registry import enabled_count
 from src.api.incidents import log_incident_explainer_status, missing_incident_settings, start_incident_recovery
 from src.api.incidents import router as incidents_router
+from src.api.mcp_access import McpAccessCheck, mcp_access_config
 from src.api.upgrades import router as upgrades_router
 from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
+from src.memory.store import log_memory_status
 from src.observability.logs import configure_app_logging
 from src.observability.metrics import (
     APP_INFO,
@@ -52,6 +57,9 @@ from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
 from src.report.scheduler import start_scheduler, stop_scheduler
 from src.upgrades.deploy import start_startup_verification, wait_for_deploys
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
@@ -208,15 +216,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _ = migrate_history_files(settings.conversation_history_dir)
 
     async with AsyncExitStack() as stack:
-        # Mount MCP server — auth is handled by Cloudflare Access
+        # Mount the MCP server. McpAccessCheck runs inside it, ahead of the transport: it checks the Cloudflare Access
+        # JWT in the mode MCP_ACCESS_MODE sets (read once here) and names the client for the tool metrics.
         from src.api.mcp_server import build_fastmcp_server
 
         mcp_server = build_fastmcp_server(settings)
-        mcp_app = mcp_server.http_app(path="/", stateless_http=True)
+        access_check = Middleware(McpAccessCheck, config=mcp_access_config())
+        mcp_app = mcp_server.http_app(path="/", stateless_http=True, middleware=[access_check])
         await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
         app.state.mcp_server = mcp_server
         app.state.mcp_app = mcp_app
-        app.state.mcp_enabled = True
+        # /health compares list_tools() with this count: the registry's mcp specs these settings enable.
+        app.state.mcp_expected_tools = enabled_count(settings, "mcp")
         tool_count = len(await mcp_server.list_tools())
         logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
 
@@ -232,6 +243,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         start_scheduler()
         warn_if_approval_unconfigured()
         log_incident_explainer_status()
+        log_memory_status()
         if not missing_incident_settings():
             # Background task: finishes incidents a restart left behind without delaying startup.
             start_incident_recovery()
@@ -240,7 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Stop routing to the MCP app before its lifespan (the exit stack) closes.
         app.state.mcp_app = None
         app.state.mcp_server = None
-        app.state.mcp_enabled = False
+        app.state.mcp_expected_tools = 0
         stop_scheduler()
         # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.
         await wait_for_deploys(SHUTDOWN_DEPLOY_WAIT_SECONDS)
@@ -465,6 +477,27 @@ async def ask_stream(request: AskRequest) -> StreamingResponse:
     )
 
 
+async def _mcp_server_health() -> ComponentHealth:
+    """``mcp_server`` is healthy only when the server and the dispatch target are set and it lists every tool the
+    lifespan registered, a count above zero."""
+    mcp_server: FastMCP | None = getattr(app.state, "mcp_server", None)
+    if mcp_server is None or getattr(app.state, "mcp_app", None) is None:
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail="MCP server not started")
+    expected: int = getattr(app.state, "mcp_expected_tools", 0)
+    try:
+        listed = len(await mcp_server.list_tools())
+    except Exception as exc:
+        logger.warning("/health: MCP list_tools failed", exc_info=True)
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail=f"list_tools failed: {type(exc).__name__}")
+    if expected <= 0:
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail="no MCP tools registered")
+    if listed != expected:
+        return ComponentHealth(
+            name="mcp_server", status="unhealthy", detail=f"{listed} tools listed, {expected} registered"
+        )
+    return ComponentHealth(name="mcp_server", status="healthy")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Check health of the assistant and its dependencies."""
@@ -617,9 +650,8 @@ async def health() -> HealthResponse:
             )
         )
 
-    # --- MCP server (optional) ---
-    if getattr(app.state, "mcp_enabled", False):
-        components.append(ComponentHealth(name="mcp_server", status="healthy"))
+    # --- MCP server ---
+    components.append(await _mcp_server_health())
 
     # --- Update Prometheus gauges ---
     for comp in components:

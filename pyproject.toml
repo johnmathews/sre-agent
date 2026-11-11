@@ -45,7 +45,7 @@ constraint-dependencies = ["mcp>=1.30,<2"]
 source = ["src"]
 
 [tool.coverage.report]
-fail_under = 89
+fail_under = 91
 show_missing = true
 skip_covered = true
 

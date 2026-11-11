@@ -38,10 +38,17 @@ mocks:
     body:
       status: "success"
       data: ["media", "infra", "jellyfin"]
-  - url: "http://loki.test:3100/ready"
+  # loki_correlate_changes counts the error/warn lines in the window with an instant query
+  - url: "http://loki.test:3100/loki/api/v1/query"
     method: GET
     status: 200
-    body: "ready"
+    body:
+      status: "success"
+      data:
+        resultType: "vector"
+        result:
+          - metric: {}
+            value: [1705312800, "2"]
 
 rubric: |
   The answer should:

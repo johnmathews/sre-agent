@@ -131,7 +131,7 @@ Lessons learned from debugging these failures:
    - Prometheus: `/api/v1/query`, `/api/v1/query_range`, `/api/v1/metadata`,
      `/api/v1/label/__name__/values`
    - Grafana: `/api/alertmanager/grafana/api/v2/alerts/groups`,
-     `/api/v1/provisioning/alert-rules`
+     `/api/prometheus/grafana/api/v1/rules` (alert rules with state and health)
 3. **Remember the 503 catch-all.** Any unmocked URL returns 503. If the agent tries to call
    tools from services not in `required_services`, those HTTP calls also return 503. The agent
    may interpret multiple 503s as a systemic connectivity issue.
@@ -146,7 +146,8 @@ Lessons learned from debugging these failures:
    failures from resources that don't require authentication alongside ones that do. If the agent
    claims "auth failure" when unauthenticated resources also fail, the rubric should catch this.
 3. **Mock Loki endpoints comprehensively.** Diagnostic cases need `/loki/api/v1/query_range`,
-   `/loki/api/v1/labels`, `/loki/api/v1/label/hostname/values`, and `/ready`. Missing mocks cause
+   `/loki/api/v1/labels`, `/loki/api/v1/label/hostname/values`, and `/loki/api/v1/query` (the instant count query
+   `loki_correlate_changes` runs; no tool calls `/ready`). Missing mocks cause
    503s that the agent may interpret as "Loki is down" rather than using available data.
 
 ### Memory tool guidelines

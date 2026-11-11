@@ -226,6 +226,24 @@ class TestGrafanaGetDashboard:
         assert "CPU per VM/LXC" in result
         assert "Memory per VM/LXC" in result
 
+    @respx.mock
+    async def test_dashboard_uid_is_path_quoted(self) -> None:
+        """A UID from a search result cannot walk to another API path (F18)."""
+        respx.get("http://grafana.test:3000/api/search").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"uid": "../../admin/settings?x=", "title": "Sneaky", "type": "dash-db"}],
+            ),
+        )
+        catch_all = respx.get(host="grafana.test").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DASHBOARD_RESPONSE),
+        )
+
+        await grafana_get_dashboard.ainvoke({"dashboard": "Sneaky dashboard"})
+        assert catch_all.called
+        request = catch_all.calls.last.request
+        assert request.url.raw_path == b"/api/dashboards/uid/..%2F..%2Fadmin%2Fsettings%3Fx%3D"
+
 
 @pytest.mark.integration
 class TestGrafanaSearchDashboards:

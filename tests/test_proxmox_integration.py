@@ -5,6 +5,8 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from langchain_core.tools import ToolException
+from pydantic import ValidationError
 
 from src.agent.tools.proxmox import (
     proxmox_get_guest_config,
@@ -272,6 +274,41 @@ class TestProxmoxGetGuestConfigByName:
         assert "provide either vmid or name" in result.lower()
 
 
+PROM_QUERY_URL = "http://prometheus.test:9090/api/v1/query"
+STATUS_URL = "https://proxmox.test:8006/api2/json/nodes/proxmox/status"
+
+
+def _mock_node_cpu_ok(value: str = "0.1") -> respx.Route:
+    return respx.get(PROM_QUERY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"resultType": "vector", "result": [{"metric": {}, "value": [1700000000, value]}]},
+            },
+        )
+    )
+
+
+def _mock_status() -> None:
+    respx.get(STATUS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "cpu": 0.25,
+                    "memory": {"used": 17179869184, "total": 68719476736},
+                    "uptime": 864000,
+                    "loadavg": ["1.5", "2.0", "1.8"],
+                    "pveversion": "pve-manager/8.1.3",
+                    "kversion": "6.5.11-8-pve",
+                    "rootfs": {"used": 10737418240, "total": 107374182400},
+                }
+            },
+        )
+    )
+
+
 @pytest.mark.integration
 class TestProxmoxNodeStatus:
     @respx.mock
@@ -293,8 +330,9 @@ class TestProxmoxNodeStatus:
             )
         )
 
+        _mock_node_cpu_ok()
         result = await proxmox_node_status.ainvoke({})
-        assert "25.0%" in result
+        assert "PVE instant sample): 25.0%" in result
         assert "10 days" in result
         assert "pve-manager/8.1.3" in result
 
@@ -306,6 +344,64 @@ class TestProxmoxNodeStatus:
 
         result = await proxmox_node_status.ainvoke({})
         assert "timed out" in result
+
+    @respx.mock
+    async def test_node_status_shows_prometheus_cpu(self) -> None:
+        _mock_status()
+        route = _mock_node_cpu_ok("0.4321")
+        result = await proxmox_node_status.ainvoke({})
+        assert "CPU (node_exporter 5-min avg): 43.2%" in result
+        assert "CPU (PVE instant sample): 25.0%" in result
+        query = route.calls.last.request.url.params["query"]
+        assert 'hostname="proxmox"' in query
+        assert 'mode="idle"' in query
+        assert "[5m]" in query
+
+    @respx.mock
+    async def test_node_status_prometheus_failure_visible(self) -> None:
+        _mock_status()
+        respx.get(PROM_QUERY_URL).mock(return_value=httpx.Response(503, text="down"))
+        result = await proxmox_node_status.ainvoke({})
+        assert "CPU (node_exporter 5-min avg): unavailable:" in result
+        assert "503" in result
+        assert "CPU (PVE instant sample): 25.0%" in result
+        assert "pve-manager/8.1.3" in result
+
+    @respx.mock
+    async def test_node_status_prometheus_no_data_visible(self) -> None:
+        _mock_status()
+        respx.get(PROM_QUERY_URL).mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": {"resultType": "vector", "result": []}})
+        )
+        result = await proxmox_node_status.ainvoke({})
+        assert "unavailable: no data" in result
+
+
+@pytest.mark.integration
+class TestGuestTypeValidation:
+    @respx.mock
+    async def test_guest_type_rejects_path(self) -> None:
+        """A path-shaped guest_type raises and sends no request, even past the schema."""
+        trap = respx.route().mock(return_value=httpx.Response(200, json={"data": {}}))
+        with pytest.raises(ToolException):
+            await proxmox_get_guest_config.coroutine(vmid=100, guest_type="../../access/acl#")  # type: ignore[misc, arg-type]  # pyright: ignore
+        assert not trap.called
+
+    @respx.mock
+    async def test_guest_type_rejected_by_schema(self) -> None:
+        trap = respx.route().mock(return_value=httpx.Response(200, json={"data": {}}))
+        with pytest.raises(ValidationError):
+            await proxmox_get_guest_config.ainvoke({"vmid": 100, "guest_type": "../../access/acl#"})
+        with pytest.raises(ValidationError):
+            await proxmox_list_guests.ainvoke({"guest_type": "bogus"})
+        assert not trap.called
+
+    @respx.mock
+    async def test_list_guests_rejects_bad_type_in_body(self) -> None:
+        trap = respx.route().mock(return_value=httpx.Response(200, json={"data": []}))
+        with pytest.raises(ToolException):
+            await proxmox_list_guests.coroutine(guest_type="../x")  # type: ignore[misc, arg-type]  # pyright: ignore
+        assert not trap.called
 
 
 @pytest.mark.integration

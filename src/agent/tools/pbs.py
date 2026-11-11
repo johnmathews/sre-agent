@@ -1,15 +1,18 @@
 """LangChain tools for querying the Proxmox Backup Server (PBS) API."""
 
 import logging
+import re
 import ssl
 from datetime import UTC, datetime
 from typing import TypedDict
+from urllib.parse import quote
 
 import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import format_age, format_bytes, format_utc
 from src.config import get_settings
 from src.upgrades.http import bounded_request
 
@@ -17,6 +20,21 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 15
 MAX_TASKS = 50
+DATASTORE_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$"
+_DATASTORE_RE = re.compile(DATASTORE_PATTERN)
+
+
+def _check_datastore(name: str) -> str:
+    """Return ``name`` if it is a valid PBS datastore name, else raise ``ToolException``.
+
+    The name goes into an API URL path, so ``/``, ``..``, ``?`` and ``#`` must never get through.
+    """
+    if not _DATASTORE_RE.fullmatch(name):
+        raise ToolException(
+            f"Invalid datastore name {name!r}: use letters, digits, '.', '_' or '-' "
+            "(up to 64 characters, starting with a letter, digit or '_')."
+        )
+    return name
 
 
 # --- SSL helper ---
@@ -82,7 +100,10 @@ async def pbs_latest_backup_time(backup_type: str, backup_id: str, datastore: st
     if not store:
         msg = "no PBS datastore given and PBS_DEFAULT_DATASTORE is not set"
         raise ValueError(msg)
-    url = f"{settings.pbs_url}/api2/json/admin/datastore/{store}/groups"
+    if not _DATASTORE_RE.fullmatch(store):
+        msg = f"invalid PBS datastore name {store!r}"
+        raise ValueError(msg)
+    url = f"{settings.pbs_url}/api2/json/admin/datastore/{quote(store, safe='')}/groups"
     async with httpx.AsyncClient(
         timeout=BOUNDED_TIMEOUT_SECONDS, verify=_pbs_ssl_verify(), follow_redirects=False
     ) as client:
@@ -135,15 +156,6 @@ class PbsTaskEntry(TypedDict, total=False):
 # --- Formatting helpers ---
 
 
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string."""
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024:
-            return f"{n:.1f} {unit}"
-        n = int(n / 1024)
-    return f"{n:.1f} PiB"
-
-
 def _format_datastore_status(stores: list[PbsDatastoreStatus]) -> str:
     """Format PBS datastore usage into a readable string."""
     if not stores:
@@ -160,8 +172,8 @@ def _format_datastore_status(stores: list[PbsDatastoreStatus]) -> str:
         pct = (used / total) * 100 if total > 0 else 0.0
 
         lines.append(f"  {name}:")
-        lines.append(f"    Used: {_format_bytes(used)} / {_format_bytes(total)} ({pct:.1f}%)")
-        lines.append(f"    Available: {_format_bytes(avail)}")
+        lines.append(f"    Used: {format_bytes(used)} / {format_bytes(total)} ({pct:.1f}%)")
+        lines.append(f"    Available: {format_bytes(avail)}")
 
         # PBS API uses hyphenated keys
         gc = store.get("gc-status") or store.get("gc_status")
@@ -172,8 +184,9 @@ def _format_datastore_status(stores: list[PbsDatastoreStatus]) -> str:
     return "\n".join(lines)
 
 
-def _format_backup_groups(groups: list[PbsBackupGroup], datastore: str) -> str:
-    """Format PBS backup groups into a readable string."""
+def _format_backup_groups(groups: list[PbsBackupGroup], datastore: str, now: datetime | None = None) -> str:
+    """Format PBS backup groups into a readable string; ``last=`` shows the UTC date and its age."""
+    now = now or datetime.now(UTC)
     if not groups:
         return f"No backup groups found in datastore '{datastore}'."
 
@@ -190,7 +203,8 @@ def _format_backup_groups(groups: list[PbsBackupGroup], datastore: str) -> str:
         backup_type = _g(group, "backup_type", "unknown")
         backup_id = _g(group, "backup_id", "unknown")
         count_str = _g(group, "backup_count", "0")
-        last = _g(group, "last_backup", "0")
+        last_raw = _g(group, "last_backup")
+        last = f"{format_utc(int(last_raw))} ({format_age(int(last_raw), now)})" if last_raw else "none"
         owner = _g(group, "owner")
         comment = _g(group, "comment")
 
@@ -219,10 +233,8 @@ def _format_pbs_tasks(tasks: list[PbsTaskEntry]) -> str:
         starttime = task.get("starttime", 0)
         endtime = task.get("endtime")
 
-        start_str = datetime.fromtimestamp(starttime, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-        end_str = ""
-        if endtime:
-            end_str = datetime.fromtimestamp(endtime, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        start_str = format_utc(starttime)
+        end_str = format_utc(endtime) if endtime else ""
 
         status_marker = "OK" if status == "OK" else status
         id_str = f" ({worker_id})" if worker_id else ""
@@ -253,6 +265,7 @@ class ListBackupsInput(BaseModel):
 
     datastore: str | None = Field(
         default=None,
+        pattern=DATASTORE_PATTERN,
         description=(
             "Name of the PBS datastore to list backups from. Omit to use the default datastore from configuration."
         ),
@@ -340,6 +353,8 @@ async def pbs_list_backups(datastore: str | None = None) -> str:
     if not settings.pbs_url:
         raise ToolException("Proxmox Backup Server is not configured (PBS_URL is empty).")
 
+    if datastore is not None:
+        _ = _check_datastore(datastore)
     store = datastore or settings.pbs_default_datastore
     if not store:
         raise ToolException(
@@ -347,10 +362,11 @@ async def pbs_list_backups(datastore: str | None = None) -> str:
             "Provide a datastore name or set PBS_DEFAULT_DATASTORE in .env."
         )
 
+    _ = _check_datastore(store)
     logger.info("Listing PBS backup groups (datastore=%s)", store)
 
     try:
-        data = await _pbs_get(f"/admin/datastore/{store}/groups")
+        data = await _pbs_get(f"/admin/datastore/{quote(store, safe='')}/groups")
         groups: list[PbsBackupGroup] = data.get("data", [])  # type: ignore[assignment]  # pyright: ignore[reportAssignmentType]
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to PBS at {settings.pbs_url}: {e}") from e
@@ -381,7 +397,7 @@ async def pbs_list_tasks(limit: int = 20, errors_only: bool = False) -> str:
         params["errors"] = "1"
 
     try:
-        data = await _pbs_get(f"/nodes/{node}/tasks", params=params)
+        data = await _pbs_get(f"/nodes/{quote(node, safe='')}/tasks", params=params)
         tasks: list[PbsTaskEntry] = data.get("data", [])  # type: ignore[assignment]  # pyright: ignore[reportAssignmentType]
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to PBS at {settings.pbs_url}: {e}") from e

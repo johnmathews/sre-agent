@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from langchain_core.tools import ToolException
 
 from src.agent.tools.pbs import (
     pbs_datastore_status,
@@ -131,6 +132,41 @@ class TestPbsListBackups:
 
         result = await pbs_list_backups.ainvoke({})
         assert "Cannot connect" in result
+
+    @pytest.mark.parametrize("bad", ["../x", "a/b", "..", "", "x?y=1", "x#", "-x", "a" * 65, "a b", "x%2e%2e"])
+    async def test_datastore_traversal_rejected(self, bad: str) -> None:
+        """A bad name raises before any request, even when the schema is bypassed."""
+        with respx.mock(assert_all_called=False) as router:
+            trap = router.route().mock(side_effect=AssertionError("request sent for a bad datastore"))
+            with pytest.raises(ToolException):
+                await pbs_list_backups.coroutine(bad)  # pyright: ignore[reportOptionalCall]
+            assert not trap.called
+
+    async def test_datastore_pattern_in_schema(self) -> None:
+        schema = pbs_list_backups.args_schema.model_json_schema()  # type: ignore[union-attr]
+        assert "pattern" in str(schema["properties"]["datastore"])
+
+    @respx.mock
+    async def test_datastore_name_is_quoted(self) -> None:
+        route = respx.get("https://pbs.test:8007/api2/json/admin/datastore/my.store_1-a/groups").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+        await pbs_list_backups.ainvoke({"datastore": "my.store_1-a"})
+        assert route.called
+
+    @respx.mock
+    async def test_last_backup_in_output_is_dated(self) -> None:
+        respx.get("https://pbs.test:8007/api2/json/admin/datastore/backups/groups").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [{"backup-type": "vm", "backup-id": "100", "backup-count": 1, "last-backup": 1700000000}]
+                },
+            )
+        )
+        result = await pbs_list_backups.ainvoke({})
+        assert "last=2023-11-14 22:13:20Z (" in result
+        assert "last=1700000000" not in result
 
     async def test_no_datastore_configured(self, mock_settings: Any) -> None:
         mock_settings.pbs_default_datastore = ""

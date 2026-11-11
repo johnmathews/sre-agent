@@ -2,7 +2,8 @@
 
 import contextlib
 import logging
-import re
+import math
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypedDict, cast
 
@@ -11,6 +12,7 @@ from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUn
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import format_utc, parse_duration, parse_time, promql_string, regex_literal
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -19,9 +21,26 @@ logger = logging.getLogger(__name__)
 
 MAX_QUERY_LENGTH = 2000
 MAX_RANGE_STEP_SECONDS = 86400  # 1 day
-MAX_RANGE_DURATION_SECONDS = 30 * 86400  # 30 days
+MAX_RANGE_DURATION_SECONDS = 90 * 86400  # 90 days, the Prometheus retention
+MAX_RANGE_POINTS = 11000  # Prometheus rejects (end - start) / step above this
+AUTO_STEP_TARGET_POINTS = 250
+AUTO_STEP_LADDER_SECONDS = (15, 60, 300, 900, 3600, 21600, 86400)  # 15s 1m 5m 15m 1h 6h 1d
+MAX_SERIES_SHOWN = 50
 MAX_SEARCH_RESULTS = 50
 DEFAULT_TIMEOUT_SECONDS = 15
+
+_STEP_AND_LIMIT_FORMS = (
+    "step: a duration like '30s', '5m' or '1h30m', or seconds, at most 1d; omit it to choose one "
+    + "automatically. Range limit: 90 days (Prometheus retention)."
+)
+ACCEPTED_FORMS = (
+    "Accepted time forms: 'now'; a duration before now as '24h', '-24h' or 'now-24h' "
+    + "(units s, m, h, d, w; compound like '1h30m'); RFC3339 like '2026-11-11T13:00:00Z'; "
+    + f"or Unix seconds like '1794369609'. {_STEP_AND_LIMIT_FORMS}"
+)
+"""Appended to every range validation error, so a client can correct the call in one retry."""
+
+_TIME_FIELD_HELP = "'now', a duration before now ('24h', '-24h', 'now-24h'), RFC3339 or Unix seconds"
 
 
 class PrometheusInstantInput(BaseModel):
@@ -37,7 +56,7 @@ class PrometheusInstantInput(BaseModel):
     )
     time: str | None = Field(
         default=None,
-        description="Optional RFC3339 or Unix timestamp. Defaults to current time.",
+        description=f"Optional evaluation time: {_TIME_FIELD_HELP}. Defaults to now.",
     )
 
 
@@ -67,72 +86,117 @@ class PrometheusRangeInput(BaseModel):
         max_length=MAX_QUERY_LENGTH,
     )
     start: str = Field(
-        description="Start time as RFC3339 (e.g. '2024-01-15T10:00:00Z') or Unix timestamp.",
+        default="1h",
+        description=f"Start time: {_TIME_FIELD_HELP}. Defaults to '1h' (one hour ago). At most 90 days before end.",
     )
     end: str = Field(
-        description="End time as RFC3339 or Unix timestamp. Must be after start.",
+        default="now",
+        description=f"End time, after start: {_TIME_FIELD_HELP}. Defaults to 'now'.",
     )
-    step: str = Field(
-        default="60s",
-        description="Query resolution step (e.g. '15s', '60s', '5m'). Smaller steps = more data points.",
+    step: str | None = Field(
+        default=None,
+        description=(
+            "Resolution step as a duration ('15s', '5m', '1h30m') or seconds, at most 1d. "
+            "Omit it to get about 250 points per series (15s, 1m, 5m, 15m, 1h, 6h or 1d)."
+        ),
     )
 
 
-def _validate_range_params(start: str, end: str, step: str) -> list[str]:
-    """Validate that range query parameters are reasonable. Returns list of error messages."""
-    errors: list[str] = []
+@dataclass(frozen=True)
+class RangeWindow:
+    """A validated range query window, all values in seconds (start/end are Unix epoch)."""
 
-    try:
-        start_ts = _parse_timestamp(start)
-        end_ts = _parse_timestamp(end)
-    except ValueError as e:
-        errors.append(f"Invalid timestamp: {e}")
-        return errors
-
-    if end_ts <= start_ts:
-        errors.append("end must be after start")
-
-    duration = end_ts - start_ts
-    if duration > MAX_RANGE_DURATION_SECONDS:
-        errors.append(f"Time range too large: {duration}s exceeds maximum of {MAX_RANGE_DURATION_SECONDS}s (30 days)")
-
-    step_seconds = _parse_duration(step)
-    if step_seconds is not None and step_seconds > MAX_RANGE_STEP_SECONDS:
-        errors.append(f"Step too large: {step_seconds}s exceeds maximum of {MAX_RANGE_STEP_SECONDS}s")
-
-    if step_seconds is not None and duration / step_seconds > 11000:
-        points = int(duration / step_seconds)
-        errors.append(
-            f"Too many data points: {duration}s range with {step_seconds}s step "
-            + f"would produce {points} points. Use a larger step or shorter range."
-        )
-
-    return errors
+    start: float
+    end: float
+    step: float
 
 
-def _parse_timestamp(ts: str) -> float:
-    """Parse an RFC3339 string or numeric Unix timestamp to a float."""
-    try:
-        return float(ts)
-    except ValueError:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.replace(tzinfo=UTC if dt.tzinfo is None else dt.tzinfo).timestamp()
+def _parse_timestamp(ts: str, now: datetime) -> float:
+    """Parse any accepted time form to Unix epoch seconds; relative forms count back from ``now``.
+
+    Raises ``ValueError`` listing every accepted form.
+    """
+    return parse_time(ts, now).timestamp()
 
 
 def _parse_duration(step: str) -> float | None:
-    """Parse a Prometheus duration string (e.g. '60s', '5m') to seconds. Returns None if unparseable."""
+    """Parse a Prometheus duration ('60s', '5m', '1h30m' or plain seconds) to seconds; None if unparseable."""
     try:
-        return float(step)
-    except ValueError:
-        pass
+        seconds = float(parse_duration(step))
+    except (ValueError, OverflowError):
+        return None
+    return seconds if math.isfinite(seconds) else None
 
-    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-    if step and step[-1] in multipliers:
-        try:
-            return float(step[:-1]) * multipliers[step[-1]]
-        except ValueError:
-            return None
-    return None
+
+def _format_seconds(seconds: float) -> str:
+    """Seconds as a compact duration that Prometheus and ``parse_duration`` accept: 55 -> '55s', 5400 -> '1h30m'."""
+    remaining = int(math.ceil(seconds))
+    parts: list[str] = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        count, remaining = divmod(remaining, size)
+        if count:
+            parts.append(f"{count}{unit}")
+    return "".join(parts) or "0s"
+
+
+def _auto_step(duration: float) -> int:
+    """Step for about ``AUTO_STEP_TARGET_POINTS`` points: ``max(15s, duration/250)`` rounded up the ladder."""
+    target = max(AUTO_STEP_LADDER_SECONDS[0], duration / AUTO_STEP_TARGET_POINTS)
+    for step in AUTO_STEP_LADDER_SECONDS:
+        if step >= target:
+            return step
+    return AUTO_STEP_LADDER_SECONDS[-1]
+
+
+def _number(value: float) -> str:
+    """A float as a query parameter: '1700000000' for whole seconds, else millisecond precision."""
+    return str(int(value)) if float(value).is_integer() else f"{value:.3f}"
+
+
+def _resolve_range(start: str, end: str, step: str | None, now: datetime) -> RangeWindow:
+    """Validate range parameters and resolve them to epoch seconds and a step in seconds.
+
+    Raises ``ValueError`` naming every problem found, followed by the accepted forms.
+    """
+    errors: list[str] = []
+    try:
+        start_ts = _parse_timestamp(start, now)
+        end_ts = _parse_timestamp(end, now)
+    except ValueError as e:  # parse_time's message already lists the time forms
+        raise ValueError(f"{e}. {_STEP_AND_LIMIT_FORMS}") from None
+
+    duration = end_ts - start_ts
+    if duration <= 0:
+        errors.append(f"end must be after start (start={format_utc(start_ts)}, end={format_utc(end_ts)})")
+    if duration > MAX_RANGE_DURATION_SECONDS:
+        errors.append(
+            f"Time range too large: {duration / 86400:.1f} days exceeds the maximum of 90 days "
+            + "(Prometheus retention)"
+        )
+
+    step_seconds: float | None
+    if step is None:
+        step_seconds = float(_auto_step(max(duration, 0)))
+    else:
+        step_seconds = _parse_duration(step)
+        if step_seconds is None or step_seconds <= 0:
+            errors.append(f"Invalid step {step!r}")
+            step_seconds = None
+        elif step_seconds > MAX_RANGE_STEP_SECONDS:
+            errors.append(f"Step too large: {_format_seconds(step_seconds)} exceeds the maximum of 1d")
+
+    if step_seconds is not None and duration > 0 and duration / step_seconds > MAX_RANGE_POINTS:
+        points = int(duration / step_seconds)
+        smallest = _format_seconds(duration / MAX_RANGE_POINTS)
+        errors.append(
+            f"Too many data points: a {_format_seconds(duration)} range at a {_format_seconds(step_seconds)} step "
+            + f"gives {points} points, over the {MAX_RANGE_POINTS} limit. Use step='{smallest}' or larger, "
+            + "or omit step to choose one automatically"
+        )
+
+    if errors or step_seconds is None:
+        raise ValueError(f"{'; '.join(errors)}. {ACCEPTED_FORMS}")
+    return RangeWindow(start=start_ts, end=end_ts, step=step_seconds)
 
 
 # --- Prometheus response types ---
@@ -171,8 +235,30 @@ class PrometheusMetadataResponse(TypedDict, total=False):
     data: dict[str, list[PrometheusMetadataEntry]]
 
 
-def _format_result(data: PrometheusResponse) -> str:
-    """Format a Prometheus API response into a readable string for the LLM."""
+_CADVISOR_LABEL_PREFIX = "container_label_"
+
+
+def _format_labels(metric: dict[str, str], hide_cadvisor_labels: bool, hidden: set[str]) -> str:
+    """Render a label set as ``k="v", ...``, dropping cadvisor ``container_label_*`` labels when asked."""
+    shown: list[str] = []
+    for key, value in metric.items():
+        if hide_cadvisor_labels and key.startswith(_CADVISOR_LABEL_PREFIX):
+            hidden.add(key)
+            continue
+        shown.append(f'{key}="{value}"')
+    return ", ".join(shown)
+
+
+def _sample_line(point: list[float | str]) -> str:
+    return f"    [{format_utc(float(point[0]))}] {point[1]}"
+
+
+def _format_result(data: PrometheusResponse, query: str = "") -> str:
+    """Format a Prometheus API response into a readable string for the LLM.
+
+    cadvisor's ``container_label_*`` labels (Compose metadata, about 1.4k characters per series) are
+    hidden unless ``query`` names one; a single note says how many were hidden.
+    """
     status = data.get("status", "unknown")
     if status != "success":
         error_msg = data.get("error", "unknown error")
@@ -187,8 +273,8 @@ def _format_result(data: PrometheusResponse) -> str:
             "Query returned no results. Common causes:\n"
             "1. Wrong label filters — not all metrics share the same labels. "
             "Try the query without label filters to see what labels exist.\n"
-            "2. Time range outside Prometheus retention (~100 days). "
-            "Check that start/end dates are recent.\n"
+            "2. Time range outside Prometheus retention (90 days). "
+            "Check that start/end are within the last 90 days.\n"
             "3. For 'peak/max/min/average' questions, use prometheus_instant_query "
             "with *_over_time functions instead of prometheus_range_query.\n"
             "Use prometheus_search_metrics to verify the metric name exists."
@@ -196,14 +282,16 @@ def _format_result(data: PrometheusResponse) -> str:
 
     lines: list[str] = [f"Result type: {result_type}, series count: {len(results)}"]
 
-    if len(results) > 50:
+    if len(results) > MAX_SERIES_SHOWN:
         lines.append(f"WARNING: {len(results)} series returned. Consider adding label filters to narrow results.")
-        results = results[:50]
-        lines.append("(showing first 50 series)")
+        lines.append(f"(showing {MAX_SERIES_SHOWN} of {len(results)} series)")
+        results = results[:MAX_SERIES_SHOWN]
+
+    hide_cadvisor_labels = _CADVISOR_LABEL_PREFIX not in query
+    hidden: set[str] = set()
 
     for series in results:
-        metric = series.get("metric", {})
-        label_str = ", ".join(f'{k}="{v}"' for k, v in metric.items())
+        label_str = _format_labels(series.get("metric", {}), hide_cadvisor_labels, hidden)
 
         if result_type == "vector":
             value_pair = series.get("value", [0, ""])
@@ -225,20 +313,21 @@ def _format_result(data: PrometheusResponse) -> str:
             else:
                 summary = ""
             lines.append(f"  {{{label_str}}} => {len(values)} samples{summary}")
-            for point in values[:3]:
-                ts_val = float(point[0])
-                dt_str = datetime.fromtimestamp(ts_val, tz=UTC).strftime("%H:%M:%S")
-                lines.append(f"    [{dt_str}] {point[1]}")
-            if len(values) > 6:
+            if len(values) <= 6:
+                lines.extend(_sample_line(point) for point in values)
+            else:
+                lines.extend(_sample_line(point) for point in values[:3])
                 lines.append(f"    ... ({len(values) - 6} more samples)")
-            for point in values[-3:]:
-                ts_val = float(point[0])
-                dt_str = datetime.fromtimestamp(ts_val, tz=UTC).strftime("%H:%M:%S")
-                lines.append(f"    [{dt_str}] {point[1]}")
+                lines.extend(_sample_line(point) for point in values[-3:])
         elif result_type == "scalar":
             lines.append(f"  scalar => {series}")
         else:
             lines.append(f"  {series}")
+
+    if hidden:
+        lines.append(
+            f"({len(hidden)} cadvisor container_label_* labels hidden; " + "name one in the query to show them)"
+        )
 
     return "\n".join(lines)
 
@@ -295,7 +384,8 @@ def _get_baseline_enrichment(data: PrometheusResponse) -> str:
         if not metric_names:
             return ""
         return enrich_with_baseline_context("", metric_names)
-    except Exception:
+    except Exception as e:
+        logger.warning("Baseline enrichment failed, returning the result without it: %s: %s", type(e).__name__, e)
         return ""
 
 
@@ -394,7 +484,11 @@ TOOL_DESCRIPTION_INSTANT = HOMELAB_CONTEXT + (
     "- Exporters: node_exporter (node_*), cadvisor (container_*), pve_exporter (pve_*), "
     "adguard, NUT (network_ups_tools_*), smartctl, IPMI, MikroTik (mktxp_*)\n"
     "- Recording rules: share drive probes, disk spindown, network traffic (signed bytes/sec), "
-    "UPS mains status\n\n"
+    "UPS mains status\n"
+    "- Container-status exporter series (container_state, container_health, container_restart_count, "
+    'container_image_outdated, container_image_info) all carry hostname="infra", the exporter\'s own host; '
+    'the container\'s host is in `exported_hostname`, so a hostname="media" filter returns nothing. '
+    "For container state, use the container_status tool.\n\n"
     "IMPORTANT: Always include label filters to avoid returning too many time series. "
     "For example, use {hostname='jellyfin'} not just the bare metric name."
 )
@@ -404,11 +498,10 @@ TOOL_DESCRIPTION_RANGE = HOMELAB_CONTEXT + (
     "Use this for trend questions like 'how has CPU changed over the last hour?' "
     "or 'show memory usage for the past day'.\n\n"
     "Same homelab setup as the instant query tool. Always include label filters.\n\n"
-    "Choose an appropriate step size for the time range:\n"
-    "- Last 1 hour: step='15s' or '60s'\n"
-    "- Last 6 hours: step='60s' or '5m'\n"
-    "- Last 24 hours: step='5m'\n"
-    "- Last 7 days: step='1h'\n\n"
+    "Time window: start defaults to '1h' (one hour ago) and end to 'now'. Both accept 'now', a duration "
+    "before now ('24h', '-24h', 'now-24h', '7d'), RFC3339 or Unix seconds. The range may span up to "
+    "90 days (Prometheus retention). Omit step to get about 250 points per series; an explicit step "
+    "may be at most 1d and must keep the range under 11,000 points.\n\n"
     "IMPORTANT: Always include label filters to avoid returning too many time series."
 )
 
@@ -416,9 +509,9 @@ TOOL_DESCRIPTION_RANGE = HOMELAB_CONTEXT + (
 @tool("prometheus_search_metrics", args_schema=PrometheusSearchInput)  # pyright: ignore[reportUnknownParameterType]
 async def prometheus_search_metrics(search_term: str) -> str:
     """Search for available Prometheus metric names. See TOOL_DESCRIPTION_SEARCH."""
-    # Escape regex special characters so the search term is treated as a literal substring
-    escaped = re.escape(search_term)
-    match_param = f'{{__name__=~".*{escaped}.*"}}'
+    # The term matches as a literal substring: regex-escaped, then quoted as a PromQL string. Python's re.escape
+    # output ('\\.', '\\-') is not valid inside a PromQL string, which Prometheus rejects with HTTP 400.
+    match_param = "{__name__=~" + promql_string(".*" + regex_literal(search_term) + ".*") + "}"
 
     logger.info("Prometheus metric search: %s", search_term)
     try:
@@ -458,7 +551,10 @@ async def prometheus_instant_query(query: str, time: str | None = None) -> str:
     """Query Prometheus for current metric value. See TOOL_DESCRIPTION_INSTANT."""
     params: dict[str, str] = {"query": query}
     if time is not None:
-        params["time"] = time
+        try:
+            params["time"] = _number(_parse_timestamp(time, datetime.now(UTC)))
+        except ValueError as e:
+            raise ToolException(f"Invalid instant query time: {e}") from e
 
     logger.info("Prometheus instant query: %s", query)
     try:
@@ -470,7 +566,7 @@ async def prometheus_instant_query(query: str, time: str | None = None) -> str:
     except httpx.TimeoutException as e:
         raise ToolException(f"Prometheus query timed out after {DEFAULT_TIMEOUT_SECONDS}s: {e}") from e
 
-    result = _format_result(data) + _check_negative_max_over_time(query, data)
+    result = _format_result(data, query) + _check_negative_max_over_time(query, data)
     return result + _get_baseline_enrichment(data)
 
 
@@ -479,15 +575,27 @@ prometheus_instant_query.handle_tool_error = True
 
 
 @tool("prometheus_range_query", args_schema=PrometheusRangeInput)
-async def prometheus_range_query(query: str, start: str, end: str, step: str = "60s") -> str:
+async def prometheus_range_query(query: str, start: str = "1h", end: str = "now", step: str | None = None) -> str:
     """Query Prometheus for metric values over a time range. See TOOL_DESCRIPTION_RANGE."""
-    validation_errors = _validate_range_params(start, end, step)
-    if validation_errors:
-        raise ToolException(f"Invalid range query parameters: {'; '.join(validation_errors)}")
+    try:
+        window = _resolve_range(start, end, step, datetime.now(UTC))
+    except ValueError as e:
+        raise ToolException(f"Invalid range query parameters: {e}") from e
 
-    params: dict[str, str] = {"query": query, "start": start, "end": end, "step": step}
+    params: dict[str, str] = {
+        "query": query,
+        "start": _number(window.start),
+        "end": _number(window.end),
+        "step": _number(window.step),
+    }
 
-    logger.info("Prometheus range query: %s (start=%s, end=%s, step=%s)", query, start, end, step)
+    logger.info(
+        "Prometheus range query: %s (start=%s, end=%s, step=%s)",
+        query,
+        format_utc(window.start),
+        format_utc(window.end),
+        _format_seconds(window.step),
+    )
     try:
         data = await _query_prometheus("/api/v1/query_range", params)
     except httpx.HTTPStatusError as e:
@@ -497,7 +605,7 @@ async def prometheus_range_query(query: str, start: str, end: str, step: str = "
     except httpx.TimeoutException as e:
         raise ToolException(f"Prometheus query timed out after {DEFAULT_TIMEOUT_SECONDS}s: {e}") from e
 
-    return _format_result(data)
+    return _format_result(data, query)
 
 
 prometheus_range_query.description = TOOL_DESCRIPTION_RANGE

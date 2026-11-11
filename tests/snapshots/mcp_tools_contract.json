@@ -12,7 +12,35 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "parameters": {}
+      "parameters": {
+        "health": {
+          "default": null,
+          "enum": [
+            "ok",
+            "error",
+            "nodata"
+          ],
+          "required": false,
+          "type": "string|null"
+        },
+        "name_contains": {
+          "default": null,
+          "maxLength": 100,
+          "required": false,
+          "type": "string|null"
+        },
+        "state": {
+          "default": null,
+          "enum": [
+            "firing",
+            "pending",
+            "inactive",
+            "recovering"
+          ],
+          "required": false,
+          "type": "string|null"
+        }
+      }
     },
     "grafana_get_alerts": {
       "annotations": {
@@ -22,6 +50,12 @@
       "parameters": {
         "state": {
           "default": null,
+          "enum": [
+            "active",
+            "suppressed",
+            "unprocessed",
+            "firing"
+          ],
           "required": false,
           "type": "string|null"
         }
@@ -118,6 +152,7 @@
         "label": {
           "maxLength": 200,
           "minLength": 1,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "required": true,
           "type": "string"
         },
@@ -322,6 +357,7 @@
       "parameters": {
         "datastore": {
           "default": null,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$",
           "required": false,
           "type": "string|null"
         }
@@ -373,7 +409,8 @@
       },
       "parameters": {
         "end": {
-          "required": true,
+          "default": "now",
+          "required": false,
           "type": "string"
         },
         "query": {
@@ -383,13 +420,14 @@
           "type": "string"
         },
         "start": {
-          "required": true,
+          "default": "1h",
+          "required": false,
           "type": "string"
         },
         "step": {
-          "default": "60s",
+          "default": null,
           "required": false,
-          "type": "string"
+          "type": "string|null"
         }
       }
     },
@@ -415,6 +453,10 @@
       "parameters": {
         "guest_type": {
           "default": "qemu",
+          "enum": [
+            "qemu",
+            "lxc"
+          ],
           "required": false,
           "type": "string"
         },
@@ -438,6 +480,10 @@
       "parameters": {
         "guest_type": {
           "default": null,
+          "enum": [
+            "qemu",
+            "lxc"
+          ],
           "required": false,
           "type": "string|null"
         }

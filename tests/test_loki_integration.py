@@ -1,11 +1,14 @@
 """Integration tests for Loki tools with mocked HTTP responses."""
 
+import json
 import time
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from langchain_core.tools import ToolException
+from pydantic import ValidationError
 
 from src.agent.tools.loki import (
     loki_correlate_changes,
@@ -67,8 +70,9 @@ class TestLokiQueryLogs:
             )
         )
 
-        result = await loki_query_logs.ainvoke({"query": '{hostname="nonexistent"}'})
-        assert "No log lines found" in result
+        result = await loki_query_logs.ainvoke({"query": '{hostname="nonexistent"}', "start": "now-2h"})
+        assert "No log lines found in the last 2h." in result
+        assert "valid selector" in result
 
     @respx.mock
     async def test_loki_unreachable(self) -> None:
@@ -190,6 +194,29 @@ class TestLokiQueryLogs:
 @pytest.mark.integration
 class TestLokiListLabelValues:
     @respx.mock
+    @pytest.mark.parametrize("label", ["../../x", "a/b", "a b", "1abc", "a-b", "a?x=1", "%2e%2e"])
+    async def test_label_path_traversal_rejected(self, label: str) -> None:
+        trap = respx.route().mock(return_value=httpx.Response(200, json={"status": "success", "data": []}))
+        with pytest.raises(ToolException):
+            await loki_list_label_values.coroutine(label=label)  # type: ignore[misc]
+        assert not trap.called
+
+    @respx.mock
+    async def test_label_pattern_rejected_via_schema(self) -> None:
+        trap = respx.route().mock(return_value=httpx.Response(200, json={"status": "success", "data": []}))
+        with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+            await loki_list_label_values.ainvoke({"label": "../../x"})
+        assert not trap.called
+
+    @respx.mock
+    async def test_label_values_capped_at_200(self) -> None:
+        respx.get("http://loki.test:3100/loki/api/v1/label/container/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": [f"c{i:04d}" for i in range(500)]})
+        )
+        result = await loki_list_label_values.ainvoke({"label": "container"})
+        assert "showing 200 of 500" in result
+
+    @respx.mock
     async def test_successful_query(self) -> None:
         respx.get("http://loki.test:3100/loki/api/v1/label/hostname/values").mock(
             return_value=httpx.Response(
@@ -287,7 +314,7 @@ class TestLokiListLabelValues:
     @respx.mock
     async def test_unparseable_start_rejected(self) -> None:
         result = await loki_list_label_values.ainvoke({"label": "container", "start": "last week"})
-        assert "Cannot parse time 'last week'" in result
+        assert "Invalid time 'last week'" in result
 
     @respx.mock
     async def test_loki_unreachable(self) -> None:
@@ -310,229 +337,365 @@ class TestLokiListLabelValues:
 
 # --- loki_correlate_changes ---
 
+LOKI = "http://loki.test:3100"
+REF = "2024-06-15T14:00:00Z"
+REF_NS = "1718460000000000000"  # 2024-06-15 14:00:00Z
+EMPTY_STREAMS: dict[str, Any] = {"status": "success", "data": {"resultType": "streams", "result": []}}
+Reply = httpx.Response | Exception
+
+
+def _streams(*streams: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(200, json={"status": "success", "data": {"resultType": "streams", "result": list(streams)}})
+
+
+def _empty() -> httpx.Response:
+    return httpx.Response(200, json=EMPTY_STREAMS)
+
+
+def _count(n: int) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "status": "success",
+            "data": {"resultType": "vector", "result": [{"metric": {}, "value": [1718460000, str(n)]}]},
+        },
+    )
+
+
+def _error_stream(*lines: tuple[str, str], hostname: str = "infra", service: str = "traefik") -> dict[str, Any]:
+    return {
+        "stream": {"hostname": hostname, "service_name": service, "detected_level": "error"},
+        "values": [[ts, text] for ts, text in lines],
+    }
+
+
+def _docker_event_line(action: str, name: str, at_ns: int, **attributes: str) -> str:
+    return json.dumps(
+        {
+            "Type": "container",
+            "Action": action,
+            "Actor": {"ID": "abc", "Attributes": {"name": name, **attributes}},
+            "timeNano": at_ns,
+        }
+    )
+
+
+def _route_query_range(errors: Reply, lifecycle: Reply, other: Reply | None = None) -> respx.Route:
+    """One query_range route that answers by query: error selector, docker-events stream, or anything else."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        query = request.url.params["query"]
+        if "detected_level" in query:
+            reply = errors
+        elif 'service_name="docker-events"' in query:
+            reply = lifecycle
+        else:
+            reply = other if other is not None else _empty()
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return respx.get(f"{LOKI}/loki/api/v1/query_range").mock(side_effect=answer)
+
+
+def _sent_queries(route: respx.Route) -> list[dict[str, str]]:
+    return [dict(call.request.url.params) for call in route.calls]
+
+
+def _error_params(route: respx.Route) -> dict[str, str]:
+    return next(p for p in _sent_queries(route) if "detected_level" in p["query"])
+
+
+def _lifecycle_params(route: respx.Route) -> dict[str, str]:
+    return next(p for p in _sent_queries(route) if 'service_name="docker-events"' in p["query"])
+
 
 @pytest.mark.integration
 class TestLokiCorrelateChanges:
     @respx.mock
     async def test_successful_correlation(self) -> None:
-        # Mock error query
-        respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"query": '{detected_level=~"error|warn|fatal"}'},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "status": "success",
-                    "data": {
-                        "resultType": "streams",
-                        "result": [
-                            {
-                                "stream": {
-                                    "hostname": "infra",
-                                    "service_name": "traefik",
-                                    "detected_level": "error",
-                                },
-                                "values": [
-                                    ["1718452800000000000", "502 Bad Gateway for backend"],
-                                ],
-                            }
-                        ],
-                    },
-                },
-            )
+        _route_query_range(
+            errors=_streams(_error_stream(("1718459700000000000", "502 Bad Gateway for backend"))),
+            lifecycle=_streams(
+                {
+                    "stream": {"hostname": "infra", "service_name": "docker-events"},
+                    "values": [["1718459400000000000", _docker_event_line("start", "adguard", 1718459400000000000)]],
+                }
+            ),
         )
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(1))
 
-        # Mock lifecycle query
-        respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"limit": "100"},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "status": "success",
-                    "data": {
-                        "resultType": "streams",
-                        "result": [
-                            {
-                                "stream": {
-                                    "hostname": "infra",
-                                    "service_name": "adguard",
-                                    "detected_level": "info",
-                                },
-                                "values": [
-                                    ["1718452500000000000", "Container started"],
-                                ],
-                            }
-                        ],
-                    },
-                },
-            )
-        )
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF, "window_minutes": 30})
 
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-                "window_minutes": 30,
-            }
-        )
-        assert "Time window" in result
-        assert "significant events" in result
-        assert "Chronological Timeline" in result
+        assert "Time window: 2024-06-15 13:30:00Z to 2024-06-15 14:00:00Z (30 minutes)" in result
+        assert "Found 2 significant events across 2 services" in result
+        assert "[2024-06-15 13:50:00Z] [LIFECYCLE] infra/adguard: start" in result
+        assert "[2024-06-15 13:55:00Z] [ERROR] infra/traefik: 502 Bad Gateway for backend" in result
+        # Timeline prints oldest first
+        assert result.index("infra/adguard: start") < result.index("infra/traefik: 502")
+        assert "WARNING" not in result
 
     @respx.mock
-    async def test_correlation_with_filters(self) -> None:
-        route_error = respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"limit": "200"},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={"status": "success", "data": {"resultType": "streams", "result": []}},
-            )
+    async def test_correlation_requests_newest_first(self) -> None:
+        route = _route_query_range(errors=_empty(), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        sent = _sent_queries(route)
+        assert len(sent) == 2
+        assert [p["direction"] for p in sent] == ["backward", "backward"]
+        assert _error_params(route)["limit"] == "200"
+        assert _lifecycle_params(route)["limit"] == "100"
+
+    @respx.mock
+    async def test_correlation_reports_n_of_m_when_capped(self) -> None:
+        _route_query_range(
+            errors=_streams(
+                _error_stream(
+                    ("1718459940000000000", "newest"),
+                    ("1718459880000000000", "middle"),
+                    ("1718459820000000000", "older"),
+                )
+            ),
+            lifecycle=_empty(),
+        )
+        count_route = respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(775))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF, "window_minutes": 360})
+
+        assert "showing newest 3 of 775 error/warn lines" in result
+        params = dict(count_route.calls.last.request.url.params)
+        assert params["time"] == REF_NS
+        assert params["query"].startswith("sum(count_over_time({")
+        assert params["query"].endswith("}[21600s]))")
+        assert 'detected_level=~"error|err|fatal|critical|crit|warn|warning"' in params["query"]
+
+    @respx.mock
+    async def test_no_n_of_m_when_all_lines_returned(self) -> None:
+        _route_query_range(errors=_streams(_error_stream(("1718459940000000000", "only one"))), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(1))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert "Error/warn lines: 1 in the window" in result
+        assert "showing newest" not in result
+
+    @respx.mock
+    async def test_count_failure_leaves_out_m_and_says_why(self) -> None:
+        _route_query_range(errors=_streams(_error_stream(("1718459940000000000", "boom"))), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(
+            return_value=httpx.Response(500, text="too many outstanding requests")
         )
 
-        respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"limit": "100"},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={"status": "success", "data": {"resultType": "streams", "result": []}},
-            )
-        )
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
 
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-                "hostname": "infra",
-                "service_name": "traefik",
-            }
+        assert "Error/warn lines: 1, newest first (limit 200); the total count failed: HTTP 500" in result
+        assert "too many outstanding requests" in result
+        assert " of " not in result.split("Error/warn lines:")[1].splitlines()[0]
+        # A failed count is not a failed sub-query
+        assert "WARNING" not in result
+        assert "infra/traefik: boom" in result
+
+    @respx.mock
+    async def test_error_selector_includes_warning_and_err(self) -> None:
+        route = _route_query_range(errors=_empty(), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        query = _error_params(route)["query"]
+        assert query == '{detected_level=~"error|err|fatal|critical|crit|warn|warning", service_name!="docker-events"}'
+
+    @respx.mock
+    async def test_lifecycle_from_docker_events_not_keyword_grep(self) -> None:
+        wud_cron = {
+            "stream": {"hostname": "infra", "service_name": "wud", "detected_level": "info"},
+            "values": [["1718459000000000000", "Cron started (0 * * * *)"]],
+        }
+        route = _route_query_range(
+            errors=_empty(),
+            lifecycle=_streams(
+                {
+                    "stream": {"hostname": "media", "service_name": "docker-events"},
+                    "values": [
+                        [
+                            "1718459100000000000",
+                            _docker_event_line("die", "jellyfin", 1718459100000000000, exitCode="137"),
+                        ],
+                        [
+                            "1718459000000000000",
+                            _docker_event_line("kill", "jellyfin", 1718459000000000000, signal="9"),
+                        ],
+                    ],
+                }
+            ),
+            other=_streams(wud_cron),
         )
-        assert "hostname=infra" in result
-        assert "service_name=traefik" in result
-        # Error query should include the hostname and service filters
-        assert route_error.called
-        query_param = route_error.calls.last.request.url.params["query"]
-        assert "infra" in query_param
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert "Cron started" not in result
+        assert "media/jellyfin: kill signal=9" in result
+        assert "media/jellyfin: die exitCode=137" in result
+        lifecycle_query = _lifecycle_params(route)["query"]
+        assert lifecycle_query.startswith('{service_name="docker-events"}')
+        assert lifecycle_query.endswith(
+            ' | json Type="Type", Action="Action" | Type="container"'
+            + ' | Action=~"start|stop|restart|die|kill|oom|health_status: unhealthy"'
+        )
+        assert "Container lifecycle events: 2 from docker-events" in result
+
+    @respx.mock
+    async def test_subquery_failure_is_visible(self) -> None:
+        _route_query_range(
+            errors=_streams(_error_stream(("1718459940000000000", "502 Bad Gateway"))),
+            lifecycle=httpx.Response(500, text="lifecycle broke"),
+        )
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(1))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert "WARNING: lifecycle query failed: HTTP 500 - lifecycle broke; the timeline is incomplete" in result
+        assert "infra/traefik: 502 Bad Gateway" in result
+
+    @respx.mock
+    async def test_error_subquery_failure_is_visible(self) -> None:
+        _route_query_range(
+            errors=httpx.TimeoutException("read timed out"),
+            lifecycle=_streams(
+                {
+                    "stream": {"hostname": "media", "service_name": "docker-events"},
+                    "values": [["1718459100000000000", _docker_event_line("oom", "sonarr", 1718459100000000000)]],
+                }
+            ),
+        )
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert "WARNING: error/warn query failed: Loki query timed out after 15s" in result
+        assert "the timeline is incomplete" in result
+        assert "media/sonarr: oom" in result
+        # No "N error/warn lines" claim when that query failed
+        assert "Error/warn lines:" not in result
+
+    @respx.mock
+    async def test_loki_error_status_counts_as_failure(self) -> None:
+        _route_query_range(errors=httpx.Response(200, json={"status": "error"}), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert "WARNING: error/warn query failed: Loki returned status 'error'" in result
+
+    @respx.mock
+    async def test_both_subqueries_fail_raises(self) -> None:
+        respx.get(f"{LOKI}/loki/api/v1/query_range").mock(side_effect=httpx.ConnectError("Connection refused"))
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(side_effect=httpx.ConnectError("Connection refused"))
+        ready = respx.get(f"{LOKI}/ready").mock(return_value=httpx.Response(200, text="ready"))
+
+        with pytest.raises(ToolException) as excinfo:
+            await loki_correlate_changes.coroutine(reference_time=REF)  # type: ignore[misc]  # pyright: ignore
+
+        message = str(excinfo.value)
+        assert "error/warn query failed: Cannot connect to Loki at http://loki.test:3100" in message
+        assert "lifecycle query failed: Cannot connect to Loki" in message
+        assert not ready.called
 
     @respx.mock
     async def test_no_events_found(self) -> None:
-        respx.get("http://loki.test:3100/loki/api/v1/query_range").mock(
-            return_value=httpx.Response(
-                200,
-                json={"status": "success", "data": {"resultType": "streams", "result": []}},
-            )
-        )
-        # Mock /ready for connectivity check
-        respx.get("http://loki.test:3100/ready").mock(return_value=httpx.Response(200, text="ready"))
+        """Both queries answer with nothing: an empty timeline, not an error, and no /ready probe."""
+        _route_query_range(errors=_empty(), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+        ready = respx.get(f"{LOKI}/ready").mock(return_value=httpx.Response(200, text="ready"))
 
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-            }
-        )
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
         assert "No significant events" in result
-
-    @respx.mock
-    async def test_loki_unreachable(self) -> None:
-        respx.get("http://loki.test:3100/loki/api/v1/query_range").mock(
-            side_effect=httpx.ConnectError("Connection refused")
-        )
-        respx.get("http://loki.test:3100/ready").mock(side_effect=httpx.ConnectError("Connection refused"))
-
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-            }
-        )
-        assert "Cannot connect" in result
+        assert "Error/warn lines: 0 in the window" in result
+        assert "WARNING" not in result
+        assert not ready.called
 
     async def test_invalid_reference_time(self) -> None:
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "not-a-time",
-            }
-        )
-        assert "Cannot parse time" in result
+        result = await loki_correlate_changes.ainvoke({"reference_time": "not-a-time"})
+        assert "Invalid time 'not-a-time'" in result
 
     @respx.mock
-    async def test_no_filters_uses_valid_selector(self) -> None:
-        """Without hostname/service filters, queries must NOT use empty '{}' selector."""
-        error_route = respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"limit": "200"},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={"status": "success", "data": {"resultType": "streams", "result": []}},
-            )
+    async def test_correlation_with_filters(self) -> None:
+        route = _route_query_range(errors=_empty(), lifecycle=_empty())
+        count_route = respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        result = await loki_correlate_changes.ainvoke(
+            {"reference_time": REF, "hostname": "infra", "service_name": "traefik"}
         )
 
-        lifecycle_route = respx.get(
-            "http://loki.test:3100/loki/api/v1/query_range",
-            params__contains={"limit": "100"},
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json={"status": "success", "data": {"resultType": "streams", "result": []}},
-            )
+        assert "Filters: hostname=infra, service_name=traefik" in result
+        error_query = _error_params(route)["query"]
+        assert error_query == (
+            '{hostname="infra", service_name="traefik", detected_level=~"error|err|fatal|critical|crit|warn|warning"}'
         )
+        assert count_route.calls.last.request.url.params["query"] == f"sum(count_over_time({error_query}[1800s]))"
+        lifecycle_query = _lifecycle_params(route)["query"]
+        assert lifecycle_query.startswith('{service_name="docker-events", hostname="infra"} |= "traefik" | json')
 
-        # Mock /ready for connectivity check
-        respx.get("http://loki.test:3100/ready").mock(return_value=httpx.Response(200, text="ready"))
+    @respx.mock
+    async def test_hostname_with_quote_is_escaped(self) -> None:
+        route = _route_query_range(errors=_empty(), lifecycle=_empty())
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
 
         await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-                "window_minutes": 10,
-            }
+            {"reference_time": REF, "hostname": 'media"} or {x="', "service_name": "svc\\"}
         )
 
-        # Lifecycle query must NOT contain an empty {} selector
-        assert lifecycle_route.called
-        lifecycle_query = lifecycle_route.calls.last.request.url.params["query"]
-        assert not lifecycle_query.startswith("{}")
-        assert 'hostname=~".+"' in lifecycle_query
-
-        # Error query should also use a valid selector
-        assert error_route.called
-        error_query = error_route.calls.last.request.url.params["query"]
-        assert not error_query.startswith("{}")
+        error_query = _error_params(route)["query"]
+        assert error_query.startswith('{hostname="media\\"} or {x=\\"", service_name="svc\\\\", ')
+        lifecycle_query = _lifecycle_params(route)["query"]
+        assert lifecycle_query.startswith(
+            '{service_name="docker-events", hostname="media\\"} or {x=\\""} |= "svc\\\\" | json'
+        )
 
     @respx.mock
-    async def test_deduplicates_events(self) -> None:
-        """Events found by both error and lifecycle queries should not be duplicated."""
-        same_event = {
-            "stream": {
-                "hostname": "infra",
-                "service_name": "traefik",
-                "detected_level": "error",
-            },
-            "values": [
-                ["1718452800000000000", "Container exited with error"],
-            ],
-        }
-
-        # Both queries return the same event
-        respx.get("http://loki.test:3100/loki/api/v1/query_range").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "status": "success",
-                    "data": {"resultType": "streams", "result": [same_event]},
-                },
-            )
+    async def test_service_filter_drops_other_containers_on_the_stream(self) -> None:
+        _route_query_range(
+            errors=_empty(),
+            lifecycle=_streams(
+                {
+                    "stream": {"hostname": "media", "service_name": "docker-events"},
+                    "values": [
+                        ["1718459100000000000", _docker_event_line("start", "jellyfin", 1718459100000000000)],
+                        ["1718459000000000000", _docker_event_line("start", "jellyfin-vue", 1718459000000000000)],
+                        ["1718458900000000000", "not json"],
+                    ],
+                }
+            ),
         )
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
 
-        result = await loki_correlate_changes.ainvoke(
-            {
-                "reference_time": "2024-06-15T14:00:00Z",
-            }
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF, "service_name": "jellyfin"})
+
+        assert "media/jellyfin: start" in result
+        assert "jellyfin-vue" not in result
+        assert "1 docker-events line(s) were not docker events JSON and were skipped" in result
+
+    @respx.mock
+    async def test_lifecycle_limit_reached_is_named(self) -> None:
+        values = [
+            [str(1718459000000000000 + i), _docker_event_line("restart", "flappy", 1718459000000000000 + i)]
+            for i in range(100)
+        ]
+        _route_query_range(
+            errors=_empty(),
+            lifecycle=_streams({"stream": {"hostname": "media", "service_name": "docker-events"}, "values": values}),
         )
-        # Should find 1 event, not 2
-        assert "1 significant events" in result
+        respx.get(f"{LOKI}/loki/api/v1/query").mock(return_value=_count(0))
+
+        result = await loki_correlate_changes.ainvoke({"reference_time": REF})
+
+        assert (
+            "Container lifecycle events: 100 from docker-events (newest 100 lines read; older ones not shown)" in result
+        )
 
 
 # --- loki_metric_query ---

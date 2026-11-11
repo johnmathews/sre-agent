@@ -1,30 +1,46 @@
 """Unit tests for PBS tool formatting and helpers."""
 
 import ssl
+from datetime import UTC, datetime
 
 from src.agent.tools.pbs import (
     PbsBackupGroup,
     PbsDatastoreStatus,
     PbsTaskEntry,
     _format_backup_groups,
-    _format_bytes,
     _format_datastore_status,
     _format_pbs_tasks,
     _pbs_ssl_verify,
 )
 
+NOW = datetime(2023, 11, 15, 22, 13, 20, tzinfo=UTC)  # 1700000000 + 1 day
 
-class TestFormatBytes:
-    def test_bytes(self) -> None:
-        assert _format_bytes(512) == "512.0 B"
 
-    def test_gibibytes(self) -> None:
-        result = _format_bytes(4 * 1024 * 1024 * 1024)
-        assert "GiB" in result
+class TestLastBackupDate:
+    def test_last_backup_is_dated_with_age(self) -> None:
+        group: PbsBackupGroup = {"backup_type": "vm", "backup_id": "100", "backup_count": 5, "last_backup": 1700000000}
+        result = _format_backup_groups([group], "backups", now=NOW)
+        assert "last=2023-11-14 22:13:20Z (1d ago)" in result
+        assert "1700000000" not in result
 
-    def test_tebibytes(self) -> None:
-        result = _format_bytes(2 * 1024**4)
-        assert "TiB" in result
+    def test_missing_last_backup_says_never(self) -> None:
+        group: PbsBackupGroup = {"backup_type": "vm", "backup_id": "100", "backup_count": 0}
+        result = _format_backup_groups([group], "backups", now=NOW)
+        assert "1970" not in result
+        assert "last=none" in result
+
+
+class TestBytesNotTruncated:
+    def test_bytes_not_truncated(self) -> None:
+        """1.99 TiB used to print as 1.0 TiB (integer division between units)."""
+        store: PbsDatastoreStatus = {
+            "store": "backups",
+            "total": 4 * 1024**4,
+            "used": int(1.99 * 1024**4),
+            "avail": 2 * 1024**4,
+        }
+        result = _format_datastore_status([store])
+        assert "Used: 2.0 TiB / 4.0 TiB" in result
 
 
 class TestFormatDatastoreStatus:
@@ -82,7 +98,7 @@ class TestFormatBackupGroups:
             "last_backup": 1700000000,
             "owner": "root@pam",
         }
-        result = _format_backup_groups([group], "backups")
+        result = _format_backup_groups([group], "backups", now=NOW)
         assert "1 backup group(s)" in result
         assert "VM/100" in result
         assert "5 backup(s)" in result
@@ -94,7 +110,7 @@ class TestFormatBackupGroups:
             {"backup_type": "ct", "backup_id": "101", "backup_count": 2, "last_backup": 1700000000},
             {"backup_type": "host", "backup_id": "proxmox", "backup_count": 1, "last_backup": 1700000000},
         ]
-        result = _format_backup_groups(groups, "backups")
+        result = _format_backup_groups(groups, "backups", now=NOW)
         assert "3 backup group(s)" in result
         assert "VM/100" in result
         assert "CT/101" in result
@@ -105,7 +121,7 @@ class TestFormatBackupGroups:
             {"backup_type": "vm", "backup_id": "200", "backup_count": 1, "last_backup": 1700000000},
             {"backup_type": "vm", "backup_id": "100", "backup_count": 1, "last_backup": 1700000000},
         ]
-        result = _format_backup_groups(groups, "backups")
+        result = _format_backup_groups(groups, "backups", now=NOW)
         lines = result.split("\n")
         group_lines = [line for line in lines if "VM/" in line]
         assert "100" in group_lines[0]
@@ -120,7 +136,7 @@ class TestFormatBackupGroups:
             "last-backup": 1700000000,
             "owner": "root@pam",
         }
-        result = _format_backup_groups([group], "backups")  # type: ignore[list-item]
+        result = _format_backup_groups([group], "backups", now=NOW)  # type: ignore[list-item]
         assert "VM/100" in result
         assert "5 backup(s)" in result
         assert "root@pam" in result
@@ -133,7 +149,7 @@ class TestFormatBackupGroups:
             "last_backup": 1700000000,
             "comment": "daily backup",
         }
-        result = _format_backup_groups([group], "backups")
+        result = _format_backup_groups([group], "backups", now=NOW)
         assert "daily backup" in result
 
 
@@ -155,6 +171,9 @@ class TestFormatPbsTasks:
         assert "[OK]" in result
         assert "backup" in result
         assert "(vm/100)" in result
+        assert "start=2023-11-14 22:13:20Z" in result
+        assert "end=2023-11-14 23:13:20Z" in result
+        assert "UTC" not in result
 
     def test_failed_task(self) -> None:
         task: PbsTaskEntry = {

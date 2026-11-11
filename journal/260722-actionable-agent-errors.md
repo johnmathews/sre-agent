@@ -18,5 +18,5 @@ refresh token) but discarded it, forwarding the SDK's opaque
 - New metric `sre_assistant_agent_errors_total{reason}` enables the
   `llm_auth_failed` alert the 260621 journal specced.
 
-Design: `docs/superpowers/specs/2026-07-22-actionable-agent-errors-design.md`.
+Design: `docs/archive/2026-07-22-actionable-agent-errors-design.md`.
 Frontend half lives in the `sre-webapp` repo.

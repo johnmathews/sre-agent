@@ -2,9 +2,48 @@
 
 ## Request Lifecycle
 
+Two kinds of request reach the app. An MCP client calls one tool on `/mcp`, and the client's own model does the
+reasoning. A question on `/ask` or `/ask/stream` runs the chat agent, which picks the tools itself. Both run the
+same tools from the registry (see [Tool Registration](#tool-registration)).
+
+### MCP request
+
+`/mcp` carries JSON-RPC over Streamable HTTP in stateless mode: `initialize`, `tools/list` and `tools/call`. A
+`tools/call` runs this path:
+
+```
+POST /mcp
+  -> TrailingSlashForMCP: /mcp -> /mcp/ (no 307 redirect: some MCP clients do not follow one)
+  -> MCPDispatch (src/api/main.py) -> app.state.mcp_app
+       # 503 {"error": "MCP server not started"} outside the lifespan
+  -> McpAccessCheck (src/api/mcp_access.py, MCP_ACCESS_MODE)
+       -> sre_assistant_mcp_http_requests_total{client, access}.inc()   # every HTTP request, not only tool calls
+       -> request.state.mcp_client (+ mcp_identity_ref when the JWT verifies)
+       # enforce: 403 without a valid Access JWT; enforce with no AUD or team domain: 503
+  -> FastMCP transport
+  -> ToolCallObserver.on_call_tool (src/api/mcp_server.py)   # starts the timer, reads the client label
+       -> RegistryTool.run(arguments)
+            -> run_tool(spec, arguments) (src/agent/tool_registry.py)
+                 # unknown argument name -> InvalidToolArguments listing the accepted names
+                 # args_schema.model_validate fails -> InvalidToolArguments naming each field
+                 -> the tool's coroutine (a sync tool runs in a worker thread)
+            # ToolException -> ToolError: an isError result with the tool's message
+       # an unknown tool name raises NotFoundError inside FastMCP
+       -> observe_tool_call(source="mcp", client, outcome, ...)   # one tool_call line + tool metrics
+  -> a text result (no output schema), or an isError result
+```
+
+`ToolCallObserver` re-raises every exception after recording it, so the client sees the same error it would without
+the observer. The log line, the outcomes and the access modes are in
+[architecture.md](architecture.md#tool-call-log-line).
+
+### Chat request
+
+The numbered steps below follow a question through the chat agent.
+
 ### 1. HTTP Request
 
-A user question arrives via one of three interfaces:
+A user question arrives via one of four interfaces:
 
 - **FastAPI** — `POST /ask` with JSON body `{"question": "...", "session_id": "..."}` (`src/api/main.py`)
 - **FastAPI (streaming)** — `POST /ask/stream` with the same JSON body, returns Server-Sent Events (`src/api/main.py`)
@@ -201,9 +240,10 @@ The enabling conditions:
 ```
 Always enabled:
   - get_current_time, runbook_search (a missing vector store is reported when it is called)
-  - prometheus_search_metrics, prometheus_instant_query, prometheus_range_query
+  - prometheus_search_metrics, prometheus_instant_query, prometheus_range_query, scrape_targets, container_status
   - grafana_get_alerts, grafana_get_alert_rules
   - grafana_get_dashboard, grafana_search_dashboards
+  - upgrade_status (UPGRADE_ADVISOR_DB_PATH adds verdicts), service_health (LOKI_URL adds the error count)
 
 Conditional (config-dependent):
   - truenas_* tools  (if TRUENAS_URL is set)
@@ -214,6 +254,22 @@ Conditional (config-dependent):
   - memory_* tools   (if MEMORY_DB_PATH is set)
   - sre_agent_list_conversations, sre_agent_get_conversation (if CONVERSATION_HISTORY_DIR is set; /mcp only)
 ```
+
+### Adding a tool
+
+1. Write the tool as a LangChain `@tool` with a Pydantic `args_schema`. Give every field a description and its limits,
+   and raise `ToolException` with a readable message on failure.
+2. Add a `ToolSpec` to `TOOL_SPECS` with its enabling condition, label and group. Pass `read_only=False` for a tool
+   that writes, `open_world=False` for one that reads only local state, and `surfaces=MCP_ONLY` to keep it off the
+   agent. If the module imports `get_settings`, add its patch site to `mock_settings` in `tests/conftest.py`.
+3. Add the name to `EXPECTED_NAMES` in `tests/test_tool_registry.py`.
+4. Add a `### <name>` section under its group in [tool-reference.md](tool-reference.md) and bump the count at the top.
+   `tests/test_docs_tool_reference.py` fails until both match the registry.
+5. Regenerate the `/mcp` contract snapshot:
+   `UPDATE_MCP_SNAPSHOT=1 uv run pytest tests/test_mcp_server_integration.py -k test_mcp_contract_matches_snapshot`.
+
+`/mcp`, both agent paths, the progress labels, the `tool_call` line and the metrics all pick the tool up from the
+registry. Nothing else needs an edit.
 
 ## Settings Loading
 
@@ -229,7 +285,7 @@ get_settings() -> Settings()  [cached via @lru_cache]
 ```
 
 Each tool module imports `get_settings` independently. In tests, `conftest.py::mock_settings` patches `get_settings` at
-every import site (16 patch sites as of Phase 7).
+every import site listed in its `patch_sites` (42 on 2026-11-11).
 
 ### Provider Selection
 
@@ -281,7 +337,8 @@ out; any other error is raised at once. Each attempt times out after the remaini
 
 ## Metrics Flow
 
-Self-instrumentation metrics are collected at two levels:
+Self-instrumentation metrics are collected at three levels: the HTTP request (`/ask`, `/report`), the tool call (every
+surface) and the LLM call (agent paths).
 
 ### Request level (FastAPI)
 
@@ -297,6 +354,26 @@ POST /ask (and POST /ask/stream)
 
 On error, both the error counter and duration histogram are recorded _before_ the HTTPException is raised, so failed
 requests are fully instrumented.
+
+### Tool call level (every surface)
+
+`observe_tool_call` (`src/observability/tool_calls.py`) is the only writer of the tool metrics and the `tool_call` log
+line. Three callers feed it:
+
+```
+/mcp            ToolCallObserver.on_call_tool  (FastMCP middleware, src/api/mcp_server.py)   source=mcp, client=<label>
+SDK agent       the sre server's tool handler  (src/agent/mcp_tools.py)                     source=agent, client=agent
+LangGraph agent MetricsCallbackHandler          (src/observability/callbacks.py)             source=agent, client=agent
+
+observe_tool_call(tool, source, client, outcome, error_class, error, duration_s, result_chars, arguments, identity_ref)
+  -> TOOL_CALLS_TOTAL.labels(tool_name, status=outcome, source, client).inc()   # tool_name "unknown" for unknown_tool
+  -> TOOL_CALL_DURATION.labels(tool_name, source).observe(duration_s)
+  -> TOOL_RESULT_CHARS.labels(tool_name, source).observe(result_chars)         # successful calls only
+  -> one "tool_call ..." line (INFO; ERROR with the traceback for outcome "internal")
+```
+
+On `/mcp`, `McpAccessCheck` also counts each HTTP request in `sre_assistant_mcp_http_requests_total{client, access}`
+before the transport runs.
 
 ### Agent level (LangChain callback handler)
 
@@ -334,19 +411,18 @@ During execution, LangGraph calls the handler at these points:
 **Tool lifecycle:**
 
 ```
-on_tool_start(serialized, input_str, run_id)
-  -> stores run_id → (time.monotonic(), tool_name) in _start_times dict
+on_tool_start(serialized, input_str, run_id, inputs)
+  -> stores run_id → (time.monotonic(), tool_name, arguments) in _start_times dict
 
 on_tool_end(output, run_id)
   -> pops run_id from _start_times
-  -> duration = now - start_time
-  -> TOOL_CALL_DURATION.labels(tool_name).observe(duration)
-  -> TOOL_CALLS_TOTAL.labels(tool_name, status="success").inc()
+  -> output.status == "error" (handle_tool_error turned a ToolException into a ToolMessage)
+       -> observe_tool_call(outcome="error", error_class="ToolException", ...)
+  -> otherwise observe_tool_call(outcome="success", result_chars=len(text), ...)
 
 on_tool_error(error, run_id)
   -> pops run_id from _start_times
-  -> TOOL_CALL_DURATION.labels(tool_name).observe(duration)
-  -> TOOL_CALLS_TOTAL.labels(tool_name, status="error").inc()
+  -> observe_tool_call(outcome=classify_tool_error(error), ...)
 ```
 
 **LLM lifecycle:**
@@ -530,12 +606,17 @@ verify_deploy(id)   # after the delay, or from verify_pending()
 1. Prometheus — `GET /-/healthy`
 2. Grafana — `GET /api/health` with auth header
 3. Loki (if configured) — `GET /ready`
-4. TrueNAS (if configured) — `GET /api/v2.0/core/ping` with Bearer token
+4. TrueNAS (if configured) — `GET /api/v2.0/core/ping` with Bearer token. A `TRUENAS_URL` that is not https is
+   unhealthy without a request, so the key is never sent in clear.
 5. Proxmox VE (if configured) — `GET /api2/json/version` with API token
 6. PBS (if configured) — `GET /api2/json/version` with API token
-7. Vector store — checks if `chroma_db/` directory exists
+7. OAuth token (`LLM_PROVIDER=anthropic` only) — `oauth_refresh.get_token_health()`
+8. Vector store — checks if the `.chroma_db/` directory exists
+9. MCP server — healthy only when the lifespan set the server and the dispatch target, and `list_tools()` returns
+   exactly the count the registry enables (above zero)
 
-Returns overall status: "healthy" (all OK), "degraded" (some failing), "unhealthy" (all failing).
+Each result sets `sre_assistant_component_healthy{component}`. Returns overall status: "healthy" (all OK), "degraded"
+(some failing), "unhealthy" (all failing). The HTTP status is 200 in every case.
 
 ## Eval Framework Flow
 
@@ -548,7 +629,7 @@ scripts/run_eval.py
   -> for each case:
        run_eval_case(case, api_key, model, ...)
          1. Build FakeSettings (real LLM key + fake infra URLs)
-         2. Patch get_settings at all 11 import sites
+         2. Patch get_settings at the 14 import sites in _SETTINGS_PATCH_SITES
          3. Disable runbook_search (no vector store needed)
          4. Set up respx mocks from case.mocks
          5. build_agent() + agent.ainvoke() with full message history
@@ -593,10 +674,10 @@ is the **system prompt (~6,400 tokens) and tool definitions (~1,500+ tokens)** i
 | Simple (1 tool, 2 LLM calls) | ~16,600 | ~300 | ~$0.003 |
 | Complex (3 tools, 4 LLM calls) | ~33,000 | ~450 | ~$0.005 |
 
-**Full suite (28 cases, mixed complexity): ~$0.10–0.15 per run.**
+**Full suite (32 cases, mixed complexity): ~$0.10–0.17 per run.**
 
 Key factors that make eval expensive relative to naive token estimates:
 - System prompt (25KB / ~6,400 tokens) is resent on **every** LLM round-trip
 - Tool schemas (~300 tokens each × 5–9 tools) are resent on every round-trip
 - Multi-tool cases compound: each round adds all prior messages to the context
-- The judge call is cheap (~$0.0001) but there are 28 of them
+- The judge call is cheap (~$0.0001) but there are 32 of them

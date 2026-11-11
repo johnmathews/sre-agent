@@ -1,3 +1,5 @@
+**Status:** superseded by [architecture.md](../architecture.md) ("Upgrade Advisor"), [code-flow.md](../code-flow.md) ("Upgrade Advisor Flows") and [ADR-0003](../adr/0003-deploy-is-never-an-agent-or-mcp-tool.md) (2026-11-11).
+
 # Upgrade Advisor, Part B: The Advisor (sre-agent) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -15,7 +17,7 @@ the approve handler and the verify path, never by the agent or MCP tools.
 **Tech Stack:** Python 3.13, FastAPI, httpx, pydantic v2, SQLite, APScheduler 3, PyJWT[crypto]
 (new), respx + pytest for tests, mypy strict, ruff.
 
-**Spec:** `docs/superpowers/specs/2026-10-26-upgrade-advisor-design.md`.
+**Spec:** `docs/archive/2026-10-26-upgrade-advisor-design.md`.
 Companion plan: `2026-10-26-upgrade-advisor-a-hosts.md` (owns the env and allowlist contract;
 its "Interfaces shared with Part B" section is binding here).
 

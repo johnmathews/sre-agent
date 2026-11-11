@@ -1,3 +1,5 @@
+**Status:** superseded by the home-server repo's [`documentation/wud.md`](https://github.com/johnmathews/home-server/blob/main/documentation/wud.md) §7 and [architecture.md](../architecture.md) ("Upgrade Advisor") (2026-11-11).
+
 # Upgrade Advisor, Part A: Hosts (home-server repo) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -14,7 +16,7 @@ files the model reads, and passes the advisor's env to `sre-agent`.
 **Tech Stack:** Ansible, Docker Compose v2, WUD 9.6.0 (`sidecar_wud_version`), iptables
 `DOCKER-USER`, pytest + Jinja for template tests.
 
-**Spec:** `docs/superpowers/specs/2026-10-26-upgrade-advisor-design.md` (sre-agent repo).
+**Spec:** `docs/archive/2026-10-26-upgrade-advisor-design.md` (sre-agent repo).
 Companion plan: `2026-10-26-upgrade-advisor-b-advisor.md` (the advisor code).
 
 **Repo:** every path below is relative to the home-server repo (`proxmox-setup`), not sre-agent.

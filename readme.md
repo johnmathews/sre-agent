@@ -1,16 +1,25 @@
 # HomeLab SRE Assistant
 
-An AI-powered Site Reliability Engineering assistant for homelab infrastructure, built with LangChain. It connects to
-live infrastructure telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a RAG knowledge base (runbooks,
-Ansible playbooks) to answer operational questions, explain alerts, correlate changes, and generate incident reports.
+**Status:** active. **Last updated:** 2026-11-11. **Last verified:** 2026-11-11 (claims checked against `src/` at
+`69a7f84`. Live deployment not re-verified).
+
+An MCP server and AI agent for a Proxmox homelab. It serves read-only tools for Prometheus, Grafana, Loki, Proxmox VE,
+Proxmox Backup Server (PBS), TrueNAS and a runbook knowledge base over MCP at `/mcp`, and the same tools to a chat agent
+at `/ask`.
+
+Most use comes from MCP clients: Claude Code sessions, the claude.ai connector and other homelab apps. The chat agent
+backs a separate Vue web UI ([sre-webapp](https://github.com/johnmathews/sre-webapp)) and a CLI. The app also writes a
+weekly reliability report, explains Gatus outages and reviews pending container image upgrades.
 
 ---
 
 ## Table of Contents
 
+- [Using it from an MCP client](#using-it-from-an-mcp-client)
 - [Getting Started](#getting-started)
-  - [macOS Tahoe / Sequoia: Local Network Access](#macos-tahoe--sequoia-local-network-access)
+  - [macOS: Local Network Access](#macos-local-network-access)
 - [Deploying with Docker](#deploying-with-docker)
+  - [Endpoints](#endpoints)
   - [Adding to an Existing Docker Compose Stack](#adding-to-an-existing-docker-compose-stack)
   - [Environment Variables](#environment-variables)
   - [Networking](#networking)
@@ -18,100 +27,126 @@ Ansible playbooks) to answer operational questions, explain alerts, correlate ch
   - [Updating](#updating)
   - [Building from Source](#building-from-source)
 - [CI/CD](#cicd)
-- [Motivation \& Context](#motivation--context)
-- [Goals](#goals)
 - [Architecture](#architecture)
-- [Current Capabilities](#current-capabilities)
-- [Use Cases](#use-cases)
+- [Capabilities](#capabilities)
 - [Failure Modes \& Handling](#failure-modes--handling)
 - [Conversation Memory](#conversation-memory)
+- [Self-Observability](#self-observability)
+- [Weekly Reliability Report](#weekly-reliability-report)
+- [Evaluation Framework](#evaluation-framework)
 - [Tech Stack](#tech-stack)
-- [Roadmap](#roadmap)
+- [Motivation \& Goals](#motivation--goals)
 - [Build Order](#build-order)
   - [Phase 1: Alert Explainer (Core Agent)](#phase-1-alert-explainer-core-agent)
-  - [Phase 2: Synthetic Incident Generator](#phase-2-synthetic-incident-generator)
+  - [Phase 2: Synthetic Incident Generator (Shelved)](#phase-2-synthetic-incident-generator-shelved)
   - [Phase 3: Loki Log Tools](#phase-3-loki-log-tools)
   - [Phase 4: SLI/SLO Dashboard \& Instrumentation](#phase-4-slislo-dashboard--instrumentation)
   - [Phase 5: Evaluation Framework](#phase-5-evaluation-framework)
   - [Phase 6: Weekly Reliability Report](#phase-6-weekly-reliability-report)
   - [Phase 7: Agent Memory Store](#phase-7-agent-memory-store)
   - [Phase 8: Upgrade Advisor](#phase-8-upgrade-advisor)
+  - [Deployment](#deployment)
 - [Repository Structure](#repository-structure)
 - [Non-Goals](#non-goals)
 - [License](#license)
 
 ---
 
-## Getting Started
+## Using it from an MCP client
+
+`/mcp` is a Streamable HTTP MCP server in stateless mode. Each tool carries its parameter descriptions and limits, and
+the server's instructions explain the time formats the tools accept. Clients reach it through a Cloudflare tunnel
+behind Cloudflare Access, so a client sends an Access service token:
 
 ```bash
-# Install dependencies
+claude mcp add --transport http \
+  --header "CF-Access-Client-Id: <client-id>" \
+  --header "CF-Access-Client-Secret: <client-secret>" \
+  -- sre-agent https://<sre-mcp-host>/mcp
+```
+
+The [MCP client guide](docs/mcp-clients.md) covers getting a service token, other clients, the authentication modes,
+which tools need which settings, limits and errors, how to see your own calls in the logs and metrics, and
+troubleshooting.
+
+---
+
+## Getting Started
+
+Prerequisites: Python 3.13, [uv](https://docs.astral.sh/uv/), and Docker for the image smoke test.
+
+```bash
+# Install dependencies, including dev tools
 make dev
 
-# Copy and fill in your API keys
+# Copy the example settings, then edit .env.
+# Required: PROMETHEUS_URL, GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN, OPENAI_API_KEY (runbook embeddings),
+# and ANTHROPIC_API_KEY when LLM_PROVIDER=anthropic.
 cp .env.example .env
-# Edit .env — required: PROMETHEUS_URL, GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN
-# Plus one of: OPENAI_API_KEY (default) or ANTHROPIC_API_KEY (set LLM_PROVIDER=anthropic)
 
-# Build the runbook vector store (required before first use)
+# Build the runbook vector store
 make ingest
 
-# Start the interactive CLI
+# Start the API (with /mcp) on :8000
+make serve
+
+# Or chat with the agent in the terminal
 make chat
 
-# Or start the FastAPI server
-make serve
-# POST /ask          — send questions to the agent (JSON response)
-# POST /ask/stream   — send questions with live SSE progress events
-# POST /report       — generate a weekly reliability report
-# GET /health        — check infrastructure component status
-# POST /incidents/gatus — Gatus alert webhook for the incident explainer (bearer token, posted by Gatus)
-
-# The web UI is a separate repo: github.com/johnmathews/sre-webapp
-# In dev, run `npm run dev` there — it proxies /api to this server at :8000.
-
-# Generate a weekly reliability report to stdout
+# Print a weekly reliability report to stdout
 make report
 
-# Run the full check suite (lint + typecheck + tests)
+# Lint, typecheck and tests
 make check
 ```
 
-### macOS Tahoe / Sequoia: Local Network Access
+The web UI lives in [sre-webapp](https://github.com/johnmathews/sre-webapp). In development, `npm run dev` there proxies
+`/api` to this server on `:8000`.
 
-On macOS 15+ (Sequoia) and macOS 26+ (Tahoe), Apple restricts local network access for processes that aren't children of
-a recognized terminal app. This affects `make chat` if you run it inside **tmux** — the agent's Prometheus/Grafana tool
-calls will fail with `[Errno 65] No route to host` because tmux runs as a daemon under `launchd`, breaking the terminal's
-local network exemption.
+### macOS: Local Network Access
 
-**Workaround:** Run `make chat` directly in your terminal (kitty, iTerm, Terminal.app) without tmux. Apple-signed
-binaries (`/usr/bin/curl`, `/usr/bin/python3`) are exempt and always work, but Python installed via uv, pyenv, or
-Homebrew is not Apple-signed and inherits permissions from the parent process chain.
-
-This only affects local development on macOS. The agent runs without restrictions when deployed in Docker on Linux.
+On macOS 15 (Sequoia) and later, `make chat` inside tmux fails its Prometheus and Grafana calls with `[Errno 65] No
+route to host`. tmux runs under `launchd`, so the Python process loses the terminal's local network permission. Run
+`make chat` directly in the terminal app instead. Docker deployments on Linux are unaffected.
 
 ---
 
 ## Deploying with Docker
 
-The backend builds a single Docker image that runs as two services, plus a separate webapp image:
+The backend builds one image that runs as two services. The web UI is a separate image.
 
-| Service       | Image                                    | Port | Description                              |
-| ------------- | ---------------------------------------- | ---- | ---------------------------------------- |
-| `sre-ingest`  | `ghcr.io/johnmathews/sre-agent`          | —    | One-shot: builds the Chroma vector store |
-| `sre-agent`     | `ghcr.io/johnmathews/sre-agent`          | 8000 | FastAPI backend (`/ask`, `/ask/stream`, `/health`, `/metrics`, `/report`) |
-| `sre-webapp`  | `ghcr.io/johnmathews/sre-webapp`         | 8080 | Vue 3 SPA frontend (separate repo: [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
+| Service      | Image                            | Port | Description                                                   |
+| ------------ | -------------------------------- | ---- | ------------------------------------------------------------- |
+| `sre-ingest` | `ghcr.io/johnmathews/sre-agent`  | none | One-shot job that builds the Chroma vector store              |
+| `sre-agent`  | `ghcr.io/johnmathews/sre-agent`  | 8000 | FastAPI app: `/mcp`, the chat agent, reports and the jobs     |
+| `sre-webapp` | `ghcr.io/johnmathews/sre-webapp` | 8080 | Vue 3 SPA ([johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
 
-The intended deployment is on a Linux host (VM, LXC, bare metal) on the same LAN as your Prometheus, Grafana, and
-other monitored infrastructure. Both pre-built images are published on every push to `main` of their respective repos.
+The intended host is a Linux VM or LXC on the same LAN as Prometheus, Grafana and the other monitored systems. Both
+images are published on every push to `main` of their repos.
+
+### Endpoints
+
+| Endpoint                                     | Purpose                                                                    |
+| -------------------------------------------- | -------------------------------------------------------------------------- |
+| `POST /mcp`                                  | MCP server, with the Cloudflare Access JWT check (`MCP_ACCESS_MODE`)       |
+| `POST /ask`, `POST /ask/stream`              | Chat agent, as JSON or as Server-Sent Events                               |
+| `POST /report`                               | Weekly reliability report on demand                                        |
+| `GET /health`                                | Status of each component, `mcp_server` included                            |
+| `GET /metrics`                               | Prometheus metrics                                                         |
+| `/conversations`, `/conversations/{id}`      | List, search, read, rename and delete stored conversations (web UI)        |
+| `/upgrades/batches/{id}`                     | Upgrade Advisor approval page and deploy (404 unless the advisor is configured) |
+| `POST /incidents/gatus`                      | Gatus alert webhook for the incident explainer (bearer token)              |
+
+> **A published port exposes `/mcp`.** The compose files publish port 8000 on every interface, so any device on the
+> LAN reaches `/mcp` and the other endpoints without passing Cloudflare Access. `/mcp` checks the Access JWT but refuses
+> a caller only with `MCP_ACCESS_MODE=enforce`, and `/ask`, `/report` and `/conversations` have no authentication.
+> Firewall the port so only the tunnel and Prometheus reach it.
 
 ### Adding to an Existing Docker Compose Stack
 
-If you already have a `docker-compose.yml` on your target host, add these service definitions and the `chroma_data`
-volume:
+Add these services and the `chroma_data` volume to the host's `docker-compose.yml`:
 
 ```yaml
-  # --- SRE Assistant services ---
   sre-ingest:
     image: ghcr.io/johnmathews/sre-agent:latest
     command: ["python", "-m", "scripts.ingest_runbooks"]
@@ -125,11 +160,15 @@ volume:
     ports:
       - "8000:8000"
     env_file: .env
+    environment:
+      - CLAUDE_CONFIG_DIR=/app/.claude  # LLM_PROVIDER=anthropic: the SDK reads its OAuth login here
+      - HOME=/app
     restart: unless-stopped
     mem_limit: 768m  # 1 uvicorn worker + up to ~5 concurrent SDK CLI subprocesses
     volumes:
       - chroma_data:/app/.chroma_db
       - ${CONVERSATION_HISTORY_HOST_DIR:-./conversations}:/app/conversations
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/app/.claude  # from `claude login` on the host
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 30s
@@ -148,87 +187,63 @@ volume:
       sre-agent:
         condition: service_healthy
 
-# Add to your existing volumes section:
 volumes:
   chroma_data:
 ```
 
-The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. You run it
-explicitly before first use and after runbook changes (see [Vector Store Persistence](#vector-store-persistence)).
-
-Create a `.env` file alongside your compose file (see [Environment Variables](#environment-variables) below), then
+`sre-ingest` sits in the `setup` profile, so `docker compose up` skips it. Create `.env` next to the compose file, then
 build the vector store and start the services:
 
 ```bash
-# First time: build the vector store
 docker compose run --rm sre-ingest
-
-# Start the API and webapp
 docker compose up -d sre-agent sre-webapp
 ```
 
 ### Environment Variables
 
-Create a `.env` file on the deployment host. See `.env.example` for the full list.
+`.env.example` lists every setting. The required ones:
 
-**Required:**
+| Variable                        | Example                  | Notes                                                        |
+| ------------------------------- | ------------------------ | ------------------------------------------------------------ |
+| `LLM_PROVIDER`                  | `openai` or `anthropic`  | Default `openai`                                             |
+| `OPENAI_API_KEY`                | `sk-proj-...`            | Chat with `LLM_PROVIDER=openai`, and runbook embeddings always |
+| `ANTHROPIC_API_KEY`             | any non-empty value      | Required when `LLM_PROVIDER=anthropic`; the SDK authenticates with the mounted `~/.claude` login, not this key |
+| `PROMETHEUS_URL`                | `http://192.0.2.50:9090` | Must be reachable from inside the container                  |
+| `GRAFANA_URL`                   | `http://192.0.2.50:3000` | Must be reachable from inside the container                  |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | `glsa_...`               | Grafana service account token                                |
 
-| Variable                         | Example                                | Notes                                      |
-| -------------------------------- | -------------------------------------- | ------------------------------------------ |
-| `LLM_PROVIDER`                   | `openai` or `anthropic`               | Default: `openai`                          |
-| `OPENAI_API_KEY`                 | `sk-proj-...`                          | Required when `LLM_PROVIDER=openai`        |
-| `ANTHROPIC_API_KEY`              | `sk-ant-oat01-...`                     | Required when `LLM_PROVIDER=anthropic`     |
-| `PROMETHEUS_URL`                 | `http://192.0.2.50:9090`               | Must be reachable from inside the container |
-| `GRAFANA_URL`                    | `http://192.0.2.50:3000`               | Must be reachable from inside the container |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN`  | `glsa_...`                             | Grafana service account token              |
+Optional settings. An empty value turns the feature off:
 
-**Optional — leave empty or omit to disable the corresponding tools:**
+| Variable                                    | Enables                                                                       |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
+| `PROXMOX_URL`, `PROXMOX_API_TOKEN`          | Proxmox VE tools (4)                                                          |
+| `PBS_URL`, `PBS_API_TOKEN`                  | PBS tools (3)                                                                 |
+| `TRUENAS_URL`, `TRUENAS_API_KEY`            | TrueNAS tools and `hdd_power_status` (6). The URL must be `https`             |
+| `LOKI_URL`                                  | Loki tools (4), and the Loki parts of `service_health` and the report         |
+| `MEMORY_DB_PATH`                            | Memory store and its tools (4)                                                |
+| `MCP_ACCESS_MODE`, `MCP_CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN`, `MCP_CLIENT_NAMES` | The `/mcp` Access check (`off`, `log` (default) or `enforce`) and client names |
+| `EXTRA_DOCS_DIRS`                           | More directories for the runbook store (comma-separated absolute paths)       |
+| `CONVERSATION_HISTORY_HOST_DIR`             | Host path bind-mounted to `/app/conversations` for conversation files         |
+| `REQUEST_TIMEOUT_SECONDS`                   | `/ask` timeout (default 120). A request that runs longer gets HTTP 504        |
+| `USER_TIMEZONE`                             | IANA timezone for the prompt, `get_current_time` and the cron jobs. Default `UTC` |
+| `REPORT_SCHEDULE_CRON`, `SMTP_*`            | Scheduled weekly report and its email                                         |
+| `UPGRADE_ADVISOR_*`                         | Upgrade Advisor                                                               |
+| `INCIDENT_*`, `GATUS_*`, `PUSHOVER_*`       | Incident explainer                                                            |
 
-| Variable              | Enables                     |
-| --------------------- | --------------------------- |
-| `TRUENAS_URL`         | TrueNAS SCALE tools (5 tools) + HDD Power Status (1 tool) |
-| `TRUENAS_API_KEY`     | TrueNAS API auth (Bearer token) |
-| `PROXMOX_URL`         | Proxmox VE tools (4 tools)  |
-| `PROXMOX_API_TOKEN`   | PVE API auth                |
-| `PBS_URL`             | PBS backup tools (3 tools)  |
-| `PBS_API_TOKEN`       | PBS API auth                |
-| `LOKI_URL`            | Loki log tools (4 tools)    |
-| `EXTRA_DOCS_DIRS`     | Additional RAG doc directories (comma-separated absolute paths) |
-| `CONVERSATION_HISTORY_HOST_DIR` | Host path for conversation JSON files (bind-mounted to `/app/conversations` in Docker) |
-| `REQUEST_TIMEOUT_SECONDS` | Timeout for `/ask` endpoint in seconds (default: 120). Requests exceeding this return HTTP 504 |
-| `USER_TIMEZONE`       | IANA timezone name used by the system prompt and the `get_current_time` tool to render the user's local clock (e.g. `Europe/Madrid`). Default `UTC` |
-
-All URLs must point to addresses reachable from inside the Docker container — see [Networking](#networking).
-
-> **Concurrency note:** The API runs a single uvicorn worker. This is intentional — the SDK `query()` is async
-> (subprocess-based) so one event loop handles multiple concurrent requests efficiently. Multiple workers would break
-> the `asyncio.Lock` that serializes OAuth token refresh (refresh tokens are single-use). If concurrent queries cause
-> OOM, increase `mem_limit` rather than adding workers.
+> **Concurrency:** the API runs one uvicorn worker. The SDK `query()` is async, so one event loop serves concurrent
+> requests, and an `asyncio.Lock` serializes OAuth token refresh because refresh tokens are single-use. More workers
+> would break that lock. If concurrent queries run out of memory then raise `mem_limit`.
 
 ### Networking
 
-Docker containers on the default bridge network can reach hosts on the LAN. Use LAN IP addresses (e.g.,
-`http://192.0.2.50:9090`) in your `.env`, not `localhost` — `localhost` inside a container refers to the
-container itself, not the Docker host.
-
-If your compose stack uses a custom network, make sure the SRE services are on one with LAN access. If your
-infrastructure services (Prometheus, Grafana, etc.) are also in Docker on the same host, you can put them on a shared
-Docker network and use container names as hostnames instead of IPs.
+Use LAN addresses such as `http://192.0.2.50:9090` in `.env`. Inside a container `localhost` is the container itself. If
+Prometheus and Grafana run in Docker on the same host, a shared Docker network lets you use container names instead.
 
 ### Vector Store Persistence
 
-The Chroma vector store is stored in the `chroma_data` Docker volume. It persists across container restarts and image
-updates.
-
-The ingest process reads `.md` files from two sources:
-
-- **Bundled runbooks** — the `runbooks/` directory is baked into the Docker image at build time. These update when
-  you pull a new image.
-- **External documentation** — host directories mounted into the container via `EXTRA_DOCS_DIRS`. Use this for
-  Ansible playbooks, inventory, or other docs that live outside this repo.
-
-To include external docs (e.g., an Ansible repo on the deployment host), add a read-only volume mount to the
-`sre-ingest` service and set `EXTRA_DOCS_DIRS`:
+The Chroma store lives in the `chroma_data` volume and survives restarts and image updates. Ingest reads `.md` files
+from the `runbooks/` directory baked into the image and from any directory in `EXTRA_DOCS_DIRS`. To add host docs such
+as an Ansible repo, mount them read-only into `sre-ingest`:
 
 ```yaml
   sre-ingest:
@@ -243,16 +258,10 @@ To include external docs (e.g., an Ansible repo on the deployment host), add a r
     profiles: ["setup"]
 ```
 
-Re-run ingest whenever the source material changes:
+Re-run ingest after a new image or a change to the external docs, then restart the agent so it reads the rebuilt store:
 
 ```bash
-# After pulling a new image (bundled runbooks may have changed)
 docker compose run --rm sre-ingest
-
-# After updating external docs (e.g., git pull on Ansible repo)
-docker compose run --rm sre-ingest
-
-# Then restart the running agent so it reads the rebuilt store
 docker compose restart sre-agent
 ```
 
@@ -261,41 +270,27 @@ current index in place. It needs `OPENAI_API_KEY` and, with `LLM_PROVIDER=anthro
 
 ### Updating
 
-Pull the latest image and restart:
-
 ```bash
 docker compose pull sre-agent sre-webapp sre-ingest
 docker compose up -d sre-agent sre-webapp
 ```
 
-If runbooks have changed in the new image, re-run ingest:
-
-```bash
-docker compose run --rm sre-ingest
-```
+If the runbooks changed in the new image then re-run ingest as above.
 
 ### Building from Source
-
-For local development or if you want to modify the image:
 
 ```bash
 git clone https://github.com/johnmathews/sre-agent.git
 cd sre-agent
-cp .env.example .env
-# Edit .env with your values
+cp .env.example .env   # then fill in the values
 docker compose up -d
 ```
 
-The repo's `docker-compose.yml` uses `build: .` instead of `image:` so it builds locally.
-
-For a ready-to-run demo that pulls pre-built images (sre-agent + sre-webapp) straight from GHCR — no build
-needed — use [`docker-compose.demo.yml`](docker-compose.demo.yml):
+The repo's `docker-compose.yml` builds the image locally (`build: .`). [`docker-compose.demo.yml`](docker-compose.demo.yml)
+runs the same stack from the published images:
 
 ```bash
-# One-time (and after runbook updates): populate the vector store
 docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
-
-# Start the stack — webapp on :8080, API on :8000
 docker compose -f docker-compose.demo.yml up -d
 ```
 
@@ -303,453 +298,238 @@ docker compose -f docker-compose.demo.yml up -d
 
 ## CI/CD
 
-A single **GitHub Actions** workflow (`.github/workflows/ci.yml`) handles everything:
+One GitHub Actions workflow, `.github/workflows/ci.yml`, runs two jobs:
 
-1. **Check** — Runs `make check` (lint + typecheck + tests) on every push to `main` and on pull requests.
-2. **Build** — On pushes to `main` only, after check passes: builds the Docker image, smoke-tests it, then pushes
-   to `ghcr.io/johnmathews/sre-agent:latest` (and `:sha-<commit>`). The smoke test
-   (`scripts/smoke_image.sh`, or `make smoke` locally) runs the built image with dummy config and checks `/health`,
-   the `/mcp` `initialize` and `tools/list` calls (at least 10 tools) and the bundled Claude CLI. A failure prints
-   the container logs and nothing is pushed, so a broken image never reaches the home server's auto-deploy.
+1. **check** runs on pushes to `main` and on pull requests: `make lint`, `make typecheck` and `make test`. `make test`
+   runs the unit and integration tests under `coverage` and fails below the floor (`fail_under` in `pyproject.toml`).
+2. **build** runs on pushes to `main` after `check` passes. It builds the image, smoke-tests it, then pushes
+   `ghcr.io/johnmathews/sre-agent:latest` and `:sha-<commit>`. The smoke test (`scripts/smoke_image.sh`, or `make smoke`
+   locally) starts the image with dummy config and checks `/health`, the `/mcp` `initialize` and `tools/list` calls (at
+   least 10 tools) and the bundled Claude CLI. If it fails then the job prints the container logs and pushes nothing.
 
-**Git hooks** — Install local pre-commit (lint + format) and pre-push (full check) hooks:
+The home server's What's Up Docker (WUD) redeploys `:latest` about a minute after a push, so `main` reaches production
+only through these two gates.
 
-```bash
-make hooks
-```
-
-The pre-commit hook catches formatting issues immediately. The pre-push hook runs the full suite (lint + typecheck + tests) before allowing pushes.
-
----
-
-## Motivation & Context
-
-Most AI portfolio projects are chatbots over static documents. This project is different: it connects to live
-infrastructure telemetry, reasons about real system state, and applies SRE principles not just as a domain topic but to
-its own operation.
-
-The target homelab runs Proxmox with 80+ services across multiple VMs and LXCs, monitored by Prometheus and Grafana,
-configured via Ansible, and protected by layered DNS and networking. This is a real environment with real operational
-complexity — not a toy setup.
-
-This project exists to demonstrate:
-
-- Practical LangChain agent design with a mix of live tool calls and RAG retrieval
-- Deep understanding of SRE concepts (observability, SLIs/SLOs, incident response, infrastructure-as-code)
-- Production-mindset AI engineering: evaluation, cost tracking, failure handling, and graceful degradation
-- The ability to build AI systems that are themselves reliable and observable
-
----
-
-## Goals
-
-1. **Show AI engineering depth** — not just "I can call an LLM API" but agent design, tool orchestration, retrieval
-   strategy, evaluation, and cost management.
-2. **Show SRE fluency** — demonstrate real understanding of observability, alerting, change management, incident
-   response, and reliability targets.
-3. **Be demo-ready** — the project is demonstrable on demand using the live homelab. Real infrastructure provides
-   real signals — alerts, metric patterns, log events — without needing synthetic incidents.
-4. **Be honest about trade-offs** — document what works, what doesn't, and what the limitations are. This is more
-   impressive than a polished facade.
+`make hooks` installs a pre-commit hook (ruff lint and format check) and a pre-push hook (`make check`). It works from a
+git worktree too.
 
 ---
 
 ## Architecture
 
 ```
-Live Sources (LangChain Tools)       Knowledge Base (RAG)
-├── Prometheus API                   ├── Runbooks (.md)
-├── Grafana Alerting API             ├── Ansible playbooks & inventory
-├── Loki API (optional)              └── Past incident summaries
-├── TrueNAS SCALE API (optional)            ↓
-├── Proxmox VE API (optional)        Vector Store (Chroma)
-├── PBS API (optional)                      ↓
-│                                           │
-└──────────────┬────────────────────────────┘
-               ↓
-        LangChain Agent
-        (routes between tools and retrieval)
-               ↓
-      LLM (OpenAI or Anthropic API)
-               ↓
-         FastAPI Backend
-               ↓
-       CLI / Vue SPA webapp
+MCP clients (Claude Code, claude.ai,          Web UI (sre-webapp)        CLI (make chat)
+other homelab apps)                                  │                         │
+        │                                            │                         │
+Cloudflare tunnel + Access                           │                         │
+        │                                            ▼                         │
+        ▼                                     /ask, /ask/stream                │
+/mcp: McpAccessCheck → FastMCP                       │◄────────────────────────┘
+        │                                            ▼
+        │                  LLM_PROVIDER=anthropic: Claude Agent SDK (in-process MCP server)
+        │                  LLM_PROVIDER=openai:    LangGraph agent
+        │                                            │
+        ▼                                            ▼
+     Tool registry: TOOL_SPECS in src/agent/tool_registry.py (validates every call)
+        │
+        ├── Prometheus, Grafana, Loki              (HTTP APIs)
+        ├── Proxmox VE, PBS, TrueNAS               (HTTP APIs)
+        ├── Chroma runbook store                   (RAG)
+        └── memory store, conversation files       (local SQLite / JSON)
 ```
 
-The key architectural distinction is that **not everything is a RAG problem**. Live telemetry is queried via tool calls
-with structured APIs. Static knowledge (runbooks, playbooks) is embedded and retrieved. The agent decides which approach
-to use based on the question.
+One registry builds the three tool surfaces: `/mcp`, the SDK agent's in-process server and the LangGraph agent's tools.
+They show the same names, descriptions and input schemas, and every call is checked against the schema before the tool
+runs. Live state comes from tool calls against the APIs. Static knowledge (runbooks, Ansible docs) comes from the
+vector store.
+
+Background jobs run in the same process: the scheduled weekly report, the daily Upgrade Advisor run and the incident
+explainer, which the Gatus webhook starts. [docs/architecture.md](docs/architecture.md) describes each part, and the
+[ADR log](docs/adr/README.md) records the decisions behind them.
 
 ---
 
-## Current Capabilities
+## Capabilities
 
-The assistant has **up to 27 tools** across 9 categories, depending on which integrations are configured:
+`/mcp` serves up to 36 tools, the agent up to 34. The registry turns each group on only when its settings exist:
 
-**Always available (6 tools):**
-- Prometheus — metric search, instant queries, range queries (3 tools)
-- Grafana — active alerts, alert rule definitions (2 tools)
-- Runbook RAG — semantic search over operational runbooks (1 tool)
+| Group         | Tools | Enabled when                                   | Covers                                                                                                   |
+| ------------- | ----- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| core          | 13    | always                                         | Prometheus queries and scrape targets, container state, Grafana alerts, rules and dashboards, upgrade status, service health, runbook search, current time |
+| proxmox       | 4     | `PROXMOX_URL`                                  | Guests, guest config, node status, tasks                                                                 |
+| truenas       | 6     | `TRUENAS_URL`                                  | Pools, shares, snapshots, system status, apps, HDD power state                                           |
+| loki          | 4     | `LOKI_URL`                                     | Log queries, log metrics, label values, change correlation                                               |
+| pbs           | 3     | `PBS_URL`                                      | Datastores, backups, tasks                                                                               |
+| memory        | 4     | `MEMORY_DB_PATH`                               | Past incidents (search and record), previous report, metric baselines                                   |
+| conversations | 2     | `CONVERSATION_HISTORY_DIR` (default set)       | The chat agent's stored conversations. `/mcp` only                                                       |
 
-**Available when configured (21 tools):**
-- TrueNAS SCALE — pool health, NFS/SMB shares, snapshots/replication, system status/alerts/disks, apps (5 tools, requires `TRUENAS_URL`)
-- HDD Power Status — power state summary with configurable duration and pool filter (1 tool, requires `TRUENAS_URL`)
-- Proxmox VE — guest listing, guest config, node status, task history (4 tools, requires `PROXMOX_URL`)
-- PBS — datastore status, backup groups, task history (3 tools, requires `PBS_URL`)
-- Loki — log queries, log metric aggregation, label discovery, change correlation timelines (4 tools, requires `LOKI_URL`)
-- Memory — incident search, incident recording, previous report retrieval, baseline checking (4 tools, requires `MEMORY_DB_PATH`)
+Every tool reads, except `memory_record_incident`, which writes one incident record. [docs/tool-reference.md](docs/tool-reference.md)
+documents each tool's parameters and output.
 
-**Questions it can answer today:**
-- "Why is CPU high on the Jellyfin VM?"
-- "Summarize all active alerts"
-- "Is there a runbook for restarting the DNS stack?"
-- "What errors appeared in the last hour?"
-- "Show me backup status for the PBS datastore"
-- "What containers are running on the Proxmox node?"
-- "Is the tank pool healthy? How much space is left?"
-- "What apps are running on TrueNAS?"
-- "Which VM generates the most logs?"
-- "Are the HDDs spun down?"
-- "What's my peak internet download speed this week?"
-- "How many WiFi clients are connected?"
-- "Has this alert happened before? What was the root cause?"
-- "Is 85% CPU normal for this host?"
-- "What did last week's reliability report say?"
+Typical questions:
 
-**Artifacts it can generate:**
-- Root cause analysis (RCA) drafts
-- Incident summaries
-- Suggested remediation steps based on runbooks
-- Weekly reliability reports (alerts, SLO status, tool usage, costs, log errors) — on demand via `POST /report` or scheduled via cron
-- Outage explanations — after a Gatus outage resolves, the agent collects evidence and sends a Pushover push saying why
-  the service went down and how it came back (optional, see [docs/incident-explainer.md](docs/incident-explainer.md))
+- "Is Jellyfin healthy?" (`service_health`)
+- "Which containers restarted in the last day?" (`container_status`)
+- "Which scrape targets are down?" (`scrape_targets`)
+- "Which images have updates waiting, and what did the advisor decide?" (`upgrade_status`)
+- "What errors appeared before this alert fired?" (`loki_correlate_changes`)
+- "Is the tank pool healthy, and how much space is left?" (`truenas_pool_status`)
 
----
+Beyond the tools:
 
-## Use Cases
-
-### 1. Alert Explainer
-
-Given an active alert, the agent:
-
-1. Fetches the alert details (name, labels, severity, duration)
-2. Queries Prometheus for relevant metrics around the alert (CPU, memory, disk — context-dependent)
-3. Searches runbooks for matching procedures
-4. Produces a plain-English explanation: what's happening, why it likely matters, and what to do about it
-
-**Example:** An alert fires for high memory on a VM. The agent queries memory metrics, sees it spiked after a recent
-container restart, finds the runbook for that service, and explains that the service is likely rebuilding its cache
-post-restart and should stabilize within 30 minutes.
-
-### 2. Log Correlation
-
-When asked "what changed recently?" or "what happened before this alert?", the agent:
-
-1. Queries Loki for error/warning log spikes around the time of interest
-2. Searches for container lifecycle events (restarts, OOM kills, crashes)
-3. Correlates these into a chronological timeline grouped by service
-
-This is valuable for answering "did something go wrong before this alert fired?" — a core SRE workflow using log data.
-
-### 3. Infrastructure Inspection
-
-The agent can query Proxmox VE and PBS APIs to answer questions about infrastructure state:
-
-- VM/container inventory and resource allocation
-- Node health and resource usage
-- Backup status and history
-- Recent task outcomes (migrations, backups, restores)
+- **Weekly reliability report**, on demand or on a schedule.
+- **Incident explainer:** after a Gatus outage resolves, it collects evidence and sends a Pushover message saying why
+  the service went down and how it came back. Off unless configured. See [docs/incident-explainer.md](docs/incident-explainer.md).
+- **Upgrade Advisor:** a daily review of pending image updates for an allowlist of containers, emailed with one
+  single-use approval link. Approved updates deploy through WUD then get verified. Off unless configured.
 
 ---
 
 ## Failure Modes & Handling
 
-| Failure                    | Impact               | Mitigation                                                                                                                   |
-| -------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| LLM API down/timeout       | Agent cannot reason  | Circuit breaker with exponential backoff. Return cached/templated responses for common queries. Clear error message to user. |
-| Prometheus unreachable     | No live metrics      | Agent acknowledges gap, falls back to last-known state. Answers from knowledge base only.                                    |
-| Alertmanager unreachable   | No alert context     | Agent states it cannot reach alert data, offers to check metrics directly.                                                   |
-| Vector store empty/corrupt | No runbook retrieval | Agent proceeds without runbook context, flags that its answer may be less actionable.                                        |
-| Token limit exceeded       | Truncated context    | Summarize metrics/logs before passing to LLM. Implement context window budgeting.                                            |
+No failure is silent. Each one shows up in the response, the logs or a metric.
 
-The key principle: **never silently fail**. Every degradation is visible to the user and logged.
+| Failure                              | What happens                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Upstream API down, slow or erroring  | The tool fails with a message naming the cause. `/mcp` returns it as an `isError` result, and the agent sees it as a tool error and can try another source |
+| One source of a combined tool fails  | `service_health` marks that source `unavailable: <reason>` and answers from the others |
+| Bad tool arguments                   | Unknown argument names and values outside a parameter's limits are refused before the tool runs, with an `isError` saying why |
+| Integration not configured           | Its tools are not registered, and startup logs each disabled group once with the missing setting          |
+| `/ask` runs past `REQUEST_TIMEOUT_SECONDS` | HTTP 504                                                                                              |
+| Agent failure on `/ask/stream`       | An SSE `error` event. The SDK path adds a `reason` (`llm_auth_failed` or `agent_no_answer`) and a `detail` |
+| LLM rate limit, 5xx or network error | The report narrative, incident verdict and upgrade review calls retry with doubling backoff inside a time budget |
+| A component is down                  | `/health` reports each component, `mcp_server` included, sets `sre_assistant_component_healthy`, and returns `degraded` |
+| Memory store off or unusable         | Startup logs a WARNING (unset) or an ERROR (unusable) and sets `sre_assistant_memory_store_enabled` to 0  |
+| Vector store missing or empty        | `runbook_search` finds nothing, and `/health` marks `vector_store` unhealthy                               |
 
 ---
 
 ## Conversation Memory
 
-The agent maintains conversation context within a session so users can have natural follow-up conversations:
+The chat agent stores each session's turns (user and assistant text, without tool calls) as one JSON file in
+`CONVERSATION_HISTORY_DIR` (`/app/conversations` in Docker, bind-mounted from `CONVERSATION_HISTORY_HOST_DIR`). The two
+agent paths use that file differently:
 
-- "Why is CPU high on the Jellyfin VM?" → (agent explains)
-- "What about memory on the same machine?" → (agent understands "same machine" = Jellyfin VM)
-- "Was there a change before that happened?" → (agent correlates with the original alert)
+- **LangGraph (`LLM_PROVIDER=openai`):** an in-process checkpointer keeps each session's messages. After a restart, the
+  first request of a session reloads its turns from the file.
+- **Claude Agent SDK (`LLM_PROVIDER=anthropic`):** each request runs a fresh SDK query, so the session's last 20 turn
+  pairs go into the prompt, each with its timestamp.
 
-Implementation uses LangChain's built-in message history with a session-scoped conversation buffer. In-memory history
-is lost on process restart.
-
-The full conversation (including all tool calls and responses) is persisted as JSON files to `/app/conversations`
-inside the container. In Docker, `CONVERSATION_HISTORY_HOST_DIR` controls the host-side bind mount path. See
-[docs/architecture.md](docs/architecture.md#conversation-history-persistence) for details.
-
----
-
-## Tech Stack
-
-| Component       | Technology                   |
-| --------------- | ---------------------------- |
-| Agent framework | LangChain (Python)           |
-| LLM             | OpenAI API or Anthropic API  |
-| Vector store    | Chroma                       |
-| Backend         | FastAPI                      |
-| Frontend        | Vue 3 SPA (separate repo) + CLI |
-| Metrics         | Prometheus                   |
-| Dashboards      | Grafana                      |
-| Logs            | Loki                         |
-| Infrastructure  | Proxmox, Ansible             |
-| Alerting        | Grafana unified alerting     |
-| Scheduling      | APScheduler                  |
+MCP calls are stateless and keep no history. MCP clients can read the agent's stored conversations through
+`sre_agent_list_conversations` and `sre_agent_get_conversation`. [docs/conversation-history.md](docs/conversation-history.md)
+has the file format.
 
 ---
 
 ## Self-Observability
 
-The assistant tracks its own reliability via 23 Prometheus metrics exposed at `GET /metrics`, visualized in a dedicated
-Grafana dashboard (`dashboards/sre-assistant-sli.json`).
+The app exports 25 Prometheus metrics at `GET /metrics` (26 with `LLM_PROVIDER=anthropic`), shown in the Grafana dashboard
+`dashboards/sre-assistant-sli.json`. Each tool call, on `/mcp` and in the agent, writes one `tool_call` log line with
+the tool, source, client, outcome, duration and result size, then updates the tool metrics.
+`sre_assistant_mcp_http_requests_total{client, access}` counts every HTTP request to `/mcp`.
 
-| SLI                          | Target SLO  | How It's Measured                     |
-| ---------------------------- | ----------- | ------------------------------------- |
-| Agent response latency (p95) | — (tracked, no target) | `sre_assistant_request_duration_seconds` histogram |
-| Tool call success rate       | > 99%       | `sre_assistant_tool_calls_total`: `status="success"` over calls not `invalid_args` or `unknown_tool` (client mistakes), `/mcp` and agent |
-| LLM API error rate           | < 1%        | `sre_assistant_llm_calls_total` by status; an SDK request with no result, an error result or an exception is an `error` |
-| End-to-end availability      | > 99.5%     | `sre_assistant_component_healthy` gauge, set by `/health` for each component, `mcp_server` included |
+| SLI                          | Target SLO             | How it's measured                                                                                     |
+| ---------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| Agent response latency (p95) | none (tracked)         | `sre_assistant_request_duration_seconds` histogram                                                    |
+| Tool call success rate       | > 99%                  | `sre_assistant_tool_calls_total`: `status="success"` over calls not `invalid_args` or `unknown_tool` (client mistakes), `/mcp` and agent |
+| LLM API error rate           | < 1%                   | `sre_assistant_llm_calls_total` by status. An SDK request with no result, an error result or an exception is an `error` |
+| End-to-end availability      | > 99.5%                | `sre_assistant_component_healthy` gauge, set by `/health` for each component, `mcp_server` included   |
 
-Latency is recorded as an SLI but not bound to an SLO: scope and answer accuracy are prioritised over speed, and most
-latency reductions trade off against quality. The histogram, p95 panel, and per-query latency breakdown remain so
-catastrophic regressions stay visible.
-
-Per-query cost tracking: token usage, estimated cost, tool call count — all exported to Prometheus and aggregated
-in the Grafana dashboard.
+Latency has no SLO because scope and answer accuracy come first, and most latency cuts cost quality. The histogram and
+p95 panel stay so a large regression is still visible. Each query also records token usage, estimated cost and tool
+call count.
 
 ## Weekly Reliability Report
 
-Automated weekly summarization of alerts, SLO status, tool usage, costs, and log errors. Generated via direct API
-queries (not agent-driven) with a single LLM call for a narrative summary.
+The report collects alerts, SLO status, tool usage, cost, backup health and Loki errors with direct API queries, then
+makes one LLM call for the narrative.
 
 - **On demand:** `POST /report` or `make report`
-- **Scheduled:** configurable cron via `REPORT_SCHEDULE_CRON`, evaluated in `USER_TIMEZONE` (APScheduler)
-- **Email delivery:** plain-text markdown via Gmail SMTP (if `SMTP_*` configured)
+- **Scheduled:** `REPORT_SCHEDULE_CRON`, evaluated in `USER_TIMEZONE` (APScheduler)
+- **Email:** plain-text markdown over SMTP with STARTTLS, if `SMTP_*` is set
 
 ## Evaluation Framework
 
-30 curated eval cases across 8 categories validate the agent's tool selection and answer quality. Uses real LLM
-calls against mocked infrastructure APIs with deterministic tool scoring and LLM-as-judge answer grading. Features
-separate judge model selection (avoids self-evaluation bias), hallucination detection via available-data context, and
-memory seed support for testing baseline/incident/report retrieval. Run with `make eval`.
+`make eval` runs 32 YAML cases (`src/eval/cases/`) through the agent with a real LLM against mocked infrastructure
+APIs. It scores tool selection deterministically and answer quality with an LLM judge on a different model.
+[docs/eval-quality.md](docs/eval-quality.md) records known judge limits and how to write cases.
+
+---
+
+## Tech Stack
+
+| Component       | Technology                                                       |
+| --------------- | ---------------------------------------------------------------- |
+| MCP server      | FastMCP (Streamable HTTP), mounted in FastAPI                    |
+| MCP auth        | Cloudflare Access, with the in-app JWT check (pyjwt)             |
+| Agent           | Claude Agent SDK (`anthropic`) or LangGraph with LangChain (`openai`) |
+| LLM             | Anthropic API or OpenAI API                                      |
+| Vector store    | Chroma, with OpenAI embeddings                                   |
+| Backend         | FastAPI on uvicorn                                               |
+| Frontend        | Vue 3 SPA (separate repo) and a CLI                              |
+| Scheduling      | APScheduler                                                      |
+| Storage         | SQLite (memory, Upgrade Advisor, incidents), JSON (conversations) |
+| Observability   | Prometheus, Grafana, Loki                                        |
+| Infrastructure  | Proxmox, Ansible, Docker, WUD                                    |
+
+---
+
+## Motivation & Goals
+
+Most AI portfolio projects are chatbots over static documents. This one connects to live telemetry from a real
+homelab (Proxmox, 80+ services across VMs and LXCs) and applies SRE practice to its own operation. Its goals:
+
+1. **AI engineering depth:** tool design, retrieval, evaluation and cost tracking.
+2. **SRE fluency:** observability, alerting, change correlation, incident response and reliability targets.
+3. **Demo-ready on real signals:** the live homelab supplies real alerts, metrics and logs.
+4. **Honest trade-offs:** the docs state what works and what doesn't.
 
 ---
 
 ## Build Order
 
-The project is built incrementally, with each phase producing a working, demonstrable system.
+The project grew in phases, each one a working system. [journal/](journal/) holds the history of each step.
 
 ### Phase 1: Alert Explainer (Core Agent)
 
-- Set up LangChain agent with Prometheus and Alertmanager tool definitions
-- Implement RAG pipeline over runbooks (yaml files)
-- Build FastAPI backend with a single `/ask` endpoint
-- Basic CLI (web UI added later as a separate Vue SPA)
-- **Deliverable:** Ask the agent about any active alert and get a contextualized explanation
+Complete. Prometheus and Grafana tools, Proxmox VE, PBS and TrueNAS tools, runbook RAG, the system prompt, the FastAPI
+backend and the CLI.
 
-#### Build steps
+### Phase 2: Synthetic Incident Generator (Shelved)
 
-1. ~~**Project scaffolding** — `pyproject.toml`, `src/` package structure, `Makefile`, `.env.example`~~
-2. ~~**Prometheus tool** — `src/agent/tools/prometheus.py`: LangChain tool wrapping Prometheus HTTP API (`/api/v1/query`,
-   `/api/v1/query_range`). Unit and integration tests.~~
-3. ~~**Grafana alerting tool** — `src/agent/tools/grafana_alerts.py`: fetches active alerts and alert rule definitions
-   from Grafana's alerting API (not Alertmanager — Grafana is the actual alerting system in use). Unit and integration
-   tests.~~
-4. ~~**Runbook RAG pipeline** — 13 runbooks in `runbooks/` converted from homelab documentation, embedding pipeline
-   (`src/agent/retrieval/embeddings.py`), retriever tool (`src/agent/retrieval/runbooks.py`), ingest script
-   (`make ingest`). Unit tests for chunking, loading, and input validation.~~
-5. ~~**Agent assembly** — `src/agent/agent.py`: LangChain agent with all three tools. System prompt defining when to use
-   live queries vs. RAG. Conversation memory. Test via REPL.~~
-6. ~~**FastAPI backend** — `src/api/main.py`: `POST /ask` (question + session ID → response), `GET /health`.~~
-7. ~~**Basic CLI** — Simple input loop calling the agent directly. Web UI comes later.~~
-
-8. ~~**Proxmox VE tools** — `src/agent/tools/proxmox.py`: 4 tools for VM/container listing, guest config, node status,
-   and task history. Conditional registration (only when `PROXMOX_URL` is set). Unit and integration tests.~~
-9. ~~**PBS tools** — `src/agent/tools/pbs.py`: 3 tools for datastore status, backup groups, and task history. Conditional
-   registration (only when `PBS_URL` is set). Unit and integration tests.~~
-10. ~~**Design documentation** — `docs/architecture.md`, `docs/tool-reference.md`, `docs/code-flow.md`,
-    `docs/dependencies.md`.~~
-
-11. ~~**TrueNAS SCALE tools** — `src/agent/tools/truenas.py`: 5 tools for ZFS pool health, NFS/SMB shares, snapshots/
-    replication, system status/alerts/disks, and apps. Conditional registration (only when `TRUENAS_URL` is set). System
-    prompt guidance for TrueNAS vs Prometheus disk metrics. Unit and integration tests.~~
-
-**Phase 1 complete.** All build steps finished — the agent has Prometheus tools, Grafana alerting tools, Proxmox VE
-tools, PBS tools, TrueNAS SCALE tools, runbook RAG, a system prompt with conversation memory, a FastAPI backend
-(`POST /ask`, `GET /health`), an interactive CLI, and design documentation.
-
-### Phase 2: Synthetic Incident Generator — _Shelved_
-
-- ~~Build scripts to inject load (CPU stress, disk fill, service kill)~~
-- ~~Wire them to trigger real Alertmanager alerts~~
-- ~~Create a "demo mode" that runs a synthetic incident and lets the agent investigate~~
-- ~~**Deliverable:** On-demand demo that works every time~~
-
-**Shelved.** The live homelab generates enough real incidents and patterns to demo and test the agent's reasoning.
-Considered three approaches (mock HTTP scenario server, tool-level interception, separate Prometheus instance) but
-decided the complexity isn't justified when real infrastructure provides adequate test signals. May revisit if the
-project needs a portable offline demo.
+Shelved. The live homelab produces enough real incidents to demo and test the agent.
 
 ### Phase 3: Loki Log Tools
 
-- Add Loki log query tools for general-purpose log access
-- Implement log-based change correlation (error spikes, container lifecycle events)
-- **Deliverable:** "What errors appeared recently?" and "What changed before this alert?" answered via Loki
-
-#### Build steps
-
-1. ~~**Config plumbing** — Add `LOKI_URL` to Settings, `.env.example`, and test fixtures~~
-2. ~~**`loki_query_logs` tool** — General-purpose LogQL query with relative time parsing, limit handling, and formatted
-   output. Unit and integration tests.~~
-3. ~~**`loki_list_label_values` tool** — Label discovery for hostnames, services, containers, and log levels. Integration
-   tests.~~
-4. ~~**`loki_correlate_changes` tool** — Higher-level change correlation: searches for error/warn/fatal spikes and
-   container lifecycle events around a reference time, returns a chronological timeline grouped by service. Unit tests
-   for timeline building, integration tests with multiple mocked queries.~~
-5. ~~**Agent integration** — Loki section in system prompt (labels, LogQL tips, when to use each tool), conditional tool
-   registration, health check (`GET /ready`).~~
-6. ~~**Documentation** — `runbooks/loki-logging.md` (Alloy pipeline, labels, LogQL reference), updated tool reference,
-   updated readme build steps.~~
-
-**Phase 3 complete.** All build steps finished — the agent has 4 Loki tools (query logs, metric query for
-aggregations, list label values, correlate changes), conditional registration when `LOKI_URL` is set, a health check,
-system prompt guidance for LogQL queries, and documentation.
+Complete. Four Loki tools: log queries, log metrics, label values and change correlation.
 
 ### Phase 4: SLI/SLO Dashboard & Instrumentation
 
-- Instrument agent with Prometheus metrics (latency, tool success rates, token usage)
-- Build Grafana dashboard for the assistant's own reliability
-- Define and display SLO compliance
-- **Deliverable:** A Grafana dashboard showing the AI system's own health
-
-#### Build steps
-
-1. ~~**`prometheus-client` dependency** — Added to `pyproject.toml`.~~
-2. ~~**Metric definitions** — `src/observability/metrics.py`: 10 metrics (Histograms, Counters, Gauges, Info) with SLI
-   bucket definitions and LLM cost pricing.~~
-3. ~~**LangChain callback handler** — `src/observability/callbacks.py`: `MetricsCallbackHandler` captures tool call
-   timing/success, LLM token usage, and cost estimation inside LangGraph's execution loop. No changes to tool
-   definitions required.~~
-4. ~~**Agent wiring** — `MetricsCallbackHandler` injected via `config["callbacks"]` in `invoke_agent()`.~~
-5. ~~**FastAPI instrumentation** — `/metrics` endpoint (Prometheus exposition format), request timing/counting on
-   `/ask`, component health gauges updated on `/health`.~~
-6. ~~**Grafana dashboard** — `dashboards/sre-assistant-sli.json`: SLO overview, latency percentiles, tool call
-   rates/errors, token usage, cost tracking, component health.~~
-
-**Phase 4 complete.** The assistant now tracks its own reliability: request latency, tool success rates, LLM token
-usage, estimated cost, and component health — all exposed as Prometheus metrics and visualized in a Grafana dashboard.
+Complete. Prometheus metrics for the app itself and the Grafana dashboard in `dashboards/`.
 
 ### Phase 5: Evaluation Framework
 
-- Curate 15–20 test cases with expected behaviors
-- Build automated evaluation runner (scores tool selection, retrieval relevance, answer quality)
-- Integrate as a script that can run on demand or in CI
-- **Deliverable:** `make eval` produces a pass/fail report
-
-#### Build steps
-
-1. ~~**Data models** — `src/eval/models.py`: Pydantic models for eval cases (EvalCase, MockResponse, ExpectedTools),
-   scores (ToolScore, JudgeScore), and results (EvalResult).~~
-2. ~~**YAML loader** — `src/eval/loader.py`: loads and validates eval cases from `src/eval/cases/*.yaml`.~~
-3. ~~**Core runner** — `src/eval/runner.py`: patches settings with real OpenAI key + fake infra URLs, sets up respx
-   HTTP mocks, invokes `build_agent()` + `agent.ainvoke()`, extracts tool calls from `AIMessage.tool_calls`, scores
-   tool selection deterministically (must_call / must_not_call).~~
-4. ~~**LLM-as-judge** — `src/eval/judge.py`: sends (question, answer, rubric) to `gpt-4o-mini` for quality scoring.
-   Returns JSON pass/fail with explanation.~~
-5. ~~**Report formatting** — `src/eval/report.py`: per-case results and summary to stderr.~~
-6. ~~**Entry point + Makefile** — `scripts/run_eval.py` with argparse, `make eval` target.~~
-7. ~~**Eval cases** — 17 YAML cases across 7 categories: alerts (4), Prometheus (5), Proxmox (2), PBS (1),
-   TrueNAS (2), Loki (2), cross-tool (1). Each case defines the question, expected tools, HTTP mocks, and a rubric.~~
-8. ~~**Tests** — 35 tests: unit tests for YAML parsing, tool scoring, tool call extraction, report formatting;
-   integration tests for judge with mocked LLM, settings patching, and YAML validation of all shipped cases.~~
-9. ~~**Documentation** — Updated `docs/architecture.md` (eval framework section) and readme build steps.~~
-
-**Phase 5 complete.** The eval framework runs the real LLM against mocked infrastructure to score tool selection
-(deterministic) and answer quality (LLM-as-judge). 17 eval cases, 35 framework tests, accessible via `make eval`.
+Complete. YAML cases, deterministic tool scoring and an LLM judge, run with `make eval`.
 
 ### Phase 6: Weekly Reliability Report
 
-- Scheduled summarization of the past week's alerts, changes, and SLO status
-- Output as a markdown report
-- **Deliverable:** Automated weekly report generation
-
-#### Build steps
-
-1. ~~**Config settings** — SMTP/email fields (`smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`,
-   `report_recipient_email`) and schedule fields (`report_schedule_cron`, `report_lookback_days`).~~
-2. ~~**Report metrics** — `sre_assistant_reports_total` Counter (trigger/status labels),
-   `sre_assistant_report_duration_seconds` Histogram.~~
-3. ~~**Report generator** — `src/report/generator.py`: direct API collectors for alerts (Grafana), SLO status
-   (Prometheus), tool usage (Prometheus), cost (Prometheus), log errors (Loki). All collectors run concurrently via
-   `asyncio.gather()` with independent error handling. Single LLM call for narrative summary. Markdown formatter.~~
-4. ~~**Email delivery** — `src/report/email.py`: stdlib `smtplib` with STARTTLS, plain-text markdown body.~~
-5. ~~**Scheduler** — `src/report/scheduler.py`: APScheduler `AsyncIOScheduler` with `CronTrigger`, configurable
-   cron expression.~~
-6. ~~**FastAPI integration** — `POST /report` endpoint for on-demand generation, scheduler lifecycle in lifespan.~~
-7. ~~**Tests** — unit tests for formatting and email config, integration tests with respx for all collectors,
-   end-to-end report generation, email mocking, scheduler start/stop, API endpoint.~~
-8. ~~**CLI + docs** — `make report` target, updated architecture/code-flow/dependencies docs.~~
-
-**Phase 6 complete.** Weekly reports summarize alerts, SLO status, tool usage, costs, and log errors. Generated
-via direct API queries + single LLM narrative. Delivered via email (Gmail SMTP) on a configurable cron schedule
-or on-demand via `POST /report`.
+Complete. Direct API collectors, one LLM narrative, email delivery and a cron schedule.
 
 ### Phase 7: Agent Memory Store
 
-- Persistent SQLite memory for reports, incidents, and metric baselines
-- Enables cross-session knowledge: "has this happened before?", "what did last week's report say?"
-- **Deliverable:** Agent accumulates useful knowledge over time
-
-#### Build steps
-
-1. ~~**Database foundation** — `src/memory/store.py`: SQLite connection management with WAL mode, idempotent schema
-   init (3 tables: reports, incidents, metric_baselines), typed CRUD functions. `src/memory/models.py`: TypedDicts
-   for all record types. `MEMORY_DB_PATH` config setting (empty = disabled).~~
-2. ~~**Report archive** — Auto-save reports to memory store after generation. Load previous report as LLM narrative
-   context. `memory_get_previous_report` agent tool for retrieving archived reports.~~
-3. ~~**Incident journal** — `memory_search_incidents` and `memory_record_incident` agent tools. Search by keyword,
-   alert name, or service. Record root causes and resolutions during investigations.~~
-4. ~~**Metric baselines** — `src/memory/baselines.py`: compute avg/p95/min/max from Prometheus after each report.
-   `memory_check_baseline` agent tool to assess if a metric value is normal.~~
-5. ~~**Documentation & tests** — Updated architecture.md, tool-reference.md, code-flow.md, readme.md. 41 new tests
-   (24 unit + 17 integration). 3 new eval cases. System prompt updated with memory tool guidance.~~
-
-**Phase 7 complete.** The agent has persistent memory via SQLite. Weekly reports are archived and referenced
-in future narratives. Incidents can be recorded and searched across sessions. Metric baselines enable anomaly
-detection. All features degrade gracefully when `MEMORY_DB_PATH` is not set.
+Built, and off in production. SQLite store for reports, incidents and metric baselines, with four tools. Startup warns
+while `MEMORY_DB_PATH` is unset.
 
 ### Phase 8: Upgrade Advisor
 
-- Daily review of pending third-party image updates (found by What's Up Docker) for a short allowlist
-- Claude judges each one against release notes and this deployment's context; one emailed batch, one single-use link
-- Approved updates deploy through WUD and are verified (digest, readiness, error logs)
-- **Deliverable:** the "container image stale" chore becomes one click. See
-  [docs/architecture.md](docs/architecture.md#upgrade-advisor); optional, off unless configured.
-
-**Phase 8 complete** (2026-10-26). Rollout (allowlist, WUD credentials, Access policy) is an operator step.
+Complete (2026-10-26). Daily review of pending image updates, one emailed approval link, deploys through WUD and
+verification afterwards. Rollout (allowlist, WUD credentials, Access policy) is an operator step.
 
 ### Deployment
 
-The agent runs as Docker containers on the Infra VM, deployed via the existing
-[home-server](https://github.com/johnmathews/home-server) Ansible project. See [Deploying with Docker](#deploying-with-docker)
-for container setup and [docs/architecture.md](docs/architecture.md) for the full deployment plan.
-
-Production secrets (API keys, tokens) are managed via Ansible Vault and injected as environment variables
-at deploy time — never committed to this repo.
+The app runs as Docker containers on the infra VM, deployed by the [home-server](https://github.com/johnmathews/home-server)
+Ansible project. Production secrets come from Ansible Vault as environment variables and are never committed here.
+[Deploying with Docker](#deploying-with-docker) covers the container setup.
 
 ---
 
@@ -757,78 +537,59 @@ at deploy time — never committed to this repo.
 
 ```
 sre-agent/
-├── Dockerfile                    # Multi-stage build (builder + runtime)
-├── docker-compose.yml            # Local dev: 3 services (ingest, api, ui)
-├── .dockerignore
-├── .github/workflows/
-│   └── ci.yml                    # CI (lint/typecheck/test) + Docker build/push
-├── Makefile
-├── pyproject.toml
-├── src/
-│   ├── config.py                 # Settings via pydantic-settings
-│   ├── cli.py                    # Interactive CLI REPL
-│   ├── agent/
-│   │   ├── agent.py              # LangChain agent setup
-│   │   ├── llm.py                # LLM factory (OpenAI / Anthropic provider selection) and ask_text, the shared no-tools call
-│   │   ├── history.py            # Conversation history persistence to JSON
-│   │   ├── tools/
-│   │   │   ├── prometheus.py     # Prometheus query tools (3)
-│   │   │   ├── grafana_alerts.py # Grafana alerting tools (2)
-│   │   │   ├── proxmox.py        # Proxmox VE tools (4, optional)
-│   │   │   ├── pbs.py            # PBS backup tools (3, optional)
-│   │   │   ├── truenas.py        # TrueNAS SCALE tools (5, optional)
-│   │   │   └── loki.py           # Loki log query tools (4, optional)
-│   │   └── retrieval/
-│   ├── observability/
-│   │   ├── metrics.py            # Prometheus metric definitions (23 metrics)
-│   │   └── callbacks.py          # LangChain callback handler for metrics
-│   │       ├── embeddings.py     # Document embedding pipeline
-│   │       └── runbooks.py       # Runbook RAG retrieval
-│   ├── eval/
-│   │   ├── models.py             # Pydantic models for eval cases and results
-│   │   ├── loader.py             # YAML case loader with validation
-│   │   ├── runner.py             # Core runner (settings patching, mocks, scoring)
-│   │   ├── judge.py              # LLM-as-judge answer quality scoring
-│   │   ├── report.py             # Terminal report formatting
-│   │   └── cases/                # 30 YAML eval cases
-│   ├── memory/
-│   │   ├── store.py              # SQLite connection, schema, CRUD
-│   │   ├── models.py             # TypedDicts for memory records
-│   │   ├── tools.py              # 4 LangChain tools (conditional on MEMORY_DB_PATH)
-│   │   └── baselines.py          # Metric baseline computation from Prometheus
-│   ├── report/
-│   │   ├── generator.py          # Direct API collectors + LLM narrative + markdown formatter
-│   │   ├── email.py              # SMTP email delivery (STARTTLS)
-│   │   └── scheduler.py          # APScheduler cron-based report scheduling
-│   ├── upgrades/                 # Upgrade Advisor (allowlist, WUD/registry/GitHub clients, review, deploy, verify)
-│   ├── incidents/                # Incident explainer (store, job, evidence, verdict, message, pushover, dry run)
-│   └── api/
-│       ├── main.py               # FastAPI application
-│       ├── upgrades.py           # Upgrade approval launcher (GET), review page (POST /view), guarded deploy (POST)
-│       └── incidents.py          # Gatus incident webhook (POST /incidents/gatus)
-├── scripts/
-│   ├── ingest_runbooks.py        # Rebuild Chroma vector store
-│   ├── run_eval.py               # Eval framework entry point
-│   └── install-hooks.sh          # Install git pre-push hook
+├── .github/workflows/ci.yml   # check, then build, smoke-test and push the image
+├── .env.example               # every setting, with placeholder values
+├── CLAUDE.md                  # guidance for Claude Code in this repo
+├── Dockerfile                 # two-stage build on python:3.13-slim, uvicorn on :8000
+├── docker-compose.yml         # sre-ingest, sre-agent, sre-webapp, built locally
+├── docker-compose.demo.yml    # the same stack from published images
+├── Makefile                   # dev, check, serve, ingest, chat, eval, report, advisor, smoke, hooks
+├── pyproject.toml, uv.lock    # dependencies, ruff, mypy, pytest and coverage settings
+├── pyrightconfig.json         # pyright settings
 ├── dashboards/
-│   └── sre-assistant-sli.json    # Grafana SLI/SLO dashboard
-├── tests/                        # Unit + integration tests (658 passing)
-├── docs/                         # Design documentation
-│   ├── architecture.md           # System overview, data flow, deployment
-│   ├── tool-reference.md         # All tools with inputs and examples
-│   ├── code-flow.md              # Request lifecycle, tool registration
-│   ├── dependencies.md           # Python packages, external services
-│   └── incident-explainer.md     # Gatus outage explanations: webhook, store, evidence, verdict, push
-└── runbooks/                     # Operational runbooks (markdown, ingested into RAG)
+│   └── sre-assistant-sli.json # Grafana dashboard for the app's SLIs
+├── docs/
+│   ├── adr/                   # architecture decision records
+│   ├── archive/               # superseded design docs
+│   ├── architecture.md        # components, data flow, MCP, observability, deployment
+│   ├── code-flow.md           # request lifecycle, tool registration, metrics flow
+│   ├── conversation-history.md # conversation file format and resume
+│   ├── dependencies.md        # Python packages and external services
+│   ├── eval-quality.md        # eval judge limits and case-writing rules
+│   ├── incident-explainer.md  # Gatus outage explanations
+│   ├── mcp-clients.md         # connecting an MCP client
+│   └── tool-reference.md      # every tool, its parameters and output
+├── journal/                   # dated development journal
+├── runbooks/                  # operational runbooks, ingested into Chroma
+├── scripts/
+│   ├── ingest_runbooks.py     # rebuild the Chroma store
+│   ├── install-hooks.sh       # git pre-commit and pre-push hooks
+│   ├── run_eval.py            # eval entry point
+│   ├── run_report.py          # print a report to stdout
+│   └── smoke_image.sh         # smoke-test a built image
+├── src/
+│   ├── agent/                 # tool registry, tools, SDK and LangGraph agents, retrieval, history
+│   ├── api/                   # FastAPI app, MCP server and access check, upgrade and incident routes
+│   ├── eval/                  # eval runner, judge and YAML cases
+│   ├── incidents/             # incident explainer
+│   ├── memory/                # SQLite memory store and its tools
+│   ├── observability/         # metrics, tool_call log line, logging setup
+│   ├── report/                # weekly report, email, scheduler
+│   ├── upgrades/              # Upgrade Advisor
+│   ├── cli.py                 # interactive CLI
+│   └── config.py              # settings (pydantic-settings)
+└── tests/                     # unit and integration tests, MCP contract snapshot
 ```
 
 ---
 
 ## Non-Goals
 
-- This is **not** a general-purpose chatbot. It is purpose-built for homelab SRE.
-- This does **not** take automated remediation actions (no auto-restarting services). It advises, it doesn't act.
-- This does **not** aim for enterprise-grade multi-tenancy or RBAC. It's a single-user portfolio project.
+- A general-purpose chatbot. The assistant answers homelab SRE questions.
+- Remediation. It takes no remediation actions. The one automated action is a container image upgrade through the
+  Upgrade Advisor's approval path. The deploy capability is never an agent or MCP tool (ADR 0003, in the
+  [ADR log](docs/adr/README.md)).
+- Multi-tenancy or RBAC. It serves one homelab owner.
 
 ---
 

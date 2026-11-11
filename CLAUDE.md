@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HomeLab SRE Assistant — an AI-powered SRE assistant for homelab infrastructure built with LangChain (Python). It connects
-to live infrastructure telemetry (Prometheus, Grafana, Proxmox VE, PBS) and a RAG knowledge base (runbooks, Ansible
-playbooks, past incidents) to answer operational questions, explain alerts, correlate changes, and generate incident
-reports.
+HomeLab SRE Assistant — an MCP server and AI agent for homelab infrastructure (Python). Its read-only tools query live
+telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a RAG knowledge base (runbooks).
+
+- **`/mcp` is the primary surface.** Claude Code sessions, the claude.ai connector, the nanoclaw assistant and other
+  homelab apps call the tools directly over Streamable HTTP. `docs/mcp-clients.md` is the client guide.
+- **`/ask` and `/ask/stream`** run the chat agent for the webapp and the CLI: it explains alerts, correlates changes
+  and writes incident reports.
+- **Background jobs:** the weekly reliability report, the Upgrade Advisor and the incident explainer.
 
 Target environment: Proxmox homelab with 80+ services across multiple VMs and LXCs.
 
@@ -20,14 +24,18 @@ Target environment: Proxmox homelab with 80+ services across multiple VMs and LX
 - **RAG retrieval** (vector store): Runbooks, Ansible playbooks/inventory, past incident summaries — embedded in
   Chroma/FAISS
 
-The LangChain agent decides which approach to use based on the question.
+On `/ask` the agent decides which approach to use based on the question. On `/mcp` the client's model decides.
 
 ## Tech Stack
 
-- **Agent framework:** LangChain (Python)
-- **LLM:** OpenAI API or Anthropic API (selected via `LLM_PROVIDER`)
-- **Vector store:** Chroma or FAISS
-- **Backend:** FastAPI (`/ask` endpoint)
+- **MCP server:** FastMCP, Streamable HTTP at `/mcp`, behind Cloudflare Access plus an in-app Access JWT check
+  (`MCP_ACCESS_MODE`)
+- **Tools:** LangChain `@tool` functions with Pydantic schemas, listed once in `TOOL_SPECS`
+  (`src/agent/tool_registry.py`), which builds `/mcp` and both agent paths
+- **Agent:** Claude Agent SDK when `LLM_PROVIDER=anthropic`, which production runs. LangChain/LangGraph when
+  `LLM_PROVIDER=openai`, which the eval framework is written against
+- **Vector store:** Chroma
+- **Backend:** FastAPI (`/mcp`, `/ask`, `/ask/stream`, `/report`, `/health`, `/metrics`)
 - **Frontend:** Vue 3 SPA (separate repo: johnmathews/sre-webapp) or CLI
 - **Observability:** Prometheus metrics, Grafana dashboards, Loki logs
 - **Infrastructure:** Proxmox, Ansible
@@ -52,10 +60,13 @@ make typecheck     # mypy strict mode
 make test          # Unit + integration tests under coverage (mocked HTTP, no secrets needed); fails below the floor
 make test-e2e      # E2E tests against real services (needs .env, costs money)
 make check         # lint + typecheck + test in one command
+make smoke         # Build the Docker image and run the CI smoke test on it (/health, /mcp initialize + tools/list)
 make serve         # FastAPI dev server on :8000
 make ingest        # Rebuild Chroma vector store from runbooks/
 make chat          # Interactive CLI REPL for the agent
 make report        # Generate weekly reliability report to stdout
+make eval          # Run the eval cases (real LLM calls, costs money)
+make advisor       # Upgrade Advisor dry run (no email, no batch, no deploy)
 make hooks         # Install git pre-commit + pre-push hooks (works from a worktree; installs into the shared hooks dir)
 uv run pytest tests/test_foo.py::test_bar  # Run a single test
 ```
@@ -103,18 +114,26 @@ modifying eval cases.
 
 ## Source Layout
 
-- `src/agent/` — LangChain agent setup, tools (prometheus, grafana_alerts, proxmox, pbs, loki), retrieval (embeddings,
-  runbooks), memory
-- `src/api/` — FastAPI application
+- `src/agent/` — agent setup and tools:
+  - `tool_registry.py`: `TOOL_SPECS`, the one list of tools, with `enabled_specs` and `run_tool`
+  - `tools/`: the tool modules
+  - `retrieval/`: embeddings and `runbook_search`
+  - `sdk_agent.py`: the Claude Agent SDK path, with `mcp_tools.py`, its in-process `sre` tool server
+  - `agent.py`: `build_agent`, the LangGraph path and the dispatch between the two
+- `src/api/` — FastAPI application (`main.py`). `mcp_server.py` builds `/mcp` from the registry, and `mcp_access.py`
+  and `mcp_identity.py` check the Access JWT and name the client
 - `src/eval/` — Evaluation test cases (YAML) and runner
-- `src/observability/` — Prometheus metric definitions, LangChain callback handler for cost/token tracking
+- `src/observability/` — Prometheus metric definitions, `tool_calls.py` (the per-call `tool_call` line and tool
+  metrics on every surface), LangChain callback handler, SDK LLM metrics, logging setup
 - `src/report/` — Weekly reliability report generator, email delivery, APScheduler cron scheduling
 - `src/upgrades/` — Upgrade Advisor: allowlist, WUD/registry/GitHub clients, review, store, deploy, verify, email; the
   approval endpoint is `src/api/upgrades.py`, the daily job is scheduled in `src/report/scheduler.py`
 - `src/incidents/` — Incident explainer: evidence, verdict, message, pushover, job, store, `__main__` dry run; the
   webhook is `src/api/incidents.py`, shared models and the Gatus endpoint key are in `models.py` and `gatus.py` (see
   `docs/incident-explainer.md`)
-- `docs/` — Design documentation (architecture, tool reference, code flow, dependencies, `incident-explainer.md`)
+- `docs/` — Design documentation: `architecture.md`, `code-flow.md`, `tool-reference.md` (one section per tool, kept
+  in step by `tests/test_docs_tool_reference.py`), `mcp-clients.md` (connecting MCP clients), `dependencies.md`,
+  `incident-explainer.md`, and `adr/` (decision records, index in `docs/adr/README.md`)
 - `runbooks/` — Operational runbooks (markdown)
 - `ansible/` — Symlink/submodule to ansible home-server project
 - `dashboards/` — Grafana dashboard JSON exports
@@ -127,9 +146,11 @@ This is a **public repository**. Never commit secrets, API keys, tokens, or inte
 
 - **Never silently fail.** Every degradation is visible to the user and logged. Each tool has explicit failure handling
   with graceful fallback.
-- **Self-observability.** The assistant tracks its own SLIs: response latency p95 (recorded, no target — scope and
-  accuracy take priority over speed), tool call success rate (> 99%), RAG relevance (> 80% top-3), availability
-  (> 99.5%), LLM error rate (< 1%).
+- **Self-observability.** Every tool call on every surface writes one `tool_call` log line and the tool metrics. The
+  SLIs (`docs/architecture.md`, "SLIs") can each go red: tool call success rate (> 99%, success over calls that are
+  not `invalid_args` or `unknown_tool`, `/mcp` and agent together), availability (> 99.5%, the average of
+  `sre_assistant_component_healthy`, `mcp_server` included), LLM error rate (< 1%), and `/ask` latency p95 (recorded,
+  no target — scope and accuracy take priority over speed).
 - **Cost awareness.** Every query tracks token usage, estimated cost, tool call count, and latency breakdown.
 - **Advisory by default.** The only automated action is a container upgrade through the Upgrade
   Advisor's approval path (and, once enabled per container, its allowlisted auto path). The deploy

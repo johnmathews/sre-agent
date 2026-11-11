@@ -1,3 +1,5 @@
+**Status:** superseded by [code-flow.md](../code-flow.md) ("Structured error events") and [`src/agent/agent_errors.py`](../../src/agent/agent_errors.py) (2026-11-11).
+
 # Actionable Agent Error Messages — Design
 
 **Date:** 2026-07-22

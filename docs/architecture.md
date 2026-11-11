@@ -2,28 +2,44 @@
 
 ## System Overview
 
-The HomeLab SRE Assistant is an AI agent that connects to live infrastructure telemetry and a knowledge base to answer
-operational questions about a Proxmox homelab with 80+ services.
+The HomeLab SRE Assistant serves read-only SRE tools for a Proxmox homelab with 80+ services. The tools read live
+telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a runbook knowledge base. The app has three
+surfaces, all in one FastAPI process:
 
-The agent supports two LLM backend paths, selected via `LLM_PROVIDER`:
+1. **MCP server at `/mcp`**, the primary surface. Claude Code sessions, the claude.ai connector, the nanoclaw
+   assistant and other homelab apps call its tools directly over Streamable HTTP. No agent loop runs and no LLM is
+   called on this side. See [MCP Server Endpoint](#mcp-server-endpoint) and [mcp-clients.md](mcp-clients.md).
+2. **Chat agent at `/ask` and `/ask/stream`**, used by the webapp (sre-webapp) and the CLI. An LLM picks the tools
+   and writes the answer.
+3. **Background jobs:** the weekly reliability report, the Upgrade Advisor and the incident explainer (a Gatus
+   webhook).
 
-- **OpenAI path** (`LLM_PROVIDER=openai`) — LangChain/LangGraph agent with LangChain `@tool` functions
-- **Anthropic path** (`LLM_PROVIDER=anthropic`) — Claude Agent SDK via MCP tools through the Claude Code CLI subprocess
+One registry, `TOOL_SPECS` in `src/agent/tool_registry.py`, builds the tools for `/mcp` and for the agent, so both see
+the same names, descriptions and input schemas. [tool-reference.md](tool-reference.md) documents each tool.
 
-Both paths share the same tool business logic, system prompt, and observability metrics. The SDK path enables Opus access
-via OAuth tokens from Claude Max/Pro subscriptions.
+The chat agent has two LLM backend paths, selected via `LLM_PROVIDER`:
+
+- **Anthropic path** (`LLM_PROVIDER=anthropic`, the one production runs): the Claude Agent SDK runs the Claude Code
+  CLI as a subprocess and calls the tools through an in-process MCP server. OAuth tokens from a Claude Max/Pro
+  subscription give it Opus access.
+- **OpenAI path** (`LLM_PROVIDER=openai`): a LangChain/LangGraph agent with LangChain `@tool` functions. The eval
+  framework is written against this path: it reads the LangGraph message list.
+
+Both paths share the same tool business logic, system prompt, and observability metrics.
 
 ## Data Flow
 
-The agent uses two distinct data access patterns:
-
 ```
-                         User Question
-                              |
-                    FastAPI /ask or /ask/stream
-                              |
-                       LangChain Agent
-                        (tool router)
+   MCP clients                                  Webapp / CLI
+   (Claude Code, claude.ai, nanoclaw, apps)          |
+        |                                    POST /ask, /ask/stream
+   Cloudflare Access                                 |
+        |                                       Chat agent
+   /mcp (McpAccessCheck, ToolCallObserver)   (SDK or LangGraph:
+        |                                     the LLM picks tools)
+        +--------------------+   +-------------------+
+                             |   |
+                   Tool registry (TOOL_SPECS)
                   /     |      |      \
                  /      |      |       \
      Live Metrics    Logs    RAG    Infrastructure
@@ -39,6 +55,8 @@ The agent uses two distinct data access patterns:
     +-----------+         Runbooks  | TrueNAS  |
                           Playbooks +-----------+
 ```
+
+The tools use two distinct data access patterns:
 
 ### Live Tool Calls
 
@@ -58,7 +76,7 @@ Embedded documents retrieved by semantic similarity. Used for operational knowle
 - **Runbooks** — troubleshooting procedures, architecture docs, service configs
 - **Ansible playbooks** — infrastructure-as-code, role definitions
 
-The LangChain agent decides which approach to use based on the question.
+On `/ask` the agent decides which approach to use based on the question. On `/mcp` the client's own model decides.
 
 ## Service Dependencies
 
@@ -85,6 +103,8 @@ HomeLab SRE Assistant
   |
   +-- Pushover API (optional — incident explainer: the explanation push)
   |
+  +-- Cloudflare Access (optional — signing keys for the /mcp JWT check and upgrade approvals)
+  |
   +-- Chroma vector store (local, on-disk)
 ```
 
@@ -104,8 +124,9 @@ Every external dependency has explicit error handling:
 - **TimeoutException** — "{service} request timed out after {n}s"
 - **HTTPStatusError** — "{service} API error: HTTP {code} - {body}"
 
-All tools set `handle_tool_error = True` so errors are returned to the LLM as text (not raised as exceptions), allowing
-the agent to report failures gracefully to the user.
+A tool raises `ToolException` with that message. On the LangGraph path `handle_tool_error = True` returns it to the
+LLM as text, so the agent can report the failure to the user. On `/mcp` and the SDK tool server it becomes an
+`isError` result carrying the same message.
 
 ### Request Timeout
 
@@ -224,20 +245,24 @@ the agent falls back to the deployment default.
 
 ## MCP Server Endpoint
 
-The assistant optionally exposes its SRE tools as a Streamable HTTP MCP server at `/mcp`, allowing MCP clients (Claude
-Code, Claude Desktop, Cursor) to call individual tools directly without going through the agent loop.
+`/mcp` serves the registry's tools as a Streamable HTTP MCP server. It is the assistant's primary surface: client apps
+(Claude Code sessions, the claude.ai connector, the nanoclaw assistant, other homelab apps) call individual tools
+directly, without the agent loop, and combine them with other MCP servers in the same session.
+[mcp-clients.md](mcp-clients.md) covers connecting a client, service tokens and troubleshooting.
+[tool-reference.md](tool-reference.md) documents each tool.
 
-### When to use MCP vs `/ask`
+### MCP vs `/ask`
 
-- **`/ask`** — full SRE agent experience: curated system prompt, multi-step ReAct reasoning, automatic runbook
-  cross-referencing, diagnostic methodology. Best for complex investigations.
-- **`/mcp`** — direct tool access: single tool calls with lower latency, composable with other MCP servers in the same
-  client session. Best for ad-hoc queries during development (e.g., "check CPU on infra VM" from Claude Code).
+- **`/mcp`**: one tool per call, chosen by the client's own model. Lower latency, no LLM cost on this side, and the
+  client keeps control of the investigation.
+- **`/ask`**: the full SRE agent: curated system prompt, multi-step reasoning, runbook cross-referencing and the
+  diagnostic methodology. One question in, one answer out.
 
 ### Configuration
 
-The MCP endpoint is always enabled at `/mcp`. Cloudflare Access sits in front of it on the tunnel, and the app checks
-the Access JWT itself (see [Access check](#access-check)), because the container port is also reachable on the LAN.
+`/mcp` is always mounted. No setting turns it off. Cloudflare Access sits in front of the public hostname, and the app
+checks the Access JWT itself (see [Access check](#access-check)), because the container port is also reachable on the
+LAN.
 
 ```bash
 # Add to Claude Code (external access via Cloudflare tunnel, with an Access service token)
@@ -274,8 +299,10 @@ Client ID). `MCP_CLIENT_NAMES` maps that identity to a client name (`src/api/mcp
 - `sre_assistant_mcp_http_requests_total{client, access}` counts every HTTP request to `/mcp`. `access` is `verified`,
   `missing` (no header), `invalid` (a header that failed verification), `unconfigured` (no AUD or team domain) or
   `off`.
-- The mode switches back with `MCP_ACCESS_MODE=off` and a restart. The plan is to run `log` until only expected
-  clients show as `verified`, then switch to `enforce`.
+- `MCP_ACCESS_MODE=off` and a restart switch the check off.
+- Production runs `log` with `MCP_CF_ACCESS_AUD` empty, so every request counts as `access="unconfigured"` and every
+  client as `unknown`. home-server #422 sets the AUD and the client names, then switches to `enforce` once only
+  expected clients show as `verified`.
 
 ### Architecture
 
@@ -302,10 +329,15 @@ Client ID). `MCP_CLIENT_NAMES` maps that identity to a client name (`src/api/mcp
 
 ### Security
 
-The MCP endpoint exposes raw tool calls: any caller it accepts can run arbitrary PromQL (`prometheus_instant_query`) or
-LogQL (`loki_query_logs`). Cloudflare Access guards the tunnel route. The container port is also open on the LAN, so
-only `MCP_ACCESS_MODE=enforce` refuses a LAN caller without a valid Access JWT; `log` mode names callers but refuses
-none.
+Any caller `/mcp` accepts can run arbitrary PromQL (`prometheus_instant_query`) and LogQL (`loki_query_logs`), and read
+stored conversations. Two layers guard it:
+
+- **Cloudflare Access** admits only an authenticated person or service token on the public hostname.
+- **The in-app check** covers the other way in. The container port is also open on the LAN, and only
+  `MCP_ACCESS_MODE=enforce` refuses a LAN caller without a valid Access JWT. `log` names callers and refuses none.
+
+Until production runs `enforce`, any device on the LAN can call `/mcp`. A firewall rule on that port is home-server
+#421. The check covers `/mcp` only: `/ask`, `/report` and `/conversations` have no in-app check (sre-agent #35).
 
 ## Self-Instrumentation (Observability)
 
@@ -400,10 +432,10 @@ in the log line), and `client` holds only fixed values.
 
 ### Architecture
 
-Three layers:
+Four layers:
 
 1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons.
-   Twenty-four metrics are created once at import time and shared across the process. The twenty-fifth,
+   Twenty-five metrics are created once at import time and shared across the process. The twenty-sixth,
    `sre_assistant_claude_credentials_healthy`, is registered by the lifespan only on the anthropic path, because an
    unlabelled gauge exports 0 from the moment it exists and would read as "login needs renewing" where no login is
    in use. Histogram buckets are tuned for expected latencies:
@@ -418,8 +450,8 @@ Three layers:
    `error`, `error_class=ToolException`, with the message text as `error`. On the SDK path,
    `src/observability/sdk_metrics.py` records only LLM calls, tokens and cost; the SDK tool server's handler measures
    each tool call itself. Key design choices:
-   - **No tool code changes** — the handler hooks into LangGraph's callback system, so all 23 current tools (and any
-     future tools) are automatically instrumented
+   - **No tool code changes** — the handler hooks into LangGraph's callback system, so every tool on the LangGraph
+     path is instrumented, a new one included, without touching its code
    - **Works inside the agent loop** — LangGraph may call multiple tools in sequence before returning; the callback sees
      each individual call, unlike FastAPI middleware which only sees the outer request
    - **Error-resilient** — every callback method is wrapped in `try/except` so metrics never crash a request
@@ -429,6 +461,12 @@ Three layers:
 3. **FastAPI instrumentation** (`src/api/main.py`) — request-level timing/counting on `/ask`, `/ask/stream`, and
    `/report` + `/metrics` endpoint + health gauge updates on `/health` + report metrics on `/report` + app info set at
    startup
+
+4. **Tool call observers** — `observe_tool_call` (`src/observability/tool_calls.py`) is the only writer of the tool
+   metrics and the `tool_call` line. `/mcp` calls it from `ToolCallObserver`, the SDK tool server from its handler and
+   the LangGraph path from the callback handler above. `McpAccessCheck` counts every HTTP request to `/mcp` in
+   `sre_assistant_mcp_http_requests_total`. `/mcp` traffic has no request-level metric: its latency is the tool call
+   duration.
 
 ### SLIs
 
@@ -502,7 +540,7 @@ YAML eval case
 ### Running
 
 ```bash
-make eval                                          # Run all 30 cases (costs tokens)
+make eval                                          # Run all 32 cases (costs tokens)
 make eval ARGS="--case alert-explain-high-cpu"     # Single case
 uv run pytest tests/test_eval.py -v                # Unit tests (free)
 uv run pytest tests/test_eval_integration.py -v    # Integration tests (free)
@@ -510,8 +548,8 @@ uv run pytest tests/test_eval_integration.py -v    # Integration tests (free)
 
 ### Eval Cases
 
-30 cases across 8 categories: alerts (4), Prometheus (14), Proxmox (2), PBS (1), TrueNAS (2), Loki (3), memory (3),
-cross-tool (1). Cases are YAML files in `src/eval/cases/`.
+32 cases across 10 categories: alerts (4), Prometheus (14), Proxmox (2), PBS (1), TrueNAS (2), Loki (3), memory (3),
+cross-tool (1), diagnostic (1), elapsed time (1). Cases are YAML files in `src/eval/cases/`.
 
 ## Weekly Reliability Report
 
@@ -582,7 +620,9 @@ for that section — the report is always generated, even with partial data.
 
 ## Agent Memory Store
 
-Phase 7 adds persistent memory via SQLite, enabling the agent to accumulate knowledge across sessions.
+Phase 7 adds persistent memory via SQLite, enabling the agent to accumulate knowledge across sessions. **It is off in
+production** (`MEMORY_DB_PATH` is unset there), so startup logs a WARNING and `sre_assistant_memory_store_enabled`
+reads 0. The memory tools, baselines, report archive and query patterns below do nothing until it is set.
 
 ### Storage
 
@@ -836,20 +876,46 @@ See `docs/conversation-history.md` for the complete schema, resume semantics, an
 In Docker, `CONVERSATION_HISTORY_HOST_DIR` from the host `.env` is bind-mounted to `/app/conversations` inside the
 container. The app always writes to `/app/conversations` — the host path is purely a deployment concern.
 
-## Deployment Plan
+## Deployment
 
-### Target Environment
+### Where it runs
 
-The agent will run as Docker containers on the Infra VM (`infra`, LXC on Proxmox), managed by the existing
-[home-server](https://github.com/johnmathews/home-server) Ansible project. This keeps deployment consistent with every
-other service in the homelab.
+`sre-agent` runs as a Docker container on the infra VM on Proxmox, managed by the
+[home-server](https://github.com/johnmathews/home-server) Ansible project like the other homelab services. That
+project owns the production compose file, the `.env` and the routing. The `docker-compose.yml` in this repository is
+the standalone version.
+
+### How a change reaches production
+
+1. A push to `main` runs the CI `check` job (`.github/workflows/ci.yml`): lint, typecheck, and the tests under the
+   coverage floor.
+2. The `build` job runs on a push only, and only after `check` passes. It builds the image, then
+   `scripts/smoke_image.sh` runs it with dummy config and checks `/health`, the `/mcp` `initialize` and `tools/list`
+   (at least 10 tools) and the SDK's bundled `claude --version`. Then it pushes `ghcr.io/johnmathews/sre-agent:latest`
+   and `:sha-<commit>`.
+3. What's Up Docker (WUD) on the home server sees the new `:latest` digest and redeploys `sre-agent` within about a
+   minute.
+4. While the container restarts, `/mcp` is down for about 20 s and clients get a Cloudflare 502 (home-server #426).
+
+`make smoke` runs the same image check locally.
+
+### Request path
+
+- MCP clients call `https://<sre-mcp-host>/mcp`. Cloudflare Access admits the caller, then Cloudflare Tunnel carries
+  the request to `cloudflared` (in its own LXC), which forwards it to the port `sre-agent` publishes on the infra VM.
+  The in-app [Access check](#access-check) runs next.
+- The same published port is reachable from the LAN without the tunnel (see [Security](#security)).
+- The other public hostnames, the webapp's included, also go through the tunnel, with Traefik providing HTTPS.
+- The containers share a Docker bridge network and reach Prometheus, Grafana, Loki, Proxmox VE, PBS and TrueNAS on
+  the LAN.
 
 ### Sensitive Data Strategy
 
 This is a **public repository**. Runbooks contain real infrastructure details (IPs, hostnames, SSH usernames, service
 topology) that the RAG agent needs for useful answers. The deployment strategy handles this tension:
 
-1. **Repository runbooks** — contain real operational content (kept as-is for now; acceptable risk for RFC1918 addresses)
+1. **Repository runbooks** — contain real operational content, LAN addresses included (sre-agent #39 tracks removing
+   them, and `tests/test_no_lan_addresses.py` skips `runbooks/` until then)
 2. **Ansible templates** — at deploy time, Ansible can template runbooks from inventory variables if sanitization is
    needed later
 3. **`.env` file** — generated by Ansible from `templates/env.j2` with vault-encrypted secrets, never committed
@@ -860,8 +926,8 @@ topology) that the RAG agent needs for useful answers. The deployment strategy h
 
 ### Container Architecture
 
-A single Docker image (multi-stage build, `python:3.13-slim`) contains all three services. The `docker-compose.yml`
-overrides the command per service:
+One Docker image (multi-stage build, `python:3.13-slim`) runs both `sre-ingest` and `sre-agent`. The webapp has its
+own image. The `docker-compose.yml` overrides the command per service:
 
 ```
 docker-compose.yml
@@ -904,15 +970,9 @@ re-ingest.
 See the [README — Deploying with Docker](../readme.md#deploying-with-docker) for full setup instructions including how to
 merge into an existing compose stack.
 
-### Networking
-
-- All containers share a Docker bridge network with access to Prometheus, Grafana, Proxmox VE, and PBS on the LAN
-- No macOS local network permission issues (Linux host)
-- Traefik reverse proxy provides HTTPS access via Cloudflare tunnel
-
 ### Secrets Management
 
-All secrets are managed via Ansible Vault, consistent with the rest of the homelab:
+All secrets live in Ansible Vault, like the rest of the homelab:
 
 | Secret                          | Source        | Injected Via    |
 | ------------------------------- | ------------- | --------------- |

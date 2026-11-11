@@ -1424,7 +1424,7 @@ def _load_previous_report() -> str | None:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Could not load previous report from memory store")
+        logger.warning("Could not load previous report from memory store", exc_info=True)
         return None
 
 
@@ -1459,7 +1459,7 @@ def _archive_report(report_data: ReportData, markdown: str) -> None:
         finally:
             conn.close()
     except Exception:
-        logger.debug("Failed to archive report to memory store")
+        logger.warning("Failed to archive report to memory store", exc_info=True)
 
 
 async def _compute_post_report_baselines(lookback_days: int) -> None:

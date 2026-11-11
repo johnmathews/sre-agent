@@ -42,6 +42,7 @@ from src.api.mcp_access import McpAccessCheck, mcp_access_config
 from src.api.upgrades import router as upgrades_router
 from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
+from src.memory.store import log_memory_status
 from src.observability.logs import configure_app_logging
 from src.observability.metrics import (
     APP_INFO,
@@ -242,6 +243,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         start_scheduler()
         warn_if_approval_unconfigured()
         log_incident_explainer_status()
+        log_memory_status()
         if not missing_incident_settings():
             # Background task: finishes incidents a restart left behind without delaying startup.
             start_incident_recovery()

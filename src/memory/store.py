@@ -8,6 +8,7 @@ IF NOT EXISTS (idempotent).
 
 import json
 import logging
+import os
 import sqlite3
 from datetime import UTC, datetime
 
@@ -109,6 +110,39 @@ def is_memory_configured() -> bool:
         return bool(settings.memory_db_path)
     except Exception:
         return False
+
+
+def log_memory_status() -> None:
+    """At startup, log whether the memory store is off or broken, and set the enabled gauge.
+
+    Unset ``MEMORY_DB_PATH`` is a WARNING (gauge 0). When set, open and close one connection the way the
+    store does on first use (this creates a missing file): a directory path or any other failure is an
+    ERROR (gauge 0); success sets the gauge to 1.
+    """
+    from src.observability.metrics import MEMORY_STORE_ENABLED
+
+    path = get_settings().memory_db_path
+    if not path:
+        MEMORY_STORE_ENABLED.set(0)
+        logger.warning(
+            "Memory store disabled: MEMORY_DB_PATH is empty; incident memory, baselines, "
+            "report comparison and query patterns are off"
+        )
+        return
+    try:
+        if os.path.isdir(path):
+            msg = "MEMORY_DB_PATH is a directory, not a database file"
+            raise IsADirectoryError(msg)
+        get_connection(path).close()
+    except IsADirectoryError:
+        MEMORY_STORE_ENABLED.set(0)
+        logger.error("Memory store unusable: MEMORY_DB_PATH %r is a directory, not a database file", path)
+    except Exception as exc:
+        MEMORY_STORE_ENABLED.set(0)
+        logger.error("Memory store unusable: cannot open MEMORY_DB_PATH %r (%s: %s)", path, type(exc).__name__, exc)
+    else:
+        MEMORY_STORE_ENABLED.set(1)
+        logger.info("Memory store enabled: %s", path)
 
 
 # ---------------------------------------------------------------------------

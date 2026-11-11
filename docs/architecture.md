@@ -373,6 +373,7 @@ in the log line), and `client` holds only fixed values.
 | `sre_assistant_llm_token_usage`            | Counter   | `type` (prompt/completion)                             |
 | `sre_assistant_llm_estimated_cost_dollars` | Counter   | —                                                      |
 | `sre_assistant_component_healthy`          | Gauge     | `component`                                            |
+| `sre_assistant_memory_store_enabled`       | Gauge     | — (1 = `MEMORY_DB_PATH` set and the database opened at startup; 0 = unset or failed to open) |
 | `sre_assistant_info`                       | Info      | `version`, `model`                                     |
 | `sre_assistant_reports_total`              | Counter   | `trigger` (scheduled/manual), `status` (success/error) |
 | `sre_assistant_report_duration_seconds`    | Histogram | —                                                      |
@@ -393,7 +394,7 @@ in the log line), and `client` holds only fixed values.
 Three layers:
 
 1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons.
-   Twenty-three metrics are created once at import time and shared across the process. The twenty-fourth,
+   Twenty-four metrics are created once at import time and shared across the process. The twenty-fifth,
    `sre_assistant_claude_credentials_healthy`, is registered by the lifespan only on the anthropic path, because an
    unlabelled gauge exports 0 from the moment it exists and would read as "login needs renewing" where no login is
    in use. Histogram buckets are tuned for expected latencies:
@@ -578,6 +579,19 @@ Phase 7 adds persistent memory via SQLite, enabling the agent to accumulate know
 
 SQLite database at the path configured by `MEMORY_DB_PATH` (empty = disabled). Uses WAL mode for concurrent reads,
 `CREATE TABLE IF NOT EXISTS` for idempotent schema initialization, and parameterized queries to prevent SQL injection.
+
+### Startup status
+
+`log_memory_status()` (`src/memory/store.py`) runs once in the app lifespan, beside the incident explainer status, and
+sets the `sre_assistant_memory_store_enabled` gauge:
+
+- `MEMORY_DB_PATH` empty: one WARNING naming `MEMORY_DB_PATH`, gauge 0. The store is off by choice, so request paths
+  return early and log nothing per request.
+- Path set and the database opens (a missing file is created, as on first use): INFO, gauge 1.
+- Path set but a directory, or any other open failure: ERROR (with the exception class), gauge 0.
+
+Once the store is configured, a failed read or write in the context helpers, the agent prompt builders or the report
+generator logs a WARNING with the traceback. `/health` does not report the memory store.
 
 ### Schema (4 tables)
 

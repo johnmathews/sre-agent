@@ -100,7 +100,7 @@ def _get_memory_context() -> str:
             parts.append(patterns_ctx)
         return "\n".join(parts)
     except Exception:
-        logger.debug("Failed to load memory context for SDK system prompt", exc_info=True)
+        logger.warning("Failed to load memory context for SDK system prompt", exc_info=True)
         return ""
 
 

@@ -68,7 +68,7 @@ Three test tiers:
 - **E2E tests** (`@pytest.mark.e2e`) — hit real Prometheus/Alertmanager/LLM. Skipped by default, run with `--run-e2e`. Requires `.env`.
 
 `make test` runs unit + integration (safe for CI) under `coverage` with `-rf`, then prints the report (`src/` only). The
-floor is `fail_under` in `pyproject.toml` (89 against a 90.27% baseline); `make test` exits non-zero below it. Raise it
+floor is `fail_under` in `pyproject.toml` (91 against a 92.43% baseline); `make test` exits non-zero below it. Raise it
 when coverage rises, never lower it to get a change through. `make test-e2e` runs everything.
 
 The `mock_settings` fixture in `tests/conftest.py` provides fake config so tests never need a `.env` file. When adding new modules that import `get_settings`, add a corresponding patch to this fixture.

@@ -1,8 +1,22 @@
 """Unit tests for the memory store — pure function tests with in-memory SQLite."""
 
 import json
+import logging
 import sqlite3
+from pathlib import Path
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from src.agent.agent import _get_memory_context as agent_get_memory_context
+from src.agent.sdk_agent import _get_memory_context as sdk_get_memory_context
+from src.memory.context import (
+    enrich_alerts_with_incident_history,
+    enrich_with_baseline_context,
+    get_open_incidents_context,
+    get_recent_patterns_context,
+)
 from src.memory.models import BaselineRecord
 from src.memory.store import (
     _extract_report_metrics,
@@ -15,6 +29,7 @@ from src.memory.store import (
     get_recent_query_patterns,
     get_reports,
     init_schema,
+    log_memory_status,
     save_baselines,
     save_incident,
     save_query_pattern,
@@ -22,6 +37,8 @@ from src.memory.store import (
     search_incidents,
     update_incident,
 )
+from src.observability.metrics import MEMORY_STORE_ENABLED
+from src.report.generator import _archive_report, _load_previous_report
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -443,3 +460,134 @@ class TestExtractReportMetrics:
         metrics = _extract_report_metrics(json.dumps(data))
         assert metrics["active_alerts"] == 0
         assert metrics["slo_failures"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Startup status, gauge and failure logging
+# ---------------------------------------------------------------------------
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_memory_status_warns_when_unset(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    mock_settings.memory_db_path = ""
+    with caplog.at_level(logging.INFO, logger="src.memory.store"):
+        log_memory_status()
+    records = _warnings(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "MEMORY_DB_PATH is empty" in records[0].getMessage()
+    assert MEMORY_STORE_ENABLED._value.get() == 0
+
+
+def test_memory_status_errors_when_path_is_directory(
+    mock_settings: Any, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    mock_settings.memory_db_path = str(tmp_path)
+    with caplog.at_level(logging.INFO, logger="src.memory.store"):
+        log_memory_status()
+    records = _warnings(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert "directory" in records[0].getMessage()
+    assert MEMORY_STORE_ENABLED._value.get() == 0
+
+
+def test_memory_status_errors_with_exception_class(
+    mock_settings: Any, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    mock_settings.memory_db_path = str(tmp_path / "missing-dir" / "memory.db")
+    with caplog.at_level(logging.INFO, logger="src.memory.store"):
+        log_memory_status()
+    records = _warnings(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert "OperationalError" in records[0].getMessage()
+
+
+def test_memory_status_gauge(mock_settings: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """1 when configured and the database opens; 0 when unset or broken."""
+    mock_settings.memory_db_path = str(tmp_path / "memory.db")
+    MEMORY_STORE_ENABLED.set(0)
+    with caplog.at_level(logging.INFO, logger="src.memory.store"):
+        log_memory_status()
+    assert MEMORY_STORE_ENABLED._value.get() == 1
+    assert not _warnings(caplog)
+
+    mock_settings.memory_db_path = str(tmp_path)
+    log_memory_status()
+    assert MEMORY_STORE_ENABLED._value.get() == 0
+
+    mock_settings.memory_db_path = str(tmp_path / "memory.db")
+    log_memory_status()
+    assert MEMORY_STORE_ENABLED._value.get() == 1
+    mock_settings.memory_db_path = ""
+    log_memory_status()
+    assert MEMORY_STORE_ENABLED._value.get() == 0
+
+
+def test_memory_context_failure_logs_warning(
+    mock_settings: Any, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    mock_settings.memory_db_path = str(tmp_path)  # a directory: every connection fails
+    with caplog.at_level(logging.DEBUG):
+        assert get_open_incidents_context() == ""
+        assert get_recent_patterns_context() == ""
+        assert enrich_alerts_with_incident_history("alerts", ["A"]) == "alerts"
+        assert enrich_with_baseline_context("result", ["m"]) == "result"
+    warned = [r for r in _warnings(caplog) if r.name == "src.memory.context"]
+    assert len(warned) == 4
+
+
+def test_agent_memory_context_failure_logs_warning(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    with (
+        patch("src.memory.context.get_open_incidents_context", side_effect=RuntimeError("boom")),
+        caplog.at_level(logging.DEBUG),
+    ):
+        assert agent_get_memory_context() == ""
+        assert sdk_get_memory_context() == ""
+    assert len([r for r in _warnings(caplog) if r.name in ("src.agent.agent", "src.agent.sdk_agent")]) == 2
+
+
+def test_report_memory_failure_logs_warning(
+    mock_settings: Any, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    mock_settings.memory_db_path = str(tmp_path)
+    with caplog.at_level(logging.DEBUG):
+        assert _load_previous_report() is None
+        _archive_report(cast(Any, {"generated_at": "x", "lookback_days": 7}), "md")
+    assert len([r for r in _warnings(caplog) if r.name == "src.report.generator"]) == 2
+
+
+def test_memory_unset_request_path_logs_nothing(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    mock_settings.memory_db_path = ""
+    with caplog.at_level(logging.DEBUG):
+        assert get_open_incidents_context() == ""
+        assert get_recent_patterns_context() == ""
+        assert enrich_alerts_with_incident_history("alerts", ["A"]) == "alerts"
+        assert enrich_with_baseline_context("result", ["m"]) == "result"
+        assert agent_get_memory_context() == ""
+        assert sdk_get_memory_context() == ""
+        assert _load_previous_report() is None
+        _archive_report(cast(Any, {"generated_at": "x", "lookback_days": 7}), "md")
+    assert not _warnings(caplog)
+
+
+@pytest.mark.integration
+def test_startup_emits_one_memory_warning_when_unset(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    from fastapi.testclient import TestClient
+
+    from src.api import main
+
+    mock_settings.memory_db_path = ""
+    with (
+        patch.object(main, "build_agent", return_value=MagicMock()),
+        patch.object(main, "start_startup_verification"),
+        caplog.at_level(logging.WARNING),
+        TestClient(main.app),
+    ):
+        pass
+    matching = [r for r in caplog.records if r.levelno == logging.WARNING and "MEMORY_DB_PATH" in r.getMessage()]
+    assert len(matching) == 1

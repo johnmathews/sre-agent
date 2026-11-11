@@ -100,6 +100,13 @@ COMPONENT_HEALTHY = Gauge(
     labelnames=["component"],
 )
 
+# 1 when MEMORY_DB_PATH is set and the database opens at startup; 0 when it is unset (the owner's choice)
+# or the open fails (a directory, a missing parent, a read-only mount). Set once by log_memory_status().
+MEMORY_STORE_ENABLED = Gauge(
+    "sre_assistant_memory_store_enabled",
+    "Whether the memory store is configured and usable (1=usable, 0=unset or broken)",
+)
+
 APP_INFO = Info(
     "sre_assistant",
     "SRE assistant build information",

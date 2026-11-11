@@ -49,14 +49,14 @@ make dev           # Install all dependencies (including dev tools)
 make lint          # Ruff check + format check
 make format        # Auto-fix lint and formatting
 make typecheck     # mypy strict mode
-make test          # Unit + integration tests (mocked HTTP, no secrets needed)
+make test          # Unit + integration tests under coverage (mocked HTTP, no secrets needed); fails below the floor
 make test-e2e      # E2E tests against real services (needs .env, costs money)
 make check         # lint + typecheck + test in one command
 make serve         # FastAPI dev server on :8000
 make ingest        # Rebuild Chroma vector store from runbooks/
 make chat          # Interactive CLI REPL for the agent
 make report        # Generate weekly reliability report to stdout
-make hooks         # Install git pre-commit + pre-push hooks
+make hooks         # Install git pre-commit + pre-push hooks (works from a worktree; installs into the shared hooks dir)
 uv run pytest tests/test_foo.py::test_bar  # Run a single test
 ```
 
@@ -67,7 +67,9 @@ Three test tiers:
 - **Integration tests** (`tests/test_*_integration.py`, `@pytest.mark.integration`) — test tool functions with mocked HTTP via `respx`. Verify API calls, response handling, and error paths without real services.
 - **E2E tests** (`@pytest.mark.e2e`) — hit real Prometheus/Alertmanager/LLM. Skipped by default, run with `--run-e2e`. Requires `.env`.
 
-`make test` runs unit + integration (safe for CI). `make test-e2e` runs everything.
+`make test` runs unit + integration (safe for CI) under `coverage` with `-rf`, then prints the report (`src/` only). The
+floor is `fail_under` in `pyproject.toml` (89 against a 90.27% baseline); `make test` exits non-zero below it. Raise it
+when coverage rises, never lower it to get a change through. `make test-e2e` runs everything.
 
 The `mock_settings` fixture in `tests/conftest.py` provides fake config so tests never need a `.env` file. When adding new modules that import `get_settings`, add a corresponding patch to this fixture.
 

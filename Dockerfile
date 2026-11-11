@@ -2,7 +2,8 @@
 FROM python:3.13-slim AS builder
 
 # Install uv for fast dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Pinned so a base-image change cannot reach production unreviewed; bump deliberately.
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 WORKDIR /app
 

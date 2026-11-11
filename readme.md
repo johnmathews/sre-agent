@@ -300,8 +300,11 @@ docker compose -f docker-compose.demo.yml up -d
 A single **GitHub Actions** workflow (`.github/workflows/ci.yml`) handles everything:
 
 1. **Check** — Runs `make check` (lint + typecheck + tests) on every push to `main` and on pull requests.
-2. **Build** — On pushes to `main` only: builds the Docker image and pushes to
-   `ghcr.io/johnmathews/sre-agent:latest` (and `:sha-<commit>`). Only runs after check passes.
+2. **Build** — On pushes to `main` only, after check passes: builds the Docker image, smoke-tests it, then pushes
+   to `ghcr.io/johnmathews/sre-agent:latest` (and `:sha-<commit>`). The smoke test
+   (`scripts/smoke_image.sh`, or `make smoke` locally) runs the built image with dummy config and checks `/health`,
+   the `/mcp` `initialize` and `tools/list` calls (at least 10 tools) and the bundled Claude CLI. A failure prints
+   the container logs and nothing is pushed, so a broken image never reaches the home server's auto-deploy.
 
 **Git hooks** — Install local pre-commit (lint + format) and pre-push (full check) hooks:
 

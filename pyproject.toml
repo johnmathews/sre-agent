@@ -41,6 +41,14 @@ dev = [
 [tool.uv]
 constraint-dependencies = ["mcp>=1.30,<2"]
 
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+fail_under = 89
+show_missing = true
+skip_covered = true
+
 [tool.mypy]
 strict = true
 python_version = "3.13"

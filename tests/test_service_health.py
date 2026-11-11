@@ -299,3 +299,21 @@ class TestEdges:
         report = _report(record)
         report.exporter = ExporterStatus(up=0.0, last_collection=None, stale=True, reasons=["up=0"])
         assert "exporter STALE (up=0)" in container_source(report, "1h").detail
+
+
+class TestGatusKeyMatching:
+    """Gatus builds ``key`` from the sanitised group (lower case, separators as '-'), not the raw ``group`` label."""
+
+    @pytest.mark.parametrize(
+        ("group", "key"),
+        [
+            ("apps", "apps_home-assistant"),
+            ("Home Automation", "home-automation_home-assistant"),
+            ("", "_home-assistant"),
+        ],
+    )
+    def test_key_matches_whatever_the_group_spelling(self, group: str, key: str) -> None:
+        from src.agent.tools.service_health import _gatus_matches
+
+        labels = {"group": group, "key": key, "name": "Home Assistant"}
+        assert _gatus_matches(labels, "home-assistant")

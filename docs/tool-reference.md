@@ -266,8 +266,8 @@ verdict.
     error count look. A value outside the range, or not a duration, is refused with the accepted range.
 - **Sources and matching (fixed):**
   1. **Gatus:** `gatus_results_endpoint_success` now and `avg_over_time(...[window])`. An endpoint matches when `name`
-     equals its `name` label, or its `key` with the `<group>_` prefix removed (`apps_home-assistant` gives
-     `home-assistant`), ignoring case.
+     equals its `name` label, or its `key` after the first `_` (Gatus builds the key from the lower-cased group:
+     `apps_home-assistant` and `home-automation_home-assistant` both give `home-assistant`), ignoring case.
   2. **Containers:** `collect_containers(name=…, restart_window_seconds=<window>)` from `container_status`: a
      case-insensitive substring of the container name, with restarts counted over the window.
   3. **Blackbox probes:** `probe_success` whose `instance` (the probed URL) contains `name`, ignoring case.

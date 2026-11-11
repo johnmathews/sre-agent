@@ -109,8 +109,9 @@ def connect_readonly(path: str) -> sqlite3.Connection:
     """Open an existing store read-only, for readers outside the advisor (the ``upgrade_status`` tool).
 
     Runs no schema script and changes no pragma. Every write raises ``sqlite3.OperationalError``
-    ("attempt to write a readonly database"). ``mode=ro`` never creates a file: a missing one raises
-    ``sqlite3.OperationalError`` ("unable to open database file") here or on the first query.
+    ("attempt to write a readonly database"). ``mode=ro`` never creates the database file: a missing one
+    raises ``sqlite3.OperationalError`` ("unable to open database file") here or on the first query. On a
+    WAL-mode store, SQLite may still create the ``-wal`` and ``-shm`` sidecar files beside it.
     """
     uri = Path(path).absolute().as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)

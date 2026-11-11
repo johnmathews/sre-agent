@@ -146,10 +146,14 @@ def _plural(count: int, word: str) -> str:
 
 
 def _gatus_matches(labels: dict[str, str], needle: str) -> bool:
-    """``needle`` (lower case) equals the endpoint name, or its key without the ``<group>_`` prefix."""
+    """``needle`` (lower case) equals the endpoint name, or its key without the group prefix.
+
+    Gatus builds ``key`` as ``<sanitised group>_<sanitised name>`` (lower case, separators as ``-``; see
+    ``src/incidents/gatus.py``), so the raw ``group`` label is not the prefix. A sanitised group has no ``_``, so
+    the bare key is everything after the first one (``_home-assistant`` for an empty group).
+    """
     key = labels.get("key", "")
-    prefix = f"{labels.get('group', '')}_"
-    bare_key = key.removeprefix(prefix) if labels.get("group") else key
+    bare_key = key.partition("_")[2] if "_" in key else key
     return needle in (labels.get("name", "").lower(), bare_key.lower())
 
 

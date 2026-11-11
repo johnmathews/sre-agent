@@ -260,3 +260,11 @@ class TestMcpServerDisabled:
         """build_fastmcp_server builds successfully."""
         server = build_fastmcp_server(mock_settings)
         assert server is not None
+
+
+async def test_truenas_snapshots_exposes_list_snapshots(mock_settings: Any) -> None:
+    """/mcp must accept list_snapshots, or clients cannot reach the snapshot listing."""
+    mock_settings.truenas_url = "https://truenas.test"
+    server = build_fastmcp_server(mock_settings)
+    tool = next(t for t in await server.list_tools() if t.name == "truenas_snapshots")
+    assert "list_snapshots" in tool.parameters["properties"]

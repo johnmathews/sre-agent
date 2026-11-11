@@ -15,6 +15,7 @@ from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUn
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import format_bytes
 from src.agent.tools.prometheus import (
     DEFAULT_TIMEOUT_SECONDS as PROM_TIMEOUT,
 )
@@ -27,7 +28,6 @@ from src.agent.tools.truenas import (
     TruenasDiskEntry,
     TruenasPoolEntry,
     _extract_topology_disks,
-    _format_bytes,
     _truenas_get,
 )
 from src.config import get_settings
@@ -275,7 +275,7 @@ def _format_disk_name(disk: TruenasDiskEntry | None, device_id: str) -> str:
     if disk:
         name = disk.get("name", "?")
         model = disk.get("model", "?")
-        size = _format_bytes(disk.get("size", 0))
+        size = format_bytes(disk.get("size", 0))
         serial = disk.get("serial", "")
         serial_str = f", serial={serial}" if serial else ""
         return f"{name}: {model} ({size}{serial_str})"
@@ -460,8 +460,8 @@ async def _safe_truenas_disks() -> list[TruenasDiskEntry]:
     try:
         disks_raw = await _truenas_get("/disk")
         return disks_raw if isinstance(disks_raw, list) else []
-    except Exception:
-        logger.warning("Failed to fetch TrueNAS disk inventory; showing device IDs only")
+    except Exception as exc:
+        logger.warning("Failed to fetch TrueNAS disk inventory (%s); showing device IDs only", exc)
         return []
 
 

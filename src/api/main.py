@@ -19,7 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, field_validator
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.agent.agent import build_agent, invoke_agent, stream_agent
@@ -214,7 +214,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         mcp_server = build_fastmcp_server(settings)
         mcp_app = mcp_server.http_app(path="/", stateless_http=True)
         await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
-        app.mount("/mcp", mcp_app)
+        app.state.mcp_server = mcp_server
+        app.state.mcp_app = mcp_app
         app.state.mcp_enabled = True
         tool_count = len(await mcp_server.list_tools())
         logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
@@ -236,6 +237,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             start_incident_recovery()
         start_startup_verification()
         yield
+        # Stop routing to the MCP app before its lifespan (the exit stack) closes.
+        app.state.mcp_app = None
+        app.state.mcp_server = None
+        app.state.mcp_enabled = False
         stop_scheduler()
         # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.
         await wait_for_deploys(SHUTDOWN_DEPLOY_WAIT_SECONDS)
@@ -265,6 +270,27 @@ class TrailingSlashForMCP:
         await self._inner(scope, receive, send)
 
 
+class MCPDispatch:
+    """Forward ``/mcp`` to the FastMCP app held in ``app.state.mcp_app``.
+
+    Mounted once at import. The lifespan sets and clears ``app.state.mcp_app``, so a second lifespan (a restart
+    in tests) serves a fresh MCP app instead of a stale one. Outside the lifespan the answer is 503.
+    """
+
+    def __init__(self, fastapi_app: FastAPI) -> None:
+        self._app = fastapi_app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        mcp_app: ASGIApp | None = getattr(self._app.state, "mcp_app", None)
+        if mcp_app is None:
+            if scope["type"] == "http":
+                response = JSONResponse({"error": "MCP server not started"}, status_code=503)
+                await response(scope, receive, send)
+            return
+        await mcp_app(scope, receive, send)
+
+
+app.mount("/mcp", MCPDispatch(app))
 app.add_middleware(TrailingSlashForMCP)
 # Upgrade Advisor approval page and guarded deploy (404 unless the advisor is configured).
 app.include_router(upgrades_router)
@@ -501,7 +527,12 @@ async def health() -> HealthResponse:
             components.append(ComponentHealth(name="loki", status="unhealthy", detail=str(exc)))
 
     # --- TrueNAS SCALE (optional) ---
-    if settings.truenas_url:
+    if settings.truenas_url and not settings.truenas_url.lower().startswith("https://"):
+        # Never send the API key in clear; the tools refuse it the same way.
+        components.append(
+            ComponentHealth(name="truenas", status="unhealthy", detail="TRUENAS_URL must be https; key not sent")
+        )
+    elif settings.truenas_url:
         try:
             verify: bool = settings.truenas_verify_ssl
             async with httpx.AsyncClient(timeout=5.0, verify=verify) as client:

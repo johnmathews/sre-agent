@@ -241,7 +241,11 @@ claude mcp add --transport http \
 
 - **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
 - **Auth:** Cloudflare Access (service token headers)
-- **Mount:** FastMCP app mounted on the existing FastAPI app at `/mcp`
+- **Mount:** a small ASGI shim, `MCPDispatch` in `src/api/main.py`, is mounted once on the FastAPI app at `/mcp` when
+  the module is imported. It forwards to `app.state.mcp_app`, which the lifespan sets at startup and clears at
+  shutdown, and answers 503 `{"error":"MCP server not started"}` while that is unset. A second lifespan (a restart,
+  or `TestClient` entered twice) therefore serves a fresh MCP app instead of a stale one.
+  `tests/test_mcp_http_integration.py` drives initialize, tools/list and tools/call over real HTTP.
 - **Tools:** Same LangChain tool functions used by the agent, wrapped as FastMCP tools, plus 2 conversation
   history tools (`sre_agent_list_conversations`, `sre_agent_get_conversation`) only available via MCP
 - **Conditional registration:** Same pattern as the agent — Proxmox/TrueNAS/Loki/PBS tools only registered when their
@@ -260,11 +264,16 @@ The assistant tracks its own reliability via Prometheus metrics, exposed at `GET
 ### Logs
 
 uvicorn configures only its own loggers, so at startup the lifespan calls
-`src/observability/logs.py:configure_app_logging(LOG_LEVEL)`. It gives the `src` logger one stderr handler at
-`LOG_LEVEL` (default `INFO`), formatted `LEVEL:module: message`, so the app's INFO lines (for example
-`INFO:src.incidents.job: incident 2: explained push sent (request …)`) appear in `docker logs sre-agent`. Library
-loggers (`httpx`, `anthropic`, `langchain`) stay at Python's default of WARNING, which keeps per-request lines out.
-Before this, every `src.*` record went to Python's last-resort handler, which prints WARNING and above only.
+`src/observability/logs.py:configure_app_logging(LOG_LEVEL)`. It installs one stderr handler on the **root** logger,
+formatted `LEVEL:module: message`, and sets the `src` logger to `LOG_LEVEL` (default `INFO`) with no handler of its
+own, so the app's INFO lines (for example `INFO:src.incidents.job: incident 2: explained push sent (request …)`)
+appear in `docker logs sre-agent`. Because root already has a handler, the `logging.basicConfig()` call that `mcp`
+makes at runtime does nothing, and no line is printed twice. Other loggers (`httpx`, `anthropic`, `langchain`)
+inherit the root level of WARNING: their per-request INFO lines stay hidden, their warnings and errors appear.
+`fastmcp` has its Rich handler removed and propagates to the root handler, so its lines use the same format. A filter
+on that handler drops FastMCP's "Error calling tool" and "Error validating tool" tracebacks when the exception is a
+`ToolException`, a pydantic `ValidationError` or a `ToolError` wrapping one; unexpected exceptions keep their
+traceback.
 
 ### Metrics
 

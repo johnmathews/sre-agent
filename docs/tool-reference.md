@@ -224,12 +224,28 @@ List NFS and SMB shares configured on TrueNAS.
 
 ### truenas_snapshots
 
-List ZFS snapshots, snapshot schedules, and replication tasks on TrueNAS.
+Report ZFS snapshot counts, periodic snapshot tasks with their last run, and replication tasks on TrueNAS.
 
-- **Input:** `dataset` (optional filter, e.g. "tank/media"), `limit` (int, default 50)
-- **Example questions:** "When was the last snapshot of tank/media?", "Is replication running?", "What snapshot schedules
-  exist?"
-- **Returns:** Recent snapshots, periodic snapshot task schedules with retention, replication task status
+- **Input:** `dataset` (optional, e.g. "tank/media"), `list_snapshots` (bool, default false; needs `dataset`), `limit`
+  (int 1–200, default 50; how many of the newest snapshots `list_snapshots` shows)
+- **Example questions:** "When did the tank/media snapshot task last run?", "How many snapshots does tank have?", "Is
+  replication running?", "What snapshot schedules exist?"
+- **Returns:**
+  - The snapshot count per pool.
+  - Each periodic snapshot task: last run (state and UTC time with age, or "not reported by TrueNAS"), schedule,
+    retention, recursive flag, and the count for its dataset. That count covers the dataset itself, not its children.
+  - Each replication task: its state and the time of that state.
+  - With `dataset`: that dataset's own count and its pool's.
+  - With `list_snapshots=true`: the dataset's snapshots, newest first by creation time, with "showing newest N of M".
+  - A count or listing that fails prints "unavailable: <reason>" and the rest still prints.
+- **Speed:** Counts and last-run times are fast. The listing takes about 20 s (45 s timeout), so it runs only when asked.
+- **How it queries:** `GET /zfs/snapshot?count=true` with `pool=<p>` or `dataset=<d>`, which returns a bare integer.
+  The listing is `GET /zfs/snapshot?dataset=<d>` with no limit, and it is sorted in the tool. The tool never sends
+  `query-filters` or `query-options`. Those are not REST v2.0 parameters: TrueNAS treats them as a filter that matches
+  nothing, which used to produce a false "0 snapshots".
+- **Requires https:** `TRUENAS_URL` must be an `https://` URL. With any other scheme, every TrueNAS tool, and
+  `hdd_power_status`, refuses to send the API key and makes no request: "TrueNAS URL must be https; refusing to send
+  the API key over plain http".
 
 ### truenas_system_status
 

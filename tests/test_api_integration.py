@@ -612,3 +612,21 @@ class TestSearchConversations:
         resp = client.get("/conversations/search", params={"q": "kubernetes"})
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+class TestHealthTruenasHttpsOnly:
+    """The health check must not send the TrueNAS API key over plain http."""
+
+    @pytest.mark.integration
+    @respx.mock
+    def test_http_truenas_url_is_not_pinged(self, client: TestClient, mock_settings: Any) -> None:
+        mock_settings.truenas_url = "http://truenas.test"
+        ping = respx.get("http://truenas.test/api/v2.0/core/ping").mock(return_value=httpx.Response(200, text="pong"))
+        respx.route().mock(return_value=httpx.Response(200, json={}))
+
+        resp = client.get("/health")
+
+        truenas = next(c for c in resp.json()["components"] if c["name"] == "truenas")
+        assert truenas["status"] == "unhealthy"
+        assert "https" in (truenas["detail"] or "")
+        assert ping.call_count == 0

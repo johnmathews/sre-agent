@@ -10,7 +10,7 @@
 | `langchain-anthropic` | Anthropic LLM integration for LangChain (ChatAnthropic)                                     |
 | `langchain-openai`    | OpenAI LLM integration for LangChain (ChatOpenAI)                                           |
 | `langchain-chroma`  | Chroma vector store integration for RAG retrieval                                           |
-| `fastapi`           | HTTP backend — `/ask` and `/health` endpoints                                               |
+| `fastapi`           | HTTP backend — `/ask`, `/health`, `/report` and the other endpoints, and mounts `/mcp`      |
 | `uvicorn`           | ASGI server for FastAPI                                                                     |
 | `httpx`             | Async HTTP client for all tool API calls (Prometheus, Grafana, Loki, TrueNAS, Proxmox, PBS) |
 | `pydantic`          | Data validation for tool input schemas and API models                                       |
@@ -19,14 +19,14 @@
 | `pyyaml`            | YAML parsing (runbook frontmatter, eval cases)                                              |
 | `prometheus-client` | Self-instrumentation — expose Prometheus metrics at `/metrics`                              |
 | `apscheduler`       | Scheduled report generation — `AsyncIOScheduler` with cron triggers                         |
-| `pyjwt[crypto]`     | Upgrade Advisor — verifies the Cloudflare Access JWT (RS256); floor 2.15 (advisories fixed in 2.15) |
-| `fastmcp`           | MCP server mounted at `/mcp` (`src/api/mcp_server.py`)                                      |
-| `claude-agent-sdk`  | Agent path when `LLM_PROVIDER=anthropic` (`src/agent/sdk_agent.py`, `src/agent/mcp_tools.py`) |
+| `pyjwt[crypto]`     | Verifies the Cloudflare Access JWT (RS256) for the `/mcp` access check and Upgrade Advisor approvals (`src/upgrades/access.py`) |
+| `fastmcp`           | MCP server mounted at `/mcp` (`src/api/mcp_server.py`), with its `ToolCallObserver` middleware |
+| `claude-agent-sdk`  | Agent path when `LLM_PROVIDER=anthropic`, the one production runs (`src/agent/sdk_agent.py`, `src/agent/mcp_tools.py`) |
 | `anthropic`         | Anthropic SDK under `langchain-anthropic`; `src/agent/llm.py` imports its `Omit` sentinel   |
 | `openai`            | OpenAI SDK under `langchain-openai`; declared so its major is capped                        |
 | `starlette`         | ASGI types and `StreamingResponse`, imported directly by `src/api/main.py`                  |
 | `langchain-core`    | Tool, message and callback base classes, imported directly across `src/`                    |
-| `langgraph`         | `MemorySaver` checkpointer, imported directly by `src/agent/agent.py`                       |
+| `langgraph`         | `MemorySaver` checkpointer for the OpenAI agent path and the evals, imported by `src/agent/agent.py` |
 
 ### Version caps
 
@@ -34,19 +34,28 @@ Every package the code imports is declared, and the ones whose next major would 
 `uv lock --upgrade` then stays inside the majors this code is written for. Moving past a cap is a deliberate change
 with its own migration.
 
-| Package                                                          | Constraint       | Why the cap                                                                                           |
-| ---------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `anthropic`                                                      | `>=0.120,<1`     | 2.x rejects `temperature` with a 400, which breaks every no-tools call. Floor is langchain-anthropic's |
-| `openai`                                                         | `>=2.34,<3`      | 3.0 moves to httpx2; langchain-openai 1.x is built against the 2.x client                             |
-| `fastmcp`                                                        | `>=3.4.10,<4`    | 4.0 moves to MCP SDK 2.0. Floor 3.4.10 carries the advisory fix                                       |
-| `mcp` (uv `constraint-dependencies`, not a direct dependency)    | `>=1.30,<2`      | fastmcp's MCP SDK. The floor is the first release free of its known advisories. fastmcp 3 already requires `<2`; the constraint keeps that if fastmcp is ever relaxed |
-| `claude-agent-sdk`                                               | `>=0.1.51,<0.2`  | 0.x minor bumps break the API; 0.2 needs `src/agent/sdk_agent.py` and `mcp_tools.py` re-checked       |
-| `starlette`                                                      | `>=1.3.1,<2`     | The ASGI middleware and the manual `/mcp` lifespan entry in `src/api/main.py`. The floor is the first release free of its known advisories |
-| `fastapi`                                                        | `>=0.115,<1`     | A 1.0 is a new major. 0.162 already hid included routers from `app.routes`                           |
-| `pyjwt[crypto]`                                                  | `>=2.15,<3`      | The approval JWT check (`src/upgrades/access.py`) must not change under a lock refresh. Floor 2.15 fixes the 2.12 advisories |
-| `langchain`, `langchain-core`, `langgraph`                       | `<2`             | The agent, tool and graph APIs in `src/agent/`                                                        |
-| `langchain-anthropic`, `langchain-openai`, `langchain-chroma`    | `<2`             | Chat model and vector store classes built in `src/agent/llm.py`, `src/eval/judge.py` and `src/agent/retrieval/` |
-| `apscheduler`                                                    | `>=3.10,<4`      | 4.x is a rewrite of the scheduler API `src/report/scheduler.py` uses                                  |
+The constraints are those in `pyproject.toml`. The locked versions are those in `uv.lock` on 2026-11-11.
+
+| Package                                         | Constraint       | Locked   | Why the cap                                                                                           |
+| ----------------------------------------------- | ---------------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `anthropic`                                     | `>=0.120,<1`     | 0.125.0  | 2.x rejects `temperature` with a 400, which breaks every no-tools call. Floor is langchain-anthropic's |
+| `openai`                                        | `>=2.34,<3`      | 2.34.0   | 3.0 moves to httpx2; langchain-openai 1.x is built against the 2.x client                             |
+| `fastmcp`                                       | `>=3.4.10,<4`    | 3.4.11   | 4.0 moves to MCP SDK 2.0. Floor 3.4.10 carries the advisory fix                                       |
+| `mcp` (uv `constraint-dependencies`, not a direct dependency) | `>=1.30,<2` | 1.30.0 | fastmcp's MCP SDK. The floor is the first release free of its known advisories. fastmcp 3 already requires `<2`; the constraint keeps that if fastmcp is ever relaxed |
+| `claude-agent-sdk`                              | `>=0.1.51,<0.2`  | 0.1.51   | 0.x minor bumps break the API; 0.2 needs `src/agent/sdk_agent.py` and `mcp_tools.py` re-checked (sre-agent #36) |
+| `starlette`                                     | `>=1.3.1,<2`     | 1.10.0   | The ASGI middleware and the manual `/mcp` lifespan entry in `src/api/main.py`. The floor is the first release free of its known advisories |
+| `fastapi`                                       | `>=0.115,<1`     | 0.162.4  | A 1.0 is a new major. 0.162 already hid included routers from `app.routes`                           |
+| `pyjwt[crypto]`                                 | `>=2.15,<3`      | 2.15.1   | The Access JWT checks (`src/upgrades/access.py`, used by `/mcp` and approvals) must not change under a lock refresh. Floor 2.15 fixes the 2.12 advisories |
+| `langchain`                                     | `>=0.3,<2`       | 1.5.0    | The agent API in `src/agent/`                                                                         |
+| `langchain-core`                                | `>=1.7,<2`       | 1.8.0    | Tool, message and callback base classes across `src/`                                                 |
+| `langgraph`                                     | `>=1.2,<2`       | 1.2.20   | The graph and checkpointer API in `src/agent/agent.py`                                                |
+| `langchain-anthropic`                           | `>=0.3,<2`       | 1.7.10   | Chat model class built in `src/agent/llm.py`                                                          |
+| `langchain-openai`                              | `>=1.1.9,<2`     | 1.2.1    | `ChatOpenAI` in `src/agent/llm.py` and `src/eval/judge.py`, and `OpenAIEmbeddings` in `src/agent/retrieval/embeddings.py` |
+| `langchain-chroma`                              | `>=0.2,<2`       | 1.1.0    | Vector store class in `src/agent/retrieval/`                                                          |
+| `apscheduler`                                   | `>=3.10,<4`      | 3.11.2   | 4.x is a rewrite of the scheduler API `src/report/scheduler.py` uses                                  |
+
+The other runtime packages (`uvicorn`, `httpx`, `pydantic`, `pydantic-settings`, `python-dotenv`, `pyyaml`,
+`prometheus-client`) carry a floor only. Moves past these caps are tracked in sre-agent #37.
 
 Check after any lock change:
 
@@ -68,6 +77,7 @@ fixed only in 0.2 (above the cap).
 | `pytest-asyncio` | Async test support (all tools are async)                   |
 | `respx`          | HTTP mocking for httpx (integration tests, eval framework) |
 | `types-PyYAML`   | Type stubs for PyYAML                                      |
+| `coverage`       | Runs the suite under `make test` and fails it below `fail_under` in `pyproject.toml` (the coverage floor) |
 
 ## LLM Provider & Model Selection
 

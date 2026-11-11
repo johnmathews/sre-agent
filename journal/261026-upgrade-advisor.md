@@ -1,6 +1,6 @@
 # Upgrade Advisor implemented
 
-Plan B (the advisor inside `sre-agent`) is built. The spec is `docs/superpowers/specs/2026-10-26-upgrade-advisor-design.md`;
+Plan B (the advisor inside `sre-agent`) is built. The spec is `docs/archive/2026-10-26-upgrade-advisor-design.md`;
 the current behaviour is in `docs/architecture.md` ("Upgrade Advisor"). Decisions and deviations from the spec:
 
 ## Principle

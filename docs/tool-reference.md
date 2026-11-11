@@ -1,6 +1,21 @@
 # Tool Reference
 
-The MCP server exposes up to 36 tools across 14 categories: the 13 groups in the table below (all but Documentation) and the 2 MCP-only conversation history tools. "Up to" means the maximum: each tool group is registered only when its configuration is set (see below), so a deployment shows fewer.
+One section per tool the SRE assistant serves. Each tool is listed once in `TOOL_SPECS` in
+`src/agent/tool_registry.py`, and that registry builds all three tool surfaces: `/mcp`, the SDK agent's in-process
+`sre` server and the LangGraph agent's tools.
+
+The MCP server at `/mcp` exposes up to 36 tools. Each tool group registers only when its configuration is set, so a
+deployment usually shows fewer. The chat agent gets the same tools minus the two conversation history tools, so up to
+34. The counts come from the registry:
+
+```bash
+uv run python -c "from src.agent.tool_registry import TOOL_SPECS as t; print(len(t), 'tools;', sum('agent' in s.surfaces for s in t), 'on the agent')"
+# 36 tools; 34 on the agent
+```
+
+`tests/test_docs_tool_reference.py` fails when a tool in the registry has no `### <name>` section here, when a section
+names a tool the registry does not have, or when the count above is wrong. To connect a client, get a service token
+and see which tools a deployment serves, read [mcp-clients.md](mcp-clients.md).
 
 ## Server Instructions and Descriptions
 
@@ -8,8 +23,9 @@ Guidance that applies to every tool is sent once, as the MCP `instructions` stri
 
 ## Conditional Registration
 
-Tools are registered at startup based on which environment variables are set. If a URL is empty or unset, that tool group
-is skipped entirely (no failed connections, no error logs).
+Each `ToolSpec` carries the setting that enables it. A group whose setting is empty is not registered, makes no
+connection and logs one INFO line at startup naming its tools and the missing setting (for example
+`loki tools disabled on mcp: loki_query_logs, ... (LOKI_URL not set)`).
 
 | Tool Group       | Tools                                                                                                      | Required Config             | Always Available          |
 | ---------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------- |
@@ -19,25 +35,31 @@ is skipped entirely (no failed connections, no error logs).
 | Grafana Dashboards | `grafana_get_dashboard`, `grafana_search_dashboards`                                                     | `GRAFANA_URL`               | Yes (required)            |
 | Upgrade Status   | `upgrade_status`                                                                                           | `PROMETHEUS_URL`; `UPGRADE_ADVISOR_DB_PATH` adds verdicts and deploys | Yes |
 | Service Health   | `service_health`                                                                                           | `PROMETHEUS_URL`, `GRAFANA_URL`; `LOKI_URL` adds the error count | Yes |
+| RAG              | `runbook_search`                                                                                           | None (reads the Chroma store that `make ingest` builds) | Yes (an empty or missing store finds nothing) |
 | Loki             | `loki_query_logs`, `loki_metric_query`, `loki_list_label_values`, `loki_correlate_changes`                 | `LOKI_URL`                  | No                        |
 | Proxmox VE       | `proxmox_list_guests`, `proxmox_get_guest_config`, `proxmox_node_status`, `proxmox_list_tasks`             | `PROXMOX_URL`               | No                        |
 | TrueNAS SCALE    | `truenas_pool_status`, `truenas_list_shares`, `truenas_snapshots`, `truenas_system_status`, `truenas_apps` | `TRUENAS_URL`               | No                        |
-| HDD Power Status | `hdd_power_status`                                                                                         | `TRUENAS_URL`               | No                        |
+| HDD Power Status | `hdd_power_status`                                                                                         | `TRUENAS_URL` and `PROMETHEUS_URL` | No                 |
 | PBS              | `pbs_datastore_status`, `pbs_list_backups`, `pbs_list_tasks`                                               | `PBS_URL`                   | No                        |
-| Memory           | `memory_search_incidents`, `memory_record_incident`, `memory_get_previous_report`, `memory_check_baseline` | `MEMORY_DB_PATH`            | No                        |
-| RAG              | `runbook_search`                                                                                           | Chroma vector store on disk | Yes (after `make ingest`) |
-| Documentation    | `search_docs`, `query_docs`, `get_document`, `list_sources`                                                | `DOCUMENTATION_MCP_URL`     | No (SDK path only)        |
+| Memory           | `memory_search_incidents`, `memory_record_incident`, `memory_get_previous_report`, `memory_check_baseline` | `MEMORY_DB_PATH`            | No (off in production)    |
+| Conversation History | `sre_agent_list_conversations`, `sre_agent_get_conversation`                                           | `CONVERSATION_HISTORY_DIR`  | No (`/mcp` only)          |
 
-Health checks (`GET /health`) also follow this pattern — only configured services are checked.
+`/health` follows the same rule: it checks only the configured services.
+
+With `DOCUMENTATION_MCP_URL` set, the SDK agent also connects to an external documentation MCP server and may call its
+tools (`mcp__docs__*`, such as `search_docs`). Those tools belong to that server. They are not in the registry and
+`/mcp` does not serve them.
 
 ## MCP Server Endpoint
 
-Every tool in the table above except Documentation is also served by a Streamable HTTP MCP server at `/mcp`, under
-the same conditions, together with the two conversation history tools, which are on `/mcp` only. This allows MCP
-clients to call individual tools directly without the agent loop. Auth is handled by Cloudflare Access.
+`/mcp` serves every enabled tool over Streamable HTTP, so MCP clients call tools directly without the agent loop.
+Cloudflare Access guards the public hostname. The app also checks the Access JWT itself (`McpAccessCheck`), because
+the container port is reachable on the LAN. `MCP_ACCESS_MODE` sets what the check does: `off`, `log` (the default:
+name callers, refuse none) or `enforce` (403 without a valid JWT). Production runs `log` with no AUD configured, so no
+caller is verified yet (home-server #422 sets the AUD, then moves to `enforce`). The modes, the client names and the
+rollout are in [architecture.md](architecture.md#access-check) and [mcp-clients.md](mcp-clients.md).
 
-**How a tool reaches `/mcp`:** each tool is listed once in `TOOL_SPECS` in `src/agent/tool_registry.py`, with the
-setting that enables it. `src/api/mcp_server.py` adds one MCP tool per enabled spec:
+**How a tool reaches `/mcp`:** `src/api/mcp_server.py` adds one MCP tool per spec that the settings enable:
 
 - Name and description are the LangChain tool's own. The input schema is its Pydantic `args_schema`, so every
   parameter carries its description and its limits (`minimum`, `maximum`, `minLength`, `pattern`, ...).
@@ -50,17 +72,17 @@ setting that enables it. `src/api/mcp_server.py` adds one MCP tool per enabled s
 - Argument names the schema does not declare are refused too (each schema says `additionalProperties: false`), and
   the error lists the accepted names, so a guessed name such as `since` never silently falls back to defaults.
   A tool's own failure (`ToolException`) gets an `isError` result with its message.
+- Each call writes one `tool_call` log line and the tool metrics (see
+  [architecture.md](architecture.md#tool-call-log-line)).
 
-To add a tool: write it as a LangChain `@tool` with a Pydantic `args_schema` whose fields all have descriptions, add a
-`ToolSpec` to `TOOL_SPECS`, add its name to `EXPECTED_NAMES` in `tests/test_tool_registry.py`, and regenerate the
-contract snapshot with
-`UPDATE_MCP_SNAPSHOT=1 uv run pytest tests/test_mcp_server_integration.py -k test_mcp_contract_matches_snapshot`.
+**To add a tool:** follow [code-flow.md](code-flow.md#adding-a-tool). One of its steps adds the tool's section to this
+page.
 
 **Access patterns:**
-- **`POST /ask`** — question → agent selects tools → synthesized answer (full SRE experience)
-- **`/mcp`** — client calls tools directly (lower latency, composable, no agent overhead)
+- **`POST /ask`**: question, then the agent selects tools, then a synthesized answer (the webapp and CLI use it)
+- **`/mcp`**: the client calls tools directly (lower latency, composable with other MCP servers, no agent overhead)
 
-**Claude Code setup:**
+**Claude Code setup** (the full guide, with the `.mcp.json` variant, is [mcp-clients.md](mcp-clients.md)):
 ```bash
 claude mcp add --transport http \
   --header "CF-Access-Client-Id: <id>" \
@@ -395,7 +417,7 @@ Get overall status of the Proxmox host node.
 
 List recent Proxmox tasks (migrations, backups, snapshots, etc).
 
-- **Input:** `limit` (int, default 20), `errors_only` (bool, default false)
+- **Input:** `limit` (int, default 20, 1–50), `errors_only` (bool, default false)
 - **Example questions:** "Any recent failed tasks?", "Is a migration running?"
 - **Returns:** Task type, status, user, start/end time, guest ID
 
@@ -415,9 +437,12 @@ Get ZFS pool health and dataset space usage from TrueNAS.
 
 List NFS and SMB shares configured on TrueNAS.
 
-- **Input:** `share_type` (optional: "nfs" or "smb")
-- **Example questions:** "What NFS shares exist?", "Is the document-store share enabled?", "Which SMB shares are configured?"
-- **Returns:** Share path, enabled/disabled status, read-only flag, allowed networks/hosts, comments
+- **Input:** `share_type` (optional: "nfs" or "smb"), `include_sessions` (bool, default false: also lists active SMB
+  sessions from `/smb/status`)
+- **Example questions:** "What NFS shares exist?", "Is the document-store share enabled?", "Who is connected to the
+  SMB shares?"
+- **Returns:** Share path, enabled/disabled status, read-only flag, allowed networks/hosts, comments, and with
+  `include_sessions` the connected SMB clients
 
 ### truenas_snapshots
 
@@ -461,7 +486,7 @@ List apps installed on TrueNAS SCALE with their running state.
   deployed?"
 - **Returns:** App name, state (RUNNING/STOPPED/DEPLOYING), version, upgrade availability
 
-## HDD Power Status (enabled when `TRUENAS_URL` is set)
+## HDD Power Status (enabled when `TRUENAS_URL` and `PROMETHEUS_URL` are set)
 
 ### hdd_power_status
 
@@ -506,7 +531,7 @@ List backup groups in a PBS datastore.
 
 List recent PBS tasks (backup jobs, GC, verification).
 
-- **Input:** `limit` (int, default 20), `errors_only` (bool, default false)
+- **Input:** `limit` (int, default 20, 1–50), `errors_only` (bool, default false)
 - **Example questions:** "Did last night's backup succeed?", "Any failed backup tasks?"
 - **Returns:** Task type, status, user, start/end time (UTC, `YYYY-MM-DD HH:MM:SSZ`), worker ID
 
@@ -517,7 +542,7 @@ List recent PBS tasks (backup jobs, GC, verification).
 Search past incidents recorded in the agent's memory store.
 
 - **Input:** `query` (optional keyword), `alert_name` (optional exact match), `service` (optional substring), `limit`
-  (int, default 10)
+  (int, default 10, 1–50)
 - **Example questions:** "Has this HighCPU alert happened before?", "What incidents involved traefik?"
 - **Returns:** Matching incidents with title, description, root cause, resolution, severity, and status
 
@@ -526,7 +551,7 @@ Search past incidents recorded in the agent's memory store.
 Record a new incident in the agent's memory store.
 
 - **Input:** `title` (string), `description` (string), `alert_name` (optional), `root_cause` (optional), `resolution`
-  (optional), `severity` (info/warning/critical), `services` (comma-separated)
+  (optional), `severity` (info/warning/critical, default info), `services` (comma-separated, default empty)
 - **Example use:** After identifying a root cause during investigation, record it for future reference
 - **Returns:** Confirmation with incident ID
 
@@ -546,32 +571,36 @@ Check whether a metric value is within the normal range based on computed baseli
 - **Example questions:** "Is 85% CPU normal for the media VM?"
 - **Returns:** Baseline statistics (avg, p95, min, max) and assessment (WITHIN NORMAL RANGE / ABOVE P95 / BELOW MIN)
 
-## RAG (enabled when vector store exists)
+## RAG (always enabled)
 
 ### runbook_search
 
 Search operational runbooks for procedures, troubleshooting steps, and architecture docs.
 
-- **Input:** `query` (string)
+- **Input:** `query` (string), `num_results` (int, default 4, 1–10)
 - **Example questions:** "How do I restart the DNS stack?", "What's the procedure for NFS issues?"
-- **Returns:** Relevant runbook chunks with source attribution
+- **Returns:** Relevant runbook chunks, each headed with its source, title, section and relevance score
+- **Errors:** No match returns a "no relevant runbook content" message. So does an empty or missing store (before the
+  first ingest, or right after one until `sre-agent` restarts): chromadb then creates an empty collection, and
+  `/health` marks `vector_store` unhealthy. An unreadable store or a failed embedding call returns `Runbook search
+  failed (<class>): ...`.
 
 ## Conversation History (MCP server only)
 
-These tools are registered on the MCP server but not in the agent loop. They allow MCP clients
-(e.g., Claude Code) to browse past conversations the deployed agent has had via the web UI or API.
+These tools are registered on `/mcp` only, never in the agent loop, and only when `CONVERSATION_HISTORY_DIR` is set.
+They let MCP clients (e.g., Claude Code) browse past conversations the deployed agent has had via the web UI or API.
 
 ### sre_agent_list_conversations
 
 List recent conversations, most-recently-updated first.
 
-- **Input:** `limit` (int, default 20)
+- **Input:** `limit` (int, default 20, 1–100)
 - **Returns:** Session ID, title, timestamps, turn count, model, provider
 
 ### sre_agent_get_conversation
 
 Retrieve the full dialogue for a specific conversation.
 
-- **Input:** `session_id` (string, e.g. "abc12345")
+- **Input:** `session_id` (1–64 letters, digits, `_` or `-`, e.g. "abc12345". Wildcards and paths are refused)
 - **Returns:** Full conversation JSON with all user/assistant turns and timestamps
 - **Note:** Use `sre_agent_list_conversations` first to find the session ID

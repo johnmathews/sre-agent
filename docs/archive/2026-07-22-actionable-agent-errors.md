@@ -1,3 +1,5 @@
+**Status:** superseded by [code-flow.md](../code-flow.md) ("Structured error events") and [`src/agent/agent_errors.py`](../../src/agent/agent_errors.py) (2026-11-11).
+
 # Actionable Agent Error Messages Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -349,7 +351,7 @@ refresh token) but discarded it, forwarding the SDK's opaque
 - New metric `sre_assistant_agent_errors_total{reason}` enables the
   `llm_auth_failed` alert the 260621 journal specced.
 
-Design: `docs/superpowers/specs/2026-07-22-actionable-agent-errors-design.md`.
+Design: `docs/archive/2026-07-22-actionable-agent-errors-design.md`.
 Frontend half lives in the `sre-webapp` repo.
 ```
 

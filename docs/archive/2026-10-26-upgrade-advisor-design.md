@@ -1,3 +1,5 @@
+**Status:** superseded by [architecture.md](../architecture.md) ("Upgrade Advisor") and [ADR-0003](../adr/0003-deploy-is-never-an-agent-or-mcp-tool.md) (2026-11-11).
+
 # Upgrade Advisor — Design
 
 **Date:** 2026-10-26

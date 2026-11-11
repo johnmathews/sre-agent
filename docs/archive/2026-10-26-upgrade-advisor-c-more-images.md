@@ -1,3 +1,5 @@
+**Status:** superseded by [architecture.md](../architecture.md) ("Upgrade Advisor") and the home-server repo's [`documentation/wud.md`](https://github.com/johnmathews/home-server/blob/main/documentation/wud.md) §7 (2026-11-11).
+
 # Upgrade Advisor, Part C: from 2 to 9 watched images — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`.
@@ -6,7 +8,7 @@
 Navidrome, with no change to anything running at rollout: the advisor, not the rollout, proposes the
 catch-up upgrades.
 
-**Spec:** `docs/superpowers/specs/2026-10-26-upgrade-advisor-design.md` (unchanged rules); Parts A and B
+**Spec:** `docs/archive/2026-10-26-upgrade-advisor-design.md` (unchanged rules); Parts A and B
 plans and journal entries for current behaviour.
 
 ## Global Constraints

@@ -71,6 +71,16 @@ make hooks         # Install git pre-commit + pre-push hooks (works from a workt
 uv run pytest tests/test_foo.py::test_bar  # Run a single test
 ```
 
+## Shipping
+
+- **Lands by:** pull request (squash-merge once `check` passes)
+- **Environments:**
+  - production (infra VM): CI on `main` runs `check`, then smoke-tests and pushes
+    `ghcr.io/johnmathews/sre-agent:latest` (`.github/workflows/ci.yml`); WUD redeploys it about a minute later. `/mcp`
+    drops for about 20 s during the swap.
+    Check: Prometheus `max(process_start_time_seconds{job="sre-agent"})` is after the merge (for example through the
+    sre-agent MCP `prometheus_instant_query`)
+
 ## Testing Strategy
 
 Three test tiers:

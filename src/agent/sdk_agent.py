@@ -32,7 +32,7 @@ from src.agent.mcp_tools import build_mcp_server
 from src.agent.tool_registry import TOOL_SPECS, tool_label
 from src.config import Settings, get_settings
 from src.observability.metrics import AGENT_ERRORS_TOTAL
-from src.observability.sdk_metrics import extract_tool_names, record_sdk_metrics
+from src.observability.sdk_metrics import extract_tool_names, record_sdk_llm_error, record_sdk_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -240,16 +240,21 @@ async def invoke_sdk_agent(
     result_msg: ResultMessage | None = None
     last_text_block = ""
 
-    async for msg in query(prompt=full_prompt, options=options):
-        all_messages.append(msg)
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock) and block.text:
-                    last_text_block = block.text
-        elif isinstance(msg, ResultMessage):
-            result_msg = msg
-            if msg.is_error:
-                logger.warning("SDK query returned error: %s", msg.result)
+    try:
+        async for msg in query(prompt=full_prompt, options=options):
+            all_messages.append(msg)
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        last_text_block = block.text
+            elif isinstance(msg, ResultMessage):
+                result_msg = msg
+                if msg.is_error:
+                    logger.warning("SDK query returned error: %s", msg.result)
+    except Exception:
+        # The exception skips record_sdk_metrics below, so this is the request's one LLM count.
+        record_sdk_llm_error()
+        raise
 
     # Prefer ResultMessage.result (the final synthesized answer) over
     # intermediate AssistantMessage text blocks (which may be "thinking" text
@@ -418,6 +423,8 @@ async def stream_sdk_agent(
                 result_msg = msg
     except Exception as exc:
         logger.exception("SDK streaming failed")
+        # This branch returns before record_sdk_metrics, so this is the request's one LLM count.
+        record_sdk_llm_error()
         err = classify_agent_failure(exc)
         AGENT_ERRORS_TOTAL.labels(reason=err.reason.value).inc()
         yield {

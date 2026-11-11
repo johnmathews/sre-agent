@@ -13,6 +13,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
@@ -34,6 +35,7 @@ from src.agent.history import (
     search_conversations,
 )
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.agent.tool_registry import enabled_count
 from src.api.incidents import log_incident_explainer_status, missing_incident_settings, start_incident_recovery
 from src.api.incidents import router as incidents_router
 from src.api.mcp_access import McpAccessCheck, mcp_access_config
@@ -54,6 +56,9 @@ from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
 from src.report.scheduler import start_scheduler, stop_scheduler
 from src.upgrades.deploy import start_startup_verification, wait_for_deploys
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +225,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
         app.state.mcp_server = mcp_server
         app.state.mcp_app = mcp_app
-        app.state.mcp_enabled = True
+        # /health compares list_tools() with this count: the registry's mcp specs these settings enable.
+        app.state.mcp_expected_tools = enabled_count(settings, "mcp")
         tool_count = len(await mcp_server.list_tools())
         logger.info("MCP server mounted at /mcp (%d tools)", tool_count)
 
@@ -244,7 +250,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Stop routing to the MCP app before its lifespan (the exit stack) closes.
         app.state.mcp_app = None
         app.state.mcp_server = None
-        app.state.mcp_enabled = False
+        app.state.mcp_expected_tools = 0
         stop_scheduler()
         # Let in-flight upgrade deploys finish (bounded); any still running are recorded as interrupted.
         await wait_for_deploys(SHUTDOWN_DEPLOY_WAIT_SECONDS)
@@ -469,6 +475,27 @@ async def ask_stream(request: AskRequest) -> StreamingResponse:
     )
 
 
+async def _mcp_server_health() -> ComponentHealth:
+    """``mcp_server`` is healthy only when the server and the dispatch target are set and it lists every tool the
+    lifespan registered, a count above zero."""
+    mcp_server: FastMCP | None = getattr(app.state, "mcp_server", None)
+    if mcp_server is None or getattr(app.state, "mcp_app", None) is None:
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail="MCP server not started")
+    expected: int = getattr(app.state, "mcp_expected_tools", 0)
+    try:
+        listed = len(await mcp_server.list_tools())
+    except Exception as exc:
+        logger.warning("/health: MCP list_tools failed", exc_info=True)
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail=f"list_tools failed: {type(exc).__name__}")
+    if expected <= 0:
+        return ComponentHealth(name="mcp_server", status="unhealthy", detail="no MCP tools registered")
+    if listed != expected:
+        return ComponentHealth(
+            name="mcp_server", status="unhealthy", detail=f"{listed} tools listed, {expected} registered"
+        )
+    return ComponentHealth(name="mcp_server", status="healthy")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Check health of the assistant and its dependencies."""
@@ -621,9 +648,8 @@ async def health() -> HealthResponse:
             )
         )
 
-    # --- MCP server (optional) ---
-    if getattr(app.state, "mcp_enabled", False):
-        components.append(ComponentHealth(name="mcp_server", status="healthy"))
+    # --- MCP server ---
+    components.append(await _mcp_server_health())
 
     # --- Update Prometheus gauges ---
     for comp in components:

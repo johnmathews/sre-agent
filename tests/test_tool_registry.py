@@ -295,3 +295,17 @@ async def test_run_tool_runs_sync_tools_in_a_thread() -> None:
     tool = StructuredTool.from_function(func=echo, name="echo", description="Echo", args_schema=_EchoInput)
     assert await run_tool(_fake_spec(tool), {"word": "hi", "times": 1}) == "hi"
     assert threads and threads[0] != threading.get_ident()
+
+
+def test_enabled_count_matches_enabled_specs(mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """The /health expected count uses the same filter as the server, and logs nothing."""
+    from src.agent.tool_registry import enabled_count, enabled_specs
+    from src.config import get_settings
+
+    settings = get_settings()
+    for surface in ("mcp", "agent"):
+        with caplog.at_level(logging.INFO, logger="src.agent.tool_registry"):
+            caplog.clear()
+            count = enabled_count(settings, surface)
+            assert caplog.records == []
+        assert count == len(enabled_specs(settings, surface)) > 0

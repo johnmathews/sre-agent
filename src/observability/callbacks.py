@@ -9,6 +9,8 @@ never crash a request.
 
 Each finished tool call goes through ``observe_tool_call`` with ``source="agent", client="agent"``, so
 the LangGraph agent writes the same ``tool_call`` log line and tool metrics as the SDK agent and ``/mcp``.
+A tool error that ``handle_tool_error=True`` handled reaches ``on_tool_end`` as a ``ToolMessage`` with
+``status="error"`` and is recorded as outcome ``error``.
 """
 
 import logging
@@ -29,6 +31,9 @@ from src.observability.metrics import (
 from src.observability.tool_calls import classify_tool_error, observe_tool_call
 
 logger = logging.getLogger(__name__)
+
+# LangChain's handle_tool_error catches only ToolException, so a ToolMessage with status="error" came from one.
+HANDLED_TOOL_ERROR_CLASS = "ToolException"
 
 
 class MetricsCallbackHandler(BaseCallbackHandler):
@@ -77,6 +82,23 @@ class MetricsCallbackHandler(BaseCallbackHandler):
             if entry is not None:
                 start_time, tool_name, arguments = entry
                 content = getattr(output, "content", output)
+                text = content if isinstance(content, str) else str(content)
+                duration_s = time.monotonic() - start_time
+                if getattr(output, "status", None) == "error":
+                    # handle_tool_error=True turned the tool's ToolException into a ToolMessage with
+                    # status="error": a failed call, whose message is the content (observe_tool_call caps it).
+                    observe_tool_call(
+                        tool=tool_name,
+                        source="agent",
+                        client="agent",
+                        outcome="error",
+                        error_class=HANDLED_TOOL_ERROR_CLASS,
+                        error=text,
+                        duration_s=duration_s,
+                        result_chars=0,
+                        arguments=arguments,
+                    )
+                    return
                 observe_tool_call(
                     tool=tool_name,
                     source="agent",
@@ -84,8 +106,8 @@ class MetricsCallbackHandler(BaseCallbackHandler):
                     outcome="success",
                     error_class=None,
                     error=None,
-                    duration_s=time.monotonic() - start_time,
-                    result_chars=len(content if isinstance(content, str) else str(content)),
+                    duration_s=duration_s,
+                    result_chars=len(text),
                     arguments=arguments,
                 )
         except Exception:

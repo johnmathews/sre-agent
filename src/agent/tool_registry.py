@@ -216,11 +216,10 @@ if len(_BY_NAME) != len(TOOL_SPECS):  # pragma: no cover - a duplicate name is a
     raise RuntimeError("Duplicate tool name in TOOL_SPECS")
 
 
-def enabled_specs(settings: Settings, surface: Surface, exclude: Collection[str] = ()) -> list[ToolSpec]:
-    """The specs on ``surface`` that ``settings`` enables, in registry order, minus ``exclude``.
-
-    Each group with a disabled tool is logged once at INFO, naming the tools and the reason.
-    """
+def _partition(
+    settings: Settings, surface: Surface, exclude: Collection[str]
+) -> tuple[list[ToolSpec], dict[str, list[str]]]:
+    """The enabled specs on ``surface``, and the disabled tool names by group."""
     enabled: list[ToolSpec] = []
     disabled: dict[str, list[str]] = {}
     for spec in TOOL_SPECS:
@@ -230,10 +229,24 @@ def enabled_specs(settings: Settings, surface: Surface, exclude: Collection[str]
             enabled.append(spec)
         else:
             disabled.setdefault(spec.group, []).append(spec.name)
+    return enabled, disabled
+
+
+def enabled_specs(settings: Settings, surface: Surface, exclude: Collection[str] = ()) -> list[ToolSpec]:
+    """The specs on ``surface`` that ``settings`` enables, in registry order, minus ``exclude``.
+
+    Each group with a disabled tool is logged once at INFO, naming the tools and the reason.
+    """
+    enabled, disabled = _partition(settings, surface, exclude)
     for group, names in disabled.items():
         reason = _DISABLED_REASON.get(group, "not configured")
         logger.info("%s tools disabled on %s: %s (%s)", group, surface, ", ".join(names), reason)
     return enabled
+
+
+def enabled_count(settings: Settings, surface: Surface) -> int:
+    """How many tools ``enabled_specs`` returns for ``surface``, without logging the disabled groups again."""
+    return len(_partition(settings, surface, ())[0])
 
 
 def get_spec(name: str) -> ToolSpec | None:

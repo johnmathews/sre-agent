@@ -19,7 +19,7 @@ DEFAULT_TIMEOUT_SECONDS = 15
 
 # Metrics to baseline and their PromQL queries.
 # Each entry: (metric_name, labels_json, promql_template)
-# The template uses {window} placeholder for the lookback duration.
+# The template is a str.format template: {window} is the lookback duration and {{ }} are literal braces.
 _DEFAULT_BASELINE_METRICS: list[tuple[str, str, str]] = [
     # Per-host CPU usage (average across all modes, all hosts)
     (
@@ -39,13 +39,13 @@ _DEFAULT_BASELINE_METRICS: list[tuple[str, str, str]] = [
         "{}",
         "histogram_quantile(0.95, rate(sre_assistant_request_duration_seconds_bucket[{window}]))",
     ),
-    # Agent tool success rate
+    # Agent tool success rate: successes over the calls that were not the client's mistake
     (
         "sre_assistant_tool_success_rate",
         "{}",
         (
-            '1 - (sum(increase(sre_assistant_tool_calls_total{{status="error"}}[{window}]))'
-            " / sum(increase(sre_assistant_tool_calls_total[{window}])))"
+            'sum(increase(sre_assistant_tool_calls_total{{status="success"}}[{window}]))'
+            ' / sum(increase(sre_assistant_tool_calls_total{{status!~"invalid_args|unknown_tool"}}[{window}]))'
         ),
     ),
     # LLM error rate
@@ -105,7 +105,7 @@ async def compute_baselines(lookback_days: int) -> list[BaselineRecord]:
         url = settings.prometheus_url
 
         for metric_name, labels_json, promql_template in _DEFAULT_BASELINE_METRICS:
-            promql = promql_template.replace("{window}", window)
+            promql = promql_template.format(window=window)
 
             avg_val = await _prom_query_value(client, url, promql)
             if avg_val is None:

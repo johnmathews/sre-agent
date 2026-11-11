@@ -36,7 +36,7 @@
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sre_assistant_tool_calls_total{status=\"success\"}[1h])) / sum(rate(sre_assistant_tool_calls_total[1h]))",
+          "expr": "sum(rate(sre_assistant_tool_calls_total{status=\"success\"}[1h])) / sum(rate(sre_assistant_tool_calls_total{status!~\"invalid_args|unknown_tool\"}[1h]))",
           "legendFormat": "Tool Success (target >99%)",
           "refId": "B"
         },
@@ -145,7 +145,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool_name) (rate(sre_assistant_tool_calls_total{status=\"success\"}[5m]))",
+          "expr": "sum by (tool_name) (rate(sre_assistant_tool_calls_total[5m]))",
           "legendFormat": "{{tool_name}}",
           "refId": "A"
         }
@@ -154,7 +154,8 @@
       "id": 5
     },
     {
-      "title": "Tool Errors by Tool",
+      "title": "Tool Failures by Tool",
+      "description": "Service failures (error, timeout, internal). invalid_args and unknown_tool are client mistakes and are left out, as in the Tool Success SLI.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 9, "x": 15, "y": 12 },
       "fieldConfig": {
@@ -163,8 +164,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool_name) (rate(sre_assistant_tool_calls_total{status=\"error\"}[5m]))",
-          "legendFormat": "{{tool_name}}",
+          "expr": "sum by (tool_name, status) (rate(sre_assistant_tool_calls_total{status!~\"success|invalid_args|unknown_tool\"}[5m]))",
+          "legendFormat": "{{tool_name}} {{status}}",
           "refId": "A"
         }
       ],
@@ -181,8 +182,8 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (tool_name, le) (rate(sre_assistant_tool_call_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{tool_name}}",
+          "expr": "histogram_quantile(0.95, sum by (tool_name, source, le) (rate(sre_assistant_tool_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{tool_name}} ({{source}})",
           "refId": "A"
         }
       ],
@@ -285,6 +286,63 @@
       ],
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "id": 11
+    },
+    {
+      "title": "Tool Calls by Source",
+      "description": "Tool calls per second by source: mcp (the /mcp server) or agent (the chat agent's own calls).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 40 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(sre_assistant_tool_calls_total[5m]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "id": 12
+    },
+    {
+      "title": "Tool Calls by Client",
+      "description": "Tool calls per second by client label: a mapped client name, agent, in-process, anonymous, invalid or unknown.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 40 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (client) (rate(sre_assistant_tool_calls_total[5m]))",
+          "legendFormat": "{{client}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "id": 13
+    },
+    {
+      "title": "/mcp HTTP Requests by Access Result",
+      "description": "Counts every HTTP request to /mcp (initialize and tools/list too), not only tool calls, by the Access check result: verified, missing, invalid, unconfigured or off.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (access) (rate(sre_assistant_mcp_http_requests_total[5m]))",
+          "legendFormat": "{{access}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "id": 14
     }
   ],
   "schemaVersion": 39,

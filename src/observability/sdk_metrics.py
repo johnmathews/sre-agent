@@ -25,18 +25,31 @@ type SdkMessage = Any
 def record_sdk_metrics(messages: list[SdkMessage], result: ResultMessage | None) -> None:
     """Record the LLM call, token usage and cost of one ``invoke_sdk_agent()`` / ``stream_sdk_agent()`` call.
 
+    The request counts as one LLM call: ``error`` when the SDK returned no ``ResultMessage`` or one with
+    ``is_error``, otherwise ``success``. A request whose query raised never reaches this function; the caller counts
+    it with ``record_sdk_llm_error()``.
+
     Tool calls are not recorded here: the SDK tool server's handler records each one, so counting the
     ``ToolUseBlock``s in ``messages`` too would count each call twice.
     """
     try:
         _record_sdk_metrics_inner(messages, result)
     except Exception:
-        logger.debug("Failed to record SDK metrics", exc_info=True)
+        logger.warning("Failed to record SDK metrics", exc_info=True)
+
+
+def record_sdk_llm_error() -> None:
+    """Count one failed LLM call for an SDK request whose query raised. Never raises."""
+    try:
+        LLM_CALLS_TOTAL.labels(status="error").inc()
+    except Exception:
+        logger.warning("Failed to record SDK LLM error", exc_info=True)
 
 
 def _record_sdk_metrics_inner(messages: list[SdkMessage], result: ResultMessage | None) -> None:
     # LLM call count — one per request (SDK abstraction)
-    LLM_CALLS_TOTAL.labels(status="success").inc()
+    failed = result is None or result.is_error
+    LLM_CALLS_TOTAL.labels(status="error" if failed else "success").inc()
 
     if result is None:
         return

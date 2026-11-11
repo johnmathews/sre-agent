@@ -4,7 +4,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from claude_agent_sdk.types import AssistantMessage, ToolUseBlock
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolUseBlock
+from prometheus_client import REGISTRY
 
 from src.agent.sdk_agent import (
     _BLOCKED_BUILTINS,
@@ -14,6 +15,7 @@ from src.agent.sdk_agent import (
     _summarize_sdk_tool_input,
     _tool_display_name,
     build_sdk_options,
+    invoke_sdk_agent,
     stream_sdk_agent,
 )
 from src.agent.tool_registry import TOOL_SPECS, input_schema
@@ -265,3 +267,91 @@ class TestStreamLabels:
         ends = [(e["tool_name"], e["content"]) for e in events if e["type"] == "tool_end"]
         assert starts == expected
         assert ends == expected
+
+
+# ---------------------------------------------------------------------------
+# LLM call status on the SDK path: one count per request, error when it fails
+# ---------------------------------------------------------------------------
+
+
+def _llm_calls(status: str) -> float:
+    return REGISTRY.get_sample_value("sre_assistant_llm_calls_total", {"status": status}) or 0.0
+
+
+async def _failing_query(**kwargs: object):  # type: ignore[no-untyped-def]
+    raise RuntimeError("Command failed with exit code 1")
+    yield  # pragma: no cover — makes this an async generator
+
+
+async def _error_result_query(**kwargs: object):  # type: ignore[no-untyped-def]
+    yield ResultMessage(
+        subtype="error_max_turns",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=True,
+        num_turns=1,
+        session_id="test",
+        result="Reached max turns",
+    )
+
+
+def _sdk_patches(query_fn: Any, options: MagicMock) -> Any:
+    """Patch everything around ``query`` except the metrics, so the real counters move."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch("src.agent.sdk_agent.query", side_effect=query_fn))
+    stack.enter_context(patch("src.agent.oauth_refresh.ensure_valid_token", new_callable=AsyncMock))
+    stack.enter_context(patch("src.agent.sdk_agent._build_system_prompt", return_value="test prompt"))
+    stack.enter_context(patch("src.agent.sdk_agent.ClaudeAgentOptions", return_value=options))
+    stack.enter_context(patch("src.agent.sdk_agent._post_response_actions", return_value=""))
+    stack.enter_context(patch("src.agent.agent_errors.get_token_health", return_value=("healthy", None)))
+    return stack
+
+
+def _options() -> MagicMock:
+    options = MagicMock()
+    options.model = "test-model"
+    options.env = {}
+    return options
+
+
+class TestSdkLlmCallStatus:
+    @pytest.mark.integration
+    async def test_stream_exception_counts_llm_error(self, mock_settings: Any) -> None:
+        options = _options()
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        with _sdk_patches(_failing_query, options):
+            events = [ev async for ev in stream_sdk_agent(options, "hi")]
+
+        assert [ev["type"] for ev in events if ev["type"] == "error"] == ["error"]
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    @pytest.mark.integration
+    async def test_invoke_exception_counts_llm_error(self, mock_settings: Any) -> None:
+        options = _options()
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        with _sdk_patches(_failing_query, options), pytest.raises(RuntimeError, match="exit code 1"):
+            await invoke_sdk_agent(options, "hi")
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize("path", ["stream", "invoke"])
+    async def test_error_result_counts_llm_error_once(self, mock_settings: Any, path: str) -> None:
+        """A ResultMessage with is_error goes through record_sdk_metrics once: one error, no success."""
+        options = _options()
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        with _sdk_patches(_error_result_query, options):
+            if path == "stream":
+                _ = [ev async for ev in stream_sdk_agent(options, "hi")]
+            else:
+                _ = await invoke_sdk_agent(options, "hi")
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0

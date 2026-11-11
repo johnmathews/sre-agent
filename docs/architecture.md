@@ -277,6 +277,11 @@ Client ID). `MCP_CLIENT_NAMES` maps that identity to a client name (`src/api/mcp
   shutdown, and answers 503 `{"error":"MCP server not started"}` while that is unset. A second lifespan (a restart,
   or `TestClient` entered twice) therefore serves a fresh MCP app instead of a stale one.
   `tests/test_mcp_http_integration.py` drives initialize, tools/list and tools/call over real HTTP.
+- **Health:** `/health` reports the `mcp_server` component healthy only when the lifespan has set both
+  `app.state.mcp_server` and `app.state.mcp_app`, and `list_tools()` returns exactly `app.state.mcp_expected_tools`
+  tools, a count above zero that the lifespan takes from the registry's enabled `mcp` specs. Otherwise the component
+  is unhealthy with a detail (`MCP server not started`, `list_tools failed: <class>`, `no MCP tools registered` or
+  `<n> tools listed, <m> registered`), and the overall status drops to `degraded`.
 - **Tools:** One registry, `TOOL_SPECS` in `src/agent/tool_registry.py`, builds all three tool surfaces: `/mcp`, the
   LangGraph agent's tools and the SDK agent's in-process `sre` server. Each surface shows the same names, descriptions
   and input schemas, and every call is validated against the schema before the tool runs.
@@ -398,8 +403,11 @@ Three layers:
    transparently captures tool calls and LLM usage inside LangGraph's execution loop. A fresh instance is created per
    request (request-scoped `_start_times` dict) but writes to the shared module-level metric singletons. Each finished
    tool call goes through `observe_tool_call`, so the LangGraph path writes the same log line and metrics as the SDK
-   tool server and `/mcp`. On the SDK path, `src/observability/sdk_metrics.py` records only LLM calls, tokens and cost;
-   the SDK tool server's handler measures each tool call itself. Key design choices:
+   tool server and `/mcp`. A tool with `handle_tool_error=True` turns its `ToolException` into a `ToolMessage` with
+   `status="error"` and LangGraph reports it through `on_tool_end`, so the handler records that call as outcome
+   `error`, `error_class=ToolException`, with the message text as `error`. On the SDK path,
+   `src/observability/sdk_metrics.py` records only LLM calls, tokens and cost; the SDK tool server's handler measures
+   each tool call itself. Key design choices:
    - **No tool code changes** — the handler hooks into LangGraph's callback system, so all 23 current tools (and any
      future tools) are automatically instrumented
    - **Works inside the agent loop** — LangGraph may call multiple tools in sequence before returning; the callback sees
@@ -412,13 +420,35 @@ Three layers:
    `/report` + `/metrics` endpoint + health gauge updates on `/health` + report metrics on `/report` + app info set at
    startup
 
+### SLIs
+
+Each SLI counts failures on every path, so each one can go red:
+
+- **Tool call success rate (> 99%):** `sre_assistant_tool_calls_total{status="success"}` divided by the calls whose
+  status is not `invalid_args` or `unknown_tool`, across both sources (`mcp` and `agent`). A client's bad arguments or
+  made-up tool name is the client's mistake, so it counts against neither side of the ratio; `error`, `timeout` and
+  `internal` count as failures. The dashboard, the weekly report and the memory store's baseline all use this
+  definition.
+- **LLM error rate (< 1%):** `sre_assistant_llm_calls_total{status="error"}` over all LLM calls. The LangGraph path
+  counts each model call through `on_llm_end` / `on_llm_error`. The SDK path counts one call per request: `error` when
+  the SDK returns no `ResultMessage`, returns one with `is_error`, or raises (counted once, in `stream_sdk_agent`'s
+  except branch or around `invoke_sdk_agent`'s query loop); otherwise `success`. A failure to record the SDK metrics
+  logs a WARNING.
+- **Availability (> 99.5%):** the average of `sre_assistant_component_healthy`, which `/health` sets for every
+  component it checks, `mcp_server` included (see [MCP Server Endpoint](#mcp-server-endpoint)).
+- **Latency p95:** recorded with no target.
+
 ### Grafana Dashboard
 
 `dashboards/sre-assistant-sli.json` provides a pre-built dashboard with:
 
-- SLO overview stats (availability, tool success rate, LLM success rate)
+- SLO overview stats (availability, tool success rate as defined above, LLM success rate)
 - Request latency percentiles (p50/p90/p95/p99)
-- Tool call rates and errors by tool name
+- Tool call rate by tool, service failures (`error`, `timeout`, `internal`) by tool and status, and call duration p95
+  by tool and source
+- Tool calls by `source` and by `client`
+- `/mcp` HTTP requests by Access result (`sre_assistant_mcp_http_requests_total`), which counts every HTTP request to
+  `/mcp` (initialize and tools/list too), not only tool calls
 - LLM token usage and estimated cost
 - Component health status
 

@@ -1,10 +1,14 @@
 """Unit tests for observability metrics and callback handler."""
 
+import json
 import logging
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
-from langchain_core.tools import ToolException
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool, ToolException
 from prometheus_client import REGISTRY
 
 from src.observability.callbacks import MetricsCallbackHandler
@@ -20,6 +24,7 @@ from src.observability.metrics import (
     TOOL_CALL_DURATION,
     TOOL_CALLS_TOTAL,
 )
+from src.observability.tool_calls import MAX_ERROR_CHARS
 from tests.test_tool_calls import LOGGER as TOOL_CALL_LOGGER
 from tests.test_tool_calls import fields, tool_call_records
 
@@ -151,6 +156,66 @@ class TestMetricsCallbackHandler:
         assert record.levelno == logging.ERROR
         assert fields(record)["outcome"] == "internal"
 
+    def test_handled_tool_error_counts_as_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A tool with handle_tool_error=True reports its ToolException through on_tool_end as a ToolMessage with
+        status="error"; that call is a failure, not a success (finding N1)."""
+        handler = MetricsCallbackHandler()
+        error_labels = {"tool_name": "handled_failing_tool", "status": "error", "source": "agent", "client": "agent"}
+        success_labels = {**error_labels, "status": "success"}
+        errors_before = _sample("sre_assistant_tool_calls_total", error_labels) or 0.0
+        successes_before = _sample("sre_assistant_tool_calls_total", success_labels) or 0.0
+        message = "upstream said no " + "x" * 300
+
+        def _fail(query: str) -> str:
+            raise ToolException(message)
+
+        tool = StructuredTool.from_function(
+            func=_fail, name="handled_failing_tool", description="Always fails.", handle_tool_error=True
+        )
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            output = tool.invoke(
+                {"type": "tool_call", "id": "call-1", "name": "handled_failing_tool", "args": {"query": "up"}},
+                config={"callbacks": [handler]},
+            )
+
+        assert isinstance(output, ToolMessage) and output.status == "error"
+        assert (_sample("sre_assistant_tool_calls_total", error_labels) or 0.0) - errors_before == 1.0
+        assert (_sample("sre_assistant_tool_calls_total", success_labels) or 0.0) - successes_before == 0.0
+        [record] = tool_call_records(caplog)
+        assert record.levelno == logging.INFO
+        parsed = fields(record)
+        assert parsed["outcome"] == "error"
+        assert parsed["error_class"] == "ToolException"
+        assert parsed["error"] == message[:MAX_ERROR_CHARS]
+        assert parsed["result_chars"] == "0"
+        assert parsed["args"] == "query='up'"
+
+    def test_tool_message_success_counts_as_success(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Pin: a ToolMessage with the default status="success" still counts as a success."""
+        handler = MetricsCallbackHandler()
+        labels = {"tool_name": "handled_ok_tool", "status": "success", "source": "agent", "client": "agent"}
+        before = _sample("sre_assistant_tool_calls_total", labels) or 0.0
+
+        def _ok(query: str) -> str:
+            return f"ok {query}"
+
+        tool = StructuredTool.from_function(
+            func=_ok, name="handled_ok_tool", description="Always works.", handle_tool_error=True
+        )
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            output = tool.invoke(
+                {"type": "tool_call", "id": "call-2", "name": "handled_ok_tool", "args": {"query": "up"}},
+                config={"callbacks": [handler]},
+            )
+
+        assert isinstance(output, ToolMessage) and output.status == "success"
+        assert (_sample("sre_assistant_tool_calls_total", labels) or 0.0) - before == 1.0
+        [record] = tool_call_records(caplog)
+        parsed = fields(record)
+        assert parsed["outcome"] == "success"
+        assert parsed["result_chars"] == "5"
+        assert "error" not in parsed
+
     def test_tool_end_without_start_is_safe(self) -> None:
         """on_tool_end with unknown run_id should not raise."""
         handler = MetricsCallbackHandler()
@@ -271,3 +336,53 @@ class TestMetricsCallbackHandler:
 
         result = LLMResult(generations=[], llm_output={"model_name": "gpt-4o"})
         handler.on_llm_end(response=result, run_id=uuid4())
+
+
+# ---------------------------------------------------------------------------
+# SLI dashboard
+# ---------------------------------------------------------------------------
+
+DASHBOARD = Path(__file__).resolve().parent.parent / "dashboards" / "sre-assistant-sli.json"
+CLIENT_ERRORS = "invalid_args|unknown_tool"
+
+
+def _panels() -> list[dict[str, Any]]:
+    panels: list[dict[str, Any]] = json.loads(DASHBOARD.read_text())["panels"]
+    return panels
+
+
+def _exprs(panel: dict[str, Any]) -> list[str]:
+    return [str(target["expr"]) for target in panel.get("targets", [])]
+
+
+class TestSliDashboard:
+    """The SLI dashboard's queries count failures the way the SLIs define them."""
+
+    def test_tool_success_excludes_client_errors(self) -> None:
+        [overview] = [p for p in _panels() if p["title"] == "SLO Overview"]
+        [target] = [t for t in overview["targets"] if str(t["legendFormat"]).startswith("Tool Success")]
+        assert target["expr"] == (
+            'sum(rate(sre_assistant_tool_calls_total{status="success"}[1h]))'
+            f' / sum(rate(sre_assistant_tool_calls_total{{status!~"{CLIENT_ERRORS}"}}[1h]))'
+        )
+
+    def test_no_tool_panel_counts_only_status_error_as_failure(self) -> None:
+        """timeout and internal are failures too; a panel reading status="error" alone would hide them."""
+        exprs = [e for p in _panels() for e in _exprs(p)]
+        assert not [e for e in exprs if 'sre_assistant_tool_calls_total{status="error"}' in e]
+
+    def test_tool_calls_by_source_and_by_client(self) -> None:
+        exprs = [e for p in _panels() for e in _exprs(p) if "sre_assistant_tool_calls_total" in e]
+        assert any("sum by (source)" in e for e in exprs)
+        assert any("sum by (client)" in e for e in exprs)
+
+    def test_mcp_http_requests_panel_says_it_counts_every_request(self) -> None:
+        [panel] = [p for p in _panels() if any("sre_assistant_mcp_http_requests_total" in e for e in _exprs(p))]
+        assert all("sum by (access)" in e for e in _exprs(panel))
+        text = f"{panel['title']} {panel.get('description', '')}"
+        assert "every HTTP request to /mcp" in text
+        assert "not only tool calls" in text
+
+    def test_panel_ids_unique(self) -> None:
+        ids = [p["id"] for p in _panels()]
+        assert len(ids) == len(set(ids))

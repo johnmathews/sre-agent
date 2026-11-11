@@ -1,9 +1,30 @@
 """Tests for SDK observability metrics extraction."""
 
+import logging
+from unittest.mock import patch
+
+import pytest
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
 from prometheus_client import REGISTRY
 
 from src.observability.sdk_metrics import extract_tool_names, record_sdk_metrics
+
+
+def _llm_calls(status: str) -> float:
+    return REGISTRY.get_sample_value("sre_assistant_llm_calls_total", {"status": status}) or 0.0
+
+
+def _result(is_error: bool) -> ResultMessage:
+    return ResultMessage(
+        subtype="error_during_execution" if is_error else "success",
+        duration_ms=1000,
+        duration_api_ms=800,
+        is_error=is_error,
+        num_turns=1,
+        session_id="test",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 100, "output_tokens": 50},
+    )
 
 
 def _total(sample_name: str) -> float:
@@ -119,3 +140,43 @@ class TestRecordSdkMetrics:
 
         assert _total("sre_assistant_tool_calls_total") == calls_before
         assert _total("sre_assistant_tool_call_duration_seconds_count") == durations_before
+
+
+class TestSdkLlmStatus:
+    """One LLM call per SDK request, counted as an error when the request did not produce a good result."""
+
+    def test_sdk_result_is_error_counts_llm_error(self) -> None:
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], _result(is_error=True))
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    def test_sdk_no_result_counts_llm_error(self) -> None:
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], None)
+
+        assert _llm_calls("error") - errors == 1.0
+        assert _llm_calls("success") - successes == 0.0
+
+    def test_sdk_good_result_counts_llm_success(self) -> None:
+        """Pin: a result without is_error is one successful LLM call."""
+        errors, successes = _llm_calls("error"), _llm_calls("success")
+
+        record_sdk_metrics([], _result(is_error=False))
+
+        assert _llm_calls("success") - successes == 1.0
+        assert _llm_calls("error") - errors == 0.0
+
+    def test_recording_failure_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("src.observability.sdk_metrics._record_sdk_metrics_inner", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.DEBUG, logger="src.observability.sdk_metrics"),
+        ):
+            record_sdk_metrics([], None)
+
+        [record] = [r for r in caplog.records if r.name == "src.observability.sdk_metrics"]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is not None

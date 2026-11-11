@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 
 from src.agent.retrieval.runbooks import runbook_search
 from src.agent.tools.clock import get_current_time
+from src.agent.tools.containers import container_status
 from src.agent.tools.conversations import sre_agent_get_conversation, sre_agent_list_conversations
 from src.agent.tools.disk_status import hdd_power_status
 from src.agent.tools.grafana_alerts import grafana_get_alert_rules, grafana_get_alerts
@@ -33,12 +34,14 @@ from src.agent.tools.grafana_dashboards import grafana_get_dashboard, grafana_se
 from src.agent.tools.loki import loki_correlate_changes, loki_list_label_values, loki_metric_query, loki_query_logs
 from src.agent.tools.pbs import pbs_datastore_status, pbs_list_backups, pbs_list_tasks
 from src.agent.tools.prometheus import prometheus_instant_query, prometheus_range_query, prometheus_search_metrics
+from src.agent.tools.prometheus_targets import scrape_targets
 from src.agent.tools.proxmox import (
     proxmox_get_guest_config,
     proxmox_list_guests,
     proxmox_list_tasks,
     proxmox_node_status,
 )
+from src.agent.tools.service_health import service_health
 from src.agent.tools.truenas import (
     truenas_apps,
     truenas_list_shares,
@@ -46,6 +49,7 @@ from src.agent.tools.truenas import (
     truenas_snapshots,
     truenas_system_status,
 )
+from src.agent.tools.upgrade_status import upgrade_status
 from src.config import Settings
 from src.memory.tools import (
     memory_check_baseline,
@@ -167,10 +171,16 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec(prometheus_search_metrics, _always, "Searching Prometheus metrics", "core"),
     _spec(prometheus_instant_query, _always, "Querying Prometheus", "core"),
     _spec(prometheus_range_query, _always, "Querying Prometheus (range)", "core"),
+    _spec(scrape_targets, _always, "Listing Prometheus scrape targets", "core"),
+    _spec(container_status, _always, "Checking container status", "core"),
     _spec(grafana_get_alerts, _always, "Checking Grafana alerts", "core"),
     _spec(grafana_get_alert_rules, _always, "Fetching Grafana alert rules", "core"),
     _spec(grafana_get_dashboard, _always, "Loading Grafana dashboard", "core"),
     _spec(grafana_search_dashboards, _always, "Searching Grafana dashboards", "core"),
+    # Prometheus is required; without UPGRADE_ADVISOR_DB_PATH the tool still reports the exporter's outdated images.
+    _spec(upgrade_status, _always, "Checking upgrade status", "core"),
+    # Loki is optional: without LOKI_URL its source reads "unavailable: LOKI_URL not set".
+    _spec(service_health, _always, "Checking service health", "core"),
     _spec(proxmox_list_guests, _proxmox, "Listing Proxmox VMs/CTs", "proxmox"),
     _spec(proxmox_get_guest_config, _proxmox, "Fetching guest config", "proxmox"),
     _spec(proxmox_node_status, _proxmox, "Checking Proxmox node status", "proxmox"),

@@ -501,3 +501,63 @@ def test_last_success_is_a_single_row(conn: sqlite3.Connection) -> None:
     assert conn.execute("SELECT COUNT(*) FROM advisor_state").fetchone()[0] == 1
     with pytest.raises(ValueError, match="naive"):
         store.set_last_success(conn, datetime(2026, 1, 1))  # noqa: DTZ001
+
+
+def test_connect_readonly_cannot_write(tmp_path: Path) -> None:
+    path = str(tmp_path / "u.db")
+    rw = store.connect(path)
+    vid = _verdict(rw)
+    rw.close()
+
+    ro = store.connect_readonly(path)
+    try:
+        record = store.get_verdict(ro, vid)
+        assert record is not None and record.container == "prometheus"  # rows read back as sqlite3.Row
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            _verdict(ro)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            store.set_last_success(ro, T0)
+    finally:
+        ro.close()
+    assert store.get_last_success(store.connect(path)) is None
+
+
+def test_connect_readonly_never_creates_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "absent.db"
+    with pytest.raises(sqlite3.OperationalError):
+        store.connect_readonly(str(path)).execute("SELECT 1 FROM verdicts")
+    assert not path.exists()
+
+
+def test_connect_readonly_path_with_special_characters(tmp_path: Path) -> None:
+    """The path goes into a file: URI, so '?', '#' and spaces must not end it early."""
+    path = str(tmp_path / "advisor dir?#" / "u.db")
+    Path(path).parent.mkdir()
+    store.connect(path).close()
+    ro = store.connect_readonly(path)
+    assert ro.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0] == 0
+    ro.close()
+
+
+def test_latest_verdicts_one_per_container_newest_first(conn: sqlite3.Connection) -> None:
+    _verdict(conn, "prometheus", "sha256:a")
+    newer_prom = store.save_verdict(
+        conn,
+        container="prometheus",
+        running_digest="sha256:old",
+        candidate_digest="sha256:b",
+        running_version="v3.1.0",
+        candidate_version="v3.2.0",
+        verdict="hold",
+        summary="regression reported",
+        details={},
+        now=T0 + timedelta(days=2),
+    )
+    homepage = _verdict(conn, "homepage", "sha256:c")
+    verdicts = store.latest_verdicts(conn)
+    assert [(v.container, v.id) for v in verdicts] == [("prometheus", newer_prom), ("homepage", homepage)]
+    assert verdicts[0].verdict == "hold"
+
+
+def test_latest_verdicts_empty_store(conn: sqlite3.Connection) -> None:
+    assert store.latest_verdicts(conn) == []

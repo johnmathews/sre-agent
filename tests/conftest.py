@@ -139,6 +139,7 @@ def mock_settings() -> Generator[Any]:
     patch_sites = [
         "src.config.get_settings",
         "src.agent.tools.prometheus.get_settings",
+        "src.agent.tools.prometheus_targets.get_settings",
         "src.agent.tools.grafana_alerts.get_settings",
         "src.agent.tools.grafana_dashboards.get_settings",
         "src.agent.tools.proxmox.get_settings",
@@ -150,6 +151,8 @@ def mock_settings() -> Generator[Any]:
         "src.agent.tools.disk_status.get_settings",
         "src.agent.tools.clock.get_settings",
         "src.agent.tools.conversations.get_settings",
+        "src.agent.tools.upgrade_status.get_settings",
+        "src.agent.tools.service_health.get_settings",
         "src.agent.retrieval.embeddings.get_settings",
         "src.api.main.get_settings",
         "src.report.generator.get_settings",

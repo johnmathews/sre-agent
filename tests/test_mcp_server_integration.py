@@ -87,6 +87,8 @@ class TestBuildFastmcpServer:
         assert "prometheus_search_metrics" in names
         assert "prometheus_instant_query" in names
         assert "prometheus_range_query" in names
+        assert "container_status" in names
+        assert "service_health" in names
         assert "grafana_get_alerts" in names
         assert "grafana_get_alert_rules" in names
         assert "grafana_get_dashboard" in names

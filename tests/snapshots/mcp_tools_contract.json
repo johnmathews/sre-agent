@@ -1,5 +1,33 @@
 {
   "tools": {
+    "container_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "host": {
+          "default": null,
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9 ._-]+$",
+          "required": false,
+          "type": "string|null"
+        },
+        "name": {
+          "default": null,
+          "maxLength": 128,
+          "minLength": 1,
+          "required": false,
+          "type": "string|null"
+        },
+        "only_problems": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        }
+      }
+    },
     "get_current_time": {
       "annotations": {
         "openWorldHint": false,
@@ -535,6 +563,46 @@
         }
       }
     },
+    "scrape_targets": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "job": {
+          "default": null,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9_:.-]+$",
+          "required": false,
+          "type": "string|null"
+        },
+        "only_down": {
+          "default": false,
+          "required": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "service_health": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9 ._()-]+$",
+          "required": true,
+          "type": "string"
+        },
+        "window": {
+          "default": "1h",
+          "required": false,
+          "type": "string"
+        }
+      }
+    },
     "sre_agent_get_conversation": {
       "annotations": {
         "openWorldHint": false,
@@ -626,6 +694,28 @@
         "readOnlyHint": true
       },
       "parameters": {}
+    },
+    "upgrade_status": {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "parameters": {
+        "container": {
+          "default": null,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "required": false,
+          "type": "string|null"
+        },
+        "days": {
+          "default": 30,
+          "maximum": 365,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        }
+      }
     }
   }
 }

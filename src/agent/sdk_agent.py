@@ -7,7 +7,6 @@ automatically.  The LangChain agent path is preserved for OpenAI.
 
 import logging
 import re
-import time
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any
@@ -241,43 +240,16 @@ async def invoke_sdk_agent(
     result_msg: ResultMessage | None = None
     last_text_block = ""
 
-    # Track per-tool durations by timestamping the gap between messages.
-    # When we see ToolUseBlock(s), the SDK executes them before yielding
-    # the next message — so elapsed time ≈ tool execution time.
-    pending_tools: list[str] = []
-    tool_start: float = 0.0
-    tool_durations: list[tuple[str, float]] = []
-
     async for msg in query(prompt=full_prompt, options=options):
-        # If tools were pending from the previous message, record their duration
-        if pending_tools:
-            elapsed = time.monotonic() - tool_start
-            for name in pending_tools:
-                tool_durations.append((name, elapsed / len(pending_tools)))
-            pending_tools = []
-
         all_messages.append(msg)
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock) and block.text:
                     last_text_block = block.text
-                elif isinstance(block, ToolUseBlock):
-                    short = block.name
-                    if short.startswith(_MCP_PREFIX):
-                        short = short[len(_MCP_PREFIX) :]
-                    pending_tools.append(short)
-            if pending_tools:
-                tool_start = time.monotonic()
         elif isinstance(msg, ResultMessage):
             result_msg = msg
             if msg.is_error:
                 logger.warning("SDK query returned error: %s", msg.result)
-
-    # Flush any remaining pending tools (last tool call before stream ends)
-    if pending_tools:
-        elapsed = time.monotonic() - tool_start
-        for name in pending_tools:
-            tool_durations.append((name, elapsed / len(pending_tools)))
 
     # Prefer ResultMessage.result (the final synthesized answer) over
     # intermediate AssistantMessage text blocks (which may be "thinking" text
@@ -290,7 +262,7 @@ async def invoke_sdk_agent(
         response_text = "No response generated."
 
     # Record observability metrics
-    record_sdk_metrics(all_messages, result_msg, tool_durations)
+    record_sdk_metrics(all_messages, result_msg)
 
     # Extract tool names for post-response actions
     tool_names = extract_tool_names(all_messages)
@@ -417,15 +389,11 @@ async def stream_sdk_agent(
     result_msg: ResultMessage | None = None
     last_text_block = ""
     pending_tools: list[str] = []
-    tool_start: float = 0.0
-    tool_durations: list[tuple[str, float]] = []
 
     try:
         async for msg in query(prompt=full_prompt, options=options):
             if pending_tools:
-                elapsed = time.monotonic() - tool_start
                 for name in pending_tools:
-                    tool_durations.append((name, elapsed / len(pending_tools)))
                     end_label = tool_label(name)
                     yield {"type": "tool_end", "content": end_label, "tool_name": name}
                 pending_tools = []
@@ -446,8 +414,6 @@ async def stream_sdk_agent(
                         short_text = block.text[:120].split("\n")[0].strip()
                         if short_text:
                             yield {"type": "status", "content": short_text}
-                if pending_tools:
-                    tool_start = time.monotonic()
             elif isinstance(msg, ResultMessage):
                 result_msg = msg
     except Exception as exc:
@@ -462,12 +428,8 @@ async def stream_sdk_agent(
         }
         return
 
-    if pending_tools:
-        elapsed = time.monotonic() - tool_start
-        for name in pending_tools:
-            tool_durations.append((name, elapsed / len(pending_tools)))
-            end_label = tool_label(name)
-            yield {"type": "tool_end", "content": end_label, "tool_name": name}
+    for name in pending_tools:
+        yield {"type": "tool_end", "content": tool_label(name), "tool_name": name}
 
     yield {"type": "status", "content": "Synthesizing response..."}
 
@@ -480,7 +442,7 @@ async def stream_sdk_agent(
         response_text = "No response generated."
 
     # Record metrics
-    record_sdk_metrics(all_messages, result_msg, tool_durations)
+    record_sdk_metrics(all_messages, result_msg)
 
     # Post-response actions
     tool_names = extract_tool_names(all_messages)

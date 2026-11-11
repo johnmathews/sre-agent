@@ -4,9 +4,14 @@ Each tool on the registry's ``agent`` surface becomes an ``SdkMcpTool`` with the
 description and input schema that ``/mcp`` serves. The handler runs it through ``run_tool``, so the
 SDK agent gets the same validation as ``/mcp``: unknown argument names are refused and limits are
 enforced before the tool runs.
+
+Each call the handler sees writes one ``tool_call`` log line and the tool metrics with ``source=agent client=agent``
+(``src/observability/tool_calls.py``). The ``mcp`` library behind ``create_sdk_mcp_server`` checks arguments against
+``inputSchema`` before the handler runs, so a call it refuses never reaches the handler and writes no line.
 """
 
 import logging
+import time
 from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
@@ -17,6 +22,7 @@ from langchain_core.tools import ToolException
 
 from src.agent.tool_registry import ToolSpec, enabled_specs, input_schema, run_tool
 from src.config import Settings, get_settings
+from src.observability.tool_calls import Outcome, classify_tool_error, observe_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +43,34 @@ def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
 
 def _handler(spec: ToolSpec) -> Handler:
     async def handle(arguments: dict[str, Any]) -> dict[str, Any]:
+        start = time.monotonic()
+        outcome: Outcome = "success"
+        failure: BaseException | None = None
         try:
-            return _text_result(await run_tool(spec, arguments))
+            text = await run_tool(spec, arguments)
+            result = _text_result(text)
         except (ToolError, ToolException) as e:
             # Invalid arguments, or the tool's own failure message (an upstream error, a bad name).
-            return _text_result(str(e), is_error=True)
+            outcome, failure = classify_tool_error(e)
+            text = ""
+            result = _text_result(str(e), is_error=True)
         except Exception as e:
-            # Raising would also give an error result, but with no log line; log it here.
-            logger.exception("SDK tool %s failed", spec.name)
-            return _text_result(f"Tool error: {type(e).__name__}: {e}", is_error=True)
+            # Raising would also give an error result; the tool_call line below logs it with its traceback.
+            outcome, failure = classify_tool_error(e)
+            text = ""
+            result = _text_result(f"Tool error: {type(e).__name__}: {e}", is_error=True)
+        observe_tool_call(
+            tool=spec.name,
+            source="agent",
+            client="agent",
+            outcome=outcome,
+            error_class=type(failure).__name__ if failure is not None else None,
+            error=failure,
+            duration_s=time.monotonic() - start,
+            result_chars=len(text),
+            arguments=arguments,
+        )
+        return result
 
     return handle
 

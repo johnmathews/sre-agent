@@ -9,9 +9,17 @@ import pytest
 import respx
 from claude_agent_sdk import SdkMcpTool
 from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult, ListToolsRequest
+from prometheus_client import REGISTRY
 
 from src.agent.mcp_tools import build_mcp_server, build_sdk_tools
 from src.agent.tool_registry import enabled_specs, get_spec, input_schema
+from tests.test_tool_calls import LOGGER as TOOL_CALL_LOGGER
+from tests.test_tool_calls import fields, tool_call_records
+
+
+def _calls(tool: str, status: str) -> float:
+    labels = {"tool_name": tool, "status": status, "source": "agent", "client": "agent"}
+    return REGISTRY.get_sample_value("sre_assistant_tool_calls_total", labels) or 0.0
 
 
 def _tool(settings: Any, name: str) -> SdkMcpTool[Any]:
@@ -93,17 +101,71 @@ class TestSdkHandler:
     async def test_unexpected_exception_is_logged_and_an_error(
         self, mock_settings: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """An unexpected exception is an error result and one ERROR tool_call line with its traceback."""
         with (
             patch("src.agent.mcp_tools.run_tool", AsyncMock(side_effect=RuntimeError("socket gone"))),
-            caplog.at_level(logging.ERROR, logger="src.agent.mcp_tools"),
+            caplog.at_level(logging.INFO),
         ):
             result = await _call_via_server(mock_settings, "get_current_time", {})
 
         assert result.isError is True
         assert result.content[0].text == "Tool error: RuntimeError: socket gone"  # type: ignore[union-attr]
-        [record] = caplog.records
-        assert record.getMessage() == "SDK tool get_current_time failed"
+        [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert record.name == TOOL_CALL_LOGGER
+        assert fields(record)["outcome"] == "internal"
+        assert fields(record)["error_class"] == "RuntimeError"
         assert record.exc_info is not None
+
+
+class TestSdkHandlerObservation:
+    @pytest.mark.integration
+    @respx.mock
+    async def test_sdk_call_writes_one_line_and_counts_once(
+        self, mock_settings: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """One SDK tool call: one tool_call line with source=agent, and the counter goes up by exactly one."""
+        respx.get("http://prometheus.test:9090/api/v1/label/__name__/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": ["node_cpu_seconds_total"]})
+        )
+        respx.get("http://prometheus.test:9090/api/v1/metadata").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": {}})
+        )
+        before = _calls("prometheus_search_metrics", "success")
+
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            result = await _call_via_server(mock_settings, "prometheus_search_metrics", {"search_term": "cpu"})
+
+        assert result.isError is False
+        [record] = tool_call_records(caplog)
+        parsed = fields(record)
+        assert parsed["tool"] == "prometheus_search_metrics"
+        assert parsed["source"] == "agent"
+        assert parsed["client"] == "agent"
+        assert parsed["outcome"] == "success"
+        assert int(parsed["result_chars"]) == len(result.content[0].text)  # type: ignore[union-attr]
+        assert _calls("prometheus_search_metrics", "success") - before == 1
+
+    async def test_sdk_unknown_argument_is_invalid_args(
+        self, mock_settings: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Through the handler directly (the SDK server's own schema check would stop it first)."""
+        before = _calls("prometheus_search_metrics", "invalid_args")
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            await _tool(mock_settings, "prometheus_search_metrics").handler({"search_term": "cpu", "limt": 5})
+
+        assert fields(tool_call_records(caplog)[0])["outcome"] == "invalid_args"
+        assert _calls("prometheus_search_metrics", "invalid_args") - before == 1
+
+    @pytest.mark.integration
+    async def test_sdk_tool_exception_is_error(self, mock_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            await _call_via_server(
+                mock_settings, "prometheus_range_query", {"query": "up", "start": "not-a-time", "end": "now"}
+            )
+
+        parsed = fields(tool_call_records(caplog)[0])
+        assert parsed["outcome"] == "error"
+        assert parsed["error_class"] == "ToolException"
 
     @pytest.mark.integration
     @respx.mock

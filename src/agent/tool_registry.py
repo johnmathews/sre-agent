@@ -62,6 +62,20 @@ BOTH: frozenset[Surface] = frozenset({"agent", "mcp"})
 MCP_ONLY: frozenset[Surface] = frozenset({"mcp"})
 
 
+class InvalidToolArguments(ToolError):
+    """A call's arguments failed the tool's schema: an unknown name, or (as its cause) a ``ValidationError``.
+
+    A ``ToolError``, so every surface reports it as an error result; its own class lets the per-call log line tell a
+    bad call (``invalid_args``) from a tool that failed.
+
+    It logs at DEBUG: FastMCP logs a ``ToolError`` at its ``log_level`` (ERROR by default), and the per-call
+    ``tool_call`` line already records a bad call.
+    """
+
+    def __init__(self, *args: object, log_level: int = logging.DEBUG) -> None:
+        super().__init__(*args, log_level=log_level)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """One tool, the condition that enables it, and how surfaces present it.
@@ -274,8 +288,8 @@ def _describe_validation_error(error: ValidationError) -> str:
 async def run_tool(spec: ToolSpec, arguments: dict[str, Any]) -> str:
     """Validate ``arguments`` and call the tool's raw function.
 
-    Raises ``ToolError`` for an argument name the schema does not declare (naming the accepted
-    ones), and (caused by the ``ValidationError``) for invalid values. A
+    Raises ``InvalidToolArguments`` (a ``ToolError``) for an argument name the schema does not
+    declare (naming the accepted ones), and (caused by the ``ValidationError``) for invalid values. A
     ``ToolException`` raised by the tool propagates unchanged, so each surface reports it as an
     error. Sync tools run in a worker thread.
     """
@@ -283,11 +297,11 @@ async def run_tool(spec: ToolSpec, arguments: dict[str, Any]) -> str:
     unknown = sorted(set(arguments) - set(model.model_fields))
     if unknown:
         accepted = ", ".join(sorted(model.model_fields)) or "none"
-        raise ToolError(f"Unknown argument(s) for {spec.name}: {', '.join(unknown)}. Accepted: {accepted}")
+        raise InvalidToolArguments(f"Unknown argument(s) for {spec.name}: {', '.join(unknown)}. Accepted: {accepted}")
     try:
         validated = model.model_validate(arguments)
     except ValidationError as e:
-        raise ToolError(f"Invalid arguments for {spec.name}: {_describe_validation_error(e)}") from e
+        raise InvalidToolArguments(f"Invalid arguments for {spec.name}: {_describe_validation_error(e)}") from e
     kwargs = {name: getattr(validated, name) for name in type(validated).model_fields}
     tool = spec.tool
     if tool.coroutine is not None:

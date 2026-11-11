@@ -1,8 +1,10 @@
 """Unit tests for observability metrics and callback handler."""
 
+import logging
 from uuid import uuid4
 
 import pytest
+from langchain_core.tools import ToolException
 from prometheus_client import REGISTRY
 
 from src.observability.callbacks import MetricsCallbackHandler
@@ -18,6 +20,8 @@ from src.observability.metrics import (
     TOOL_CALL_DURATION,
     TOOL_CALLS_TOTAL,
 )
+from tests.test_tool_calls import LOGGER as TOOL_CALL_LOGGER
+from tests.test_tool_calls import fields, tool_call_records
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,52 +77,79 @@ class TestMetricDefinitions:
 class TestMetricsCallbackHandler:
     """Test the LangChain callback handler records metrics correctly."""
 
-    def test_tool_success_records_counter_and_histogram(self) -> None:
+    def test_tool_success_records_counter_and_histogram(self, caplog: pytest.LogCaptureFixture) -> None:
         handler = MetricsCallbackHandler()
         run_id = uuid4()
+        labels = {"tool_name": "test_tool", "status": "success", "source": "agent", "client": "agent"}
 
         # Snapshot before
-        before = _sample(
-            "sre_assistant_tool_calls_total",
-            {"tool_name": "test_tool", "status": "success"},
+        before = _sample("sre_assistant_tool_calls_total", labels)
+        hist_before = _sample(
+            "sre_assistant_tool_call_duration_seconds_count", {"tool_name": "test_tool", "source": "agent"}
         )
 
-        handler.on_tool_start(
-            serialized={"name": "test_tool"},
-            input_str="query",
-            run_id=run_id,
-        )
-        handler.on_tool_end(output="result", run_id=run_id)
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            handler.on_tool_start(
+                serialized={"name": "test_tool"},
+                input_str="{'query': 'up'}",
+                run_id=run_id,
+                inputs={"query": "up"},
+            )
+            handler.on_tool_end(output="result", run_id=run_id)
 
-        after = _sample(
-            "sre_assistant_tool_calls_total",
-            {"tool_name": "test_tool", "status": "success"},
-        )
+        after = _sample("sre_assistant_tool_calls_total", labels)
         assert after is not None
         assert after - (before or 0.0) == 1.0
+        hist_after = _sample(
+            "sre_assistant_tool_call_duration_seconds_count", {"tool_name": "test_tool", "source": "agent"}
+        )
+        assert (hist_after or 0.0) - (hist_before or 0.0) == 1.0
+        [record] = tool_call_records(caplog)
+        parsed = fields(record)
+        assert parsed["source"] == "agent"
+        assert parsed["client"] == "agent"
+        assert parsed["outcome"] == "success"
+        assert parsed["result_chars"] == "6"
+        assert parsed["args"] == "query='up'"
 
-    def test_tool_error_records_error_counter(self) -> None:
+    def test_tool_error_records_error_counter(self, caplog: pytest.LogCaptureFixture) -> None:
         handler = MetricsCallbackHandler()
         run_id = uuid4()
+        labels = {"tool_name": "failing_tool", "status": "error", "source": "agent", "client": "agent"}
 
-        before = _sample(
-            "sre_assistant_tool_calls_total",
-            {"tool_name": "failing_tool", "status": "error"},
-        )
+        before = _sample("sre_assistant_tool_calls_total", labels)
 
-        handler.on_tool_start(
-            serialized={"name": "failing_tool"},
-            input_str="query",
-            run_id=run_id,
-        )
-        handler.on_tool_error(error=RuntimeError("boom"), run_id=run_id)
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            handler.on_tool_start(
+                serialized={"name": "failing_tool"},
+                input_str="query",
+                run_id=run_id,
+            )
+            handler.on_tool_error(error=ToolException("upstream said no"), run_id=run_id)
 
-        after = _sample(
-            "sre_assistant_tool_calls_total",
-            {"tool_name": "failing_tool", "status": "error"},
-        )
+        after = _sample("sre_assistant_tool_calls_total", labels)
         assert after is not None
         assert after - (before or 0.0) == 1.0
+        [record] = tool_call_records(caplog)
+        parsed = fields(record)
+        assert parsed["outcome"] == "error"
+        assert parsed["error_class"] == "ToolException"
+        assert parsed["args"] == "input='query'"
+
+    def test_unexpected_tool_error_is_internal(self, caplog: pytest.LogCaptureFixture) -> None:
+        handler = MetricsCallbackHandler()
+        run_id = uuid4()
+        labels = {"tool_name": "crashing_tool", "status": "internal", "source": "agent", "client": "agent"}
+        before = _sample("sre_assistant_tool_calls_total", labels)
+
+        with caplog.at_level(logging.INFO, logger=TOOL_CALL_LOGGER):
+            handler.on_tool_start(serialized={"name": "crashing_tool"}, input_str="", run_id=run_id)
+            handler.on_tool_error(error=RuntimeError("boom"), run_id=run_id)
+
+        assert (_sample("sre_assistant_tool_calls_total", labels) or 0.0) - (before or 0.0) == 1.0
+        [record] = tool_call_records(caplog)
+        assert record.levelno == logging.ERROR
+        assert fields(record)["outcome"] == "internal"
 
     def test_tool_end_without_start_is_safe(self) -> None:
         """on_tool_end with unknown run_id should not raise."""

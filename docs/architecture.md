@@ -277,7 +277,45 @@ inherit the root level of WARNING: their per-request INFO lines stay hidden, the
 `fastmcp` has its Rich handler removed and propagates to the root handler, so its lines use the same format. A filter
 on that handler drops FastMCP's "Error calling tool" and "Error validating tool" tracebacks when the exception is a
 `ToolException`, a pydantic `ValidationError` or a `ToolError` wrapping one; unexpected exceptions keep their
-traceback.
+traceback. FastMCP logs a raised `ToolError` at the error's own level, with no traceback, so the registry raises
+expected tool errors (bad arguments, a tool's own failure) at DEBUG: the `tool_call` line below is their one record.
+
+### Tool call log line
+
+Every tool call writes exactly one line on the `src.observability.tool_calls` logger, from
+`src/observability/tool_calls.py:observe_tool_call`, which records the tool metrics in the same call:
+
+```
+tool_call tool=loki_query_logs source=mcp client=unknown outcome=success duration_ms=184 result_chars=5120 args="limit=50 query='{job=\"nginx\"}'"
+tool_call tool=prometheus_range_query source=agent client=agent outcome=error duration_ms=12 result_chars=0 args="end='now' query='up' start='bad'" error_class=ToolException error="Invalid range query parameters: …"
+```
+
+- **`source`**: `mcp` for a call on `/mcp`, `agent` for the chat agent's own calls (the SDK tool server and the
+  LangGraph callback both use it).
+- **`client`**: who called. `agent` on the agent path. On `/mcp` it comes from `request.state.mcp_client`: `unknown`
+  when no access check has set it, `in-process` when the call has no HTTP request (a test or an in-process client).
+  Client values are fixed labels, never a raw identity.
+- **`outcome`**: `success`, `error` (the tool's own failure, a `ToolException`), `invalid_args` (argument validation or
+  an unknown argument name), `unknown_tool`, `timeout` (an `httpx.TimeoutException`) or `internal` (anything else).
+  `internal` logs at ERROR with the traceback; every other outcome logs at INFO.
+- **`args`**: the arguments, keys sorted, strings in single quotes, numbers and booleans bare, lists and objects as their
+  type name (`list`, `dict`). Control characters become spaces, each value is cut to 80 characters and the whole summary
+  to 400. Inside the quotes `"` and `\` are escaped, so `| logfmt` in Loki parses the line.
+- **`error_class`** and **`error`** appear only on a failure: the class of the exception that decided the outcome (the
+  wrapped cause where FastMCP wraps one) and its message, cut to 200 characters.
+- The tool's result is never logged, only its length (`result_chars`, 0 on a failure).
+
+On `/mcp`, `ToolCallObserver` (a FastMCP `Middleware` in `src/api/mcp_server.py`) times each `tools/call`, sums the text
+of the result and classifies an exception before re-raising it, so the client still gets the same error. The SDK tool
+server's handler (`src/agent/mcp_tools.py`) and the LangGraph callback (`src/observability/callbacks.py`) write the
+same line with `source=agent client=agent`.
+
+**Limit:** on the SDK path the `mcp` library behind `create_sdk_mcp_server` validates arguments against the tool's
+`inputSchema` before the handler runs. A call with an out-of-range value, a wrong type or an unknown argument name is
+refused there and writes no line. `/mcp` validates inside the tool, so its `invalid_args` calls are all logged.
+
+Metric labels stay bounded: `tool_name` is `unknown` for an `unknown_tool` call (the name the client sent appears only
+in the log line), and `client` holds only fixed values.
 
 ### Metrics
 
@@ -286,8 +324,9 @@ traceback.
 | `sre_assistant_request_duration_seconds`   | Histogram | `endpoint`                                             |
 | `sre_assistant_requests_total`             | Counter   | `endpoint`, `status`                                   |
 | `sre_assistant_requests_in_progress`       | Gauge     | `endpoint`                                             |
-| `sre_assistant_tool_call_duration_seconds` | Histogram | `tool_name`                                            |
-| `sre_assistant_tool_calls_total`           | Counter   | `tool_name`, `status`                                  |
+| `sre_assistant_tool_call_duration_seconds` | Histogram | `tool_name`, `source` (mcp/agent)                      |
+| `sre_assistant_tool_calls_total`           | Counter   | `tool_name`, `status` (the call's outcome), `source`, `client` |
+| `sre_assistant_tool_result_chars`          | Histogram | `tool_name`, `source` (successful calls only)          |
 | `sre_assistant_llm_calls_total`            | Counter   | `status`                                               |
 | `sre_assistant_llm_token_usage`            | Counter   | `type` (prompt/completion)                             |
 | `sre_assistant_llm_estimated_cost_dollars` | Counter   | —                                                      |
@@ -312,16 +351,18 @@ traceback.
 Three layers:
 
 1. **Metric definitions** (`src/observability/metrics.py`) — module-level `prometheus_client` singletons.
-   Twenty-two metrics are created once at import time and shared across the process. The twenty-third,
+   Twenty-three metrics are created once at import time and shared across the process. The twenty-fourth,
    `sre_assistant_claude_credentials_healthy`, is registered by the lifespan only on the anthropic path, because an
    unlabelled gauge exports 0 from the moment it exists and would read as "login needs renewing" where no login is
    in use. Histogram buckets are tuned for expected latencies:
-   request duration `[0.5s–60s]`, tool duration `[0.1s–15s]`.
+   request duration `[0.5s–60s]`, tool duration `[0.1s–15s]`, tool result size `[500–512k]` characters.
 
 2. **LangChain callback handler** (`src/observability/callbacks.py`) — `MetricsCallbackHandler(BaseCallbackHandler)`
    transparently captures tool calls and LLM usage inside LangGraph's execution loop. A fresh instance is created per
-   request (request-scoped `_start_times` dict) but writes to the shared module-level metric singletons. Key design
-   choices:
+   request (request-scoped `_start_times` dict) but writes to the shared module-level metric singletons. Each finished
+   tool call goes through `observe_tool_call`, so the LangGraph path writes the same log line and metrics as the SDK
+   tool server and `/mcp`. On the SDK path, `src/observability/sdk_metrics.py` records only LLM calls, tokens and cost;
+   the SDK tool server's handler measures each tool call itself. Key design choices:
    - **No tool code changes** — the handler hooks into LangGraph's callback system, so all 23 current tools (and any
      future tools) are automatically instrumented
    - **Works inside the agent loop** — LangGraph may call multiple tools in sequence before returning; the callback sees

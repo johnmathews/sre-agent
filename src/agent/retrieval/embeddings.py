@@ -46,6 +46,58 @@ def _split_by_headings(text: str, separators: tuple[str, ...]) -> list[str]:
     return [current] if current.strip() else []
 
 
+def _is_heading_only(section: str) -> bool:
+    """True when every non-blank line of the section is a markdown heading."""
+    lines = [line for line in section.splitlines() if line.strip()]
+    return bool(lines) and all(line.startswith("#") for line in lines)
+
+
+def _fold_heading_only(sections: list[str]) -> list[str]:
+    """Fold sections that hold only headings into the section that follows.
+
+    A bare heading embeds as a near-empty chunk that wastes a search slot, so its text
+    becomes a prefix of the next section. A heading-only section at the end of a file has
+    no next section, so it is appended to the previous one. A file whose only section is
+    heading-only is kept as is.
+    """
+    folded: list[str] = []
+    pending = ""
+    for section in sections:
+        if _is_heading_only(section):
+            pending += section.rstrip("\n") + "\n\n"
+            continue
+        folded.append(pending + section)
+        pending = ""
+    if pending:
+        tail = pending.rstrip("\n") + "\n"
+        if folded:
+            folded[-1] = folded[-1].rstrip("\n") + "\n\n" + tail
+        else:
+            folded.append(tail)
+    return folded
+
+
+def _leading_heading(chunk: str) -> str:
+    """Return the most specific heading of a chunk: the last in its leading heading block.
+
+    Folding can put several headings (`# Title`, `## Section`) ahead of the body. Falls back
+    to the first heading anywhere in the chunk when it does not start with one.
+    """
+    leading: list[str] = []
+    for line in chunk.splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith("#"):
+            break
+        leading.append(line)
+    if leading:
+        return leading[-1].lstrip("#").strip()
+    for line in chunk.splitlines():
+        if line.startswith("#"):
+            return line.lstrip("#").strip()
+    return ""
+
+
 def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     """Split text into overlapping chunks, respecting paragraph boundaries."""
     paragraphs = text.split("\n\n")
@@ -103,18 +155,16 @@ def _load_markdown_dir(directory: Path) -> list[Document]:
                 break
 
         # Split by headings first, then chunk large sections
-        sections = _split_by_headings(text, HEADING_SEPARATORS)
+        sections = _fold_heading_only(_split_by_headings(text, HEADING_SEPARATORS))
 
         for section in sections:
             sub_chunks = _chunk_text(section, CHUNK_SIZE, CHUNK_OVERLAP) if len(section) > CHUNK_SIZE else [section]
+            # A heading followed by one oversized paragraph (a wide table) chunks to a bare heading.
+            sub_chunks = _fold_heading_only(sub_chunks)
 
             for i, chunk in enumerate(sub_chunks):
                 # Extract section heading from chunk
-                section_heading = ""
-                for line in chunk.splitlines():
-                    if line.startswith("#"):
-                        section_heading = line.lstrip("#").strip()
-                        break
+                section_heading = _leading_heading(chunk)
 
                 documents.append(
                     Document(

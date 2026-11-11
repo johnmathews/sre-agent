@@ -87,38 +87,74 @@ Search for available Prometheus metric names matching a substring.
 
 Query Prometheus for the current value of a metric (instant query).
 
-- **Input:** `query` (PromQL string), `time` (optional RFC3339/Unix timestamp)
+- **Input:** `query` (PromQL string), `time` (optional; same forms as the range query's `start`, defaults to now)
 - **Example questions:** "What is the current CPU usage on jellyfin?", "How many VMs are running?"
-- **Returns:** Formatted metric values with labels
+- **Returns:** Formatted metric values with labels. At most 50 series print, with "showing 50 of M series" above
+  them. cadvisor's `container_label_*` labels (Compose metadata) are hidden unless the query names one, and one note
+  says how many were hidden.
 - **Safeguard:** If the query uses `max_over_time` and returns negative values (or wraps `max_over_time` in `abs()`), a
   warning is appended to the output explaining that `min_over_time` + `abs()` should be used instead for peak magnitude
   of negative metrics (e.g. download bytes/sec)
+- **Container-status series:** `container_state`, `container_health` and the other container-status exporter metrics
+  carry `hostname="infra"` (the exporter's host); the container's host is in `exported_hostname`. The description
+  says so and points to `container_status`.
+- **Baseline enrichment:** when the memory store is configured, stored baselines for the returned metrics are
+  appended. A failure there logs a WARNING and the result returns without them.
 
 ### prometheus_range_query
 
 Query Prometheus for metric values over a time range.
 
-- **Input:** `query` (PromQL), `start`, `end` (timestamps), `step` (duration)
+- **Input:**
+  - `query` (PromQL).
+  - `start` (default `1h`) and `end` (default `now`): `now`, a duration before now (`24h`, `-24h`, `now-24h`,
+    compound `1h30m`), RFC3339, or Unix seconds. The tool resolves them and sends Unix seconds to Prometheus.
+  - `step` (optional): a duration (`15s`, `5m`, `1h30m`) or seconds, at most `1d`. Omitted, the tool picks
+    `max(15s, range/250)` rounded up to 15s, 1m, 5m, 15m, 1h, 6h or 1d, so a series has at most 250 points.
+- **Limits:** the range may span up to 90 days (Prometheus retention). An explicit step must keep the range under
+  11,000 points; the error names the smallest step that fits. Every validation error lists the accepted forms.
 - **Example questions:** "How has CPU changed over the last hour?", "Show memory usage for the past day"
-- **Returns:** Time series data with sample counts and per-series summary statistics (min, max, avg)
+- **Returns:** Time series data with sample counts and per-series summary statistics (min, max, avg). Sample times
+  print as `YYYY-MM-DD HH:MM:SSZ`. The series cap and `container_label_*` hiding match the instant query.
 
 ## Grafana Alerting (always enabled)
 
 ### grafana_get_alerts
 
-Fetch active alerts from Grafana's alerting system.
+Fetch current alerts from Grafana's alerting system.
 
-- **Input:** `state` (optional: "active", "suppressed", "unprocessed")
+- **Input:** `state` (optional: "active", "suppressed", "unprocessed", or "firing" as an alias for "active"). Any
+  other value is refused with the accepted list, on every call path.
 - **Example questions:** "What alerts are firing?", "Are there any active alerts?"
-- **Returns:** Alert name, severity, state, labels, annotations, start time
+- **Returns:** Alert name, severity, state, labels, annotations, start time. Labels starting with `__` (Grafana
+  internals such as `__alert_rule_uid__`) are left out.
+- **How it queries:** `GET /api/alertmanager/grafana/api/v2/alerts/groups` with no parameters, then filters by state
+  in the tool. The endpoint's `filter` parameter takes label matchers, not states, so `filter=active` returned
+  "HTTP 400 bad matcher format".
+- **Incident history:** when the memory store is on, past incidents for the listed alert names are appended. A failed
+  lookup logs a WARNING and the alerts still print.
 
 ### grafana_get_alert_rules
 
-Fetch alert rule definitions from Grafana.
+List Grafana alert rules with their current evaluation state and health.
 
-- **Input:** none
-- **Example questions:** "What alerts are configured?", "What conditions trigger the high CPU alert?"
-- **Returns:** Rule name, UID, folder, group, severity, summary
+- **Input:** all optional: `state` ("firing", "pending", "inactive", "recovering"), `health` ("ok", "error",
+  "nodata"), `name_contains` (case-insensitive substring of the rule name, at most 100 characters). Invalid values are
+  refused with the accepted list.
+- **Example questions:** "Which alert rules are firing or pending?", "Are any alert rules failing to evaluate?",
+  "What alerts are configured?"
+- **Returns:**
+  - The rule count by state and by health, over all alert rules.
+  - "Showing N of M alert rules", where N match the filters.
+  - Firing, pending, recovering and unhealthy rules in full: folder, group, severity, UID, last evaluation in UTC
+    ("never" before the first one), `lastError` cut to 200 characters, summary, and up to 5 active alert instances
+    with their labels (`__`-prefixed labels left out).
+  - Inactive rules with health ok on one line each.
+  - A field Grafana leaves out prints "not reported by Grafana" instead of failing, and such a rule prints in full.
+    States and health are compared in lower case, and the ruler names `Alerting` and `Normal` read as `firing` and
+    `inactive`. Recording rules are left out and counted.
+- **How it queries:** `GET /api/prometheus/grafana/api/v1/rules` (the Prometheus-compatible rules API), which carries
+  state and health. The provisioning API, still used by the weekly report, has neither.
 
 ## Grafana Dashboards (always enabled)
 
@@ -129,7 +165,8 @@ Fetch a Grafana dashboard by UID or name, optionally extracting a single panel.
 - **Input:** `dashboard` (string — UID or name), `panel` (optional string — panel title, case-insensitive partial match)
 - **Example questions:** "What panels does the Home Server dashboard have?", "What query does the CPU panel use?", "Show me the thresholds on the disk usage panel", "Why isn't the hostname filter working on this panel?"
 - **Returns:** Full dashboard summary (panels, template vars, datasources, annotations, links) or single panel details (queries, thresholds, units, overrides, transformations)
-- **Name lookup:** When `dashboard` contains spaces or doesn't look like a UID, the tool searches by name first via `/api/search`, then fetches the top result. If a UID-style string returns 404, it falls back to search.
+- **Name lookup:** When `dashboard` contains spaces or doesn't look like a UID, the tool searches by name first via `/api/search`, then fetches the top result. If a UID-style string returns 404, it falls back to search. Every UID, including one
+  taken from a search result, is percent-encoded in the request path, so it cannot reach another API path.
 
 ### grafana_search_dashboards
 
@@ -145,10 +182,15 @@ Search for Grafana dashboards by name.
 
 Query Loki for log lines using LogQL.
 
-- **Input:** `query` (LogQL string), `start` (relative like "1h" or ISO timestamp, default "1h"), `end` (relative or ISO,
-  default "now"), `limit` (int, default 100, max 1000), `direction` ("forward" or "backward", default "backward")
+- **Input:** `query` (LogQL string), `start` (default "1h") and `end` (default "now"): `now`, a duration back from now
+  (`1h`, `-1h`, `now-1h`, `1h30m`), an ISO 8601 timestamp or Unix epoch seconds; `limit` (int, default 100, max 1000),
+  `direction` ("forward" or "backward", default "backward")
 - **Example questions:** "Show me recent logs from traefik", "What errors occurred on the media VM in the last 6 hours?"
-- **Returns:** Formatted log lines with timestamps, stream labels, and log text
+- **Returns:** Each stream's labels once as a `# hostname=..., service_name=...` header, then `[YYYY-MM-DD HH:MM:SSZ] text`
+  lines (each line cut at 500 characters). Output stops at `limit` lines or 60,000 characters and then says
+  `showing N of M lines`.
+- **Note:** An empty result names the window and says a valid selector can be quiet: widen `start`, or check values with
+  `loki_list_label_values`. It does not blame the selector.
 
 ### loki_metric_query
 
@@ -167,12 +209,12 @@ Run a LogQL metric query against Loki to count, rate, or aggregate logs. Returns
 
 List available values for a Loki label.
 
-- **Input:** `label` (string, e.g. "hostname", "service_name"), `query` (optional LogQL stream selector to scope results),
+- **Input:** `label` (a Loki label name, `^[A-Za-z_][A-Za-z0-9_]*$`, e.g. "hostname", "service_name"; anything else is rejected before a request is sent), `query` (optional LogQL stream selector to scope results),
   `start` (default `"6h"`, Loki's own default), `end` (default `"now"`); both take the same forms as `loki_query_logs`
   and reach Loki as nanosecond `start`/`end`
 - **Example questions:** "What services are running on the infra VM?", "What hostnames send logs?"
 - **Returns:** Sorted list of values for the given label, headed with the range, e.g. `Found 31 values for label
-  'container' in the last 6h:`
+  'container' in the last 6h:`. At most 200 values print, with `showing 200 of M`.
 - **Note:** Only values with log lines in the range are listed. A quiet container is absent from the default 6h, so
   widen `start` (e.g. `7d`) before concluding something ships no logs.
 
@@ -183,7 +225,23 @@ Search for significant log events around a reference time for change correlation
 - **Input:** `reference_time` (ISO timestamp or "now"), `window_minutes` (int, default 30), `hostname` (optional filter),
   `service_name` (optional filter)
 - **Example questions:** "What changed before this alert fired?", "Show me what happened around 2pm on the infra VM"
-- **Returns:** Chronological timeline of error/warn/fatal events and container lifecycle events, grouped by service
+- **Returns:** A header (UTC window, filters, counts, warnings), then a chronological timeline (`[YYYY-MM-DD HH:MM:SSZ]`,
+  oldest first) and a summary by service. Three queries run concurrently:
+  - **Error and warning lines:** `detected_level=~"error|err|fatal|critical|crit|warn|warning"` (the shared
+    `ERROR_LEVELS` and `WARN_LEVELS`), newest 200 first (`direction=backward`). The `docker-events` stream is left out.
+  - **Line count:** an instant query `sum(count_over_time(<error selector>[<window>s]))` at the reference time gives
+    the total M. When the 200-line cap cuts the result the header says `showing newest N of M error/warn lines`. If
+    the count fails the header leaves out M and gives the reason. A failed count does not mark the timeline
+    incomplete.
+  - **Container lifecycle events:** the newest 100 matching lines of the `{service_name="docker-events"}` stream
+    (`docker events` JSON). Only `Type=container` with action `start`, `stop`, `restart`, `die`, `kill`, `oom` or
+    `health_status: unhealthy` counts, shown as e.g. `die exitCode=137` or `kill signal=15`. Ordinary log lines that
+    contain "started" are not events. With `service_name`, an event counts when the container name or its Compose
+    service equals it. A returned line that is not docker events JSON is counted in the header.
+- **Failures:** if one query fails the header says `WARNING: <which> query failed: <reason>; the timeline is
+  incomplete`. If both fail the tool returns an error.
+- **Quoting:** `hostname` and `service_name` are LogQL-quoted (`promql_string`), so a quote or backslash cannot change
+  the query.
 
 ## Proxmox VE (enabled when `PROXMOX_URL` is set)
 
@@ -191,7 +249,7 @@ Search for significant log events around a reference time for change correlation
 
 List all VMs and containers on the Proxmox node.
 
-- **Input:** `guest_type` (optional: "qemu" or "lxc")
+- **Input:** `guest_type` (optional, enum `"qemu"` or `"lxc"`; anything else is rejected)
 - **Example questions:** "What VMs are running?", "List all containers", "How many guests are there?"
 - **Returns:** VMID, name, type (VM/CT), status, vCPUs, RAM, CPU usage. For stopped guests, shows config
   allocations with a note that no host resources are consumed (CPU% is omitted since it's zero)
@@ -200,8 +258,8 @@ List all VMs and containers on the Proxmox node.
 
 Get the full configuration of a specific VM or container.
 
-- **Input:** `name` (string, preferred — auto-resolves VMID and type) OR `vmid` (integer) + `guest_type` (string, default
-  "qemu")
+- **Input:** `name` (string, preferred — auto-resolves VMID and type) OR `vmid` (integer) + `guest_type` (enum `"qemu"` or `"lxc"`, default
+  `"qemu"`)
 - **Example questions:** "What disks does VM 100 have?", "Show the config for jellyfin"
 - **Returns:** Grouped config: compute (CPU/RAM), disks, network, boot/OS settings
 - **Name lookup:** When `name` is provided (e.g. "immich"), the tool lists all guests to resolve the correct VMID and
@@ -213,7 +271,8 @@ Get overall status of the Proxmox host node.
 
 - **Input:** none
 - **Example questions:** "How is the Proxmox server doing?", "What PVE version is running?"
-- **Returns:** CPU%, memory, root FS, load average, uptime, PVE version, kernel
+- **Returns:** CPU (node_exporter 5-minute average from Prometheus, or `unavailable: <reason>`), CPU (PVE instant
+  sample), memory, root FS, load average, uptime, PVE version, kernel
 
 ### proxmox_list_tasks
 
@@ -321,9 +380,10 @@ Get storage usage for all PBS datastores.
 
 List backup groups in a PBS datastore.
 
-- **Input:** `datastore` (optional, defaults to `PBS_DEFAULT_DATASTORE`)
+- **Input:** `datastore` (optional, defaults to `PBS_DEFAULT_DATASTORE`; letters, digits, `.`, `_`, `-`, up to 64
+  characters, not starting with `.` or `-`; anything else is refused before any request)
 - **Example questions:** "When was VM 100 last backed up?", "Which VMs are being backed up?"
-- **Returns:** Backup type (VM/CT/Host), ID, snapshot count, last backup time, owner
+- **Returns:** Backup type (VM/CT/Host), ID, snapshot count, last backup as a UTC date with its age (`2026-11-10 22:13:20Z (1d ago)`), owner
 
 ### pbs_list_tasks
 
@@ -331,7 +391,7 @@ List recent PBS tasks (backup jobs, GC, verification).
 
 - **Input:** `limit` (int, default 20), `errors_only` (bool, default false)
 - **Example questions:** "Did last night's backup succeed?", "Any failed backup tasks?"
-- **Returns:** Task type, status, user, start/end time, worker ID
+- **Returns:** Task type, status, user, start/end time (UTC, `YYYY-MM-DD HH:MM:SSZ`), worker ID
 
 ## Agent Memory (enabled when `MEMORY_DB_PATH` is set)
 

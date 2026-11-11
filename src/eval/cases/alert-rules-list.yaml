@@ -10,26 +10,39 @@ expected_tools:
   must_not_call: []
 
 mocks:
-  - url: "http://grafana.test:3000/api/v1/provisioning/alert-rules"
+  - url: "http://grafana.test:3000/api/prometheus/grafana/api/v1/rules"
     method: GET
     status: 200
     body:
-      - uid: "rule-1"
-        title: "HighCPU"
-        condition: "C"
-        folderUID: "infra"
-        ruleGroup: "infrastructure"
-        for: "10m"
-        labels:
-          severity: "warning"
-      - uid: "rule-2"
-        title: "LowDiskSpace"
-        condition: "B"
-        folderUID: "infra"
-        ruleGroup: "infrastructure"
-        for: "5m"
-        labels:
-          severity: "critical"
+      status: "success"
+      data:
+        groups:
+          - name: "infrastructure"
+            file: "infra"
+            folderUid: "infra"
+            rules:
+              - uid: "rule-1"
+                name: "HighCPU"
+                type: "alerting"
+                state: "inactive"
+                health: "ok"
+                lastError: ""
+                lastEvaluation: "2024-01-15T10:00:00Z"
+                labels:
+                  severity: "warning"
+                annotations: {}
+                alerts: []
+              - uid: "rule-2"
+                name: "LowDiskSpace"
+                type: "alerting"
+                state: "inactive"
+                health: "ok"
+                lastError: ""
+                lastEvaluation: "2024-01-15T10:00:00Z"
+                labels:
+                  severity: "critical"
+                annotations: {}
+                alerts: []
   - url: "http://grafana.test:3000/api/alertmanager/grafana/api/v2/alerts/groups"
     method: GET
     status: 200

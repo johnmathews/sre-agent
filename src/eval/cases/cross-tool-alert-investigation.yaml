@@ -73,10 +73,34 @@ mocks:
         - "node_memory_MemAvailable_bytes"
         - "node_memory_MemTotal_bytes"
         - "node_memory_MemFree_bytes"
-  - url: "http://grafana.test:3000/api/v1/provisioning/alert-rules"
+  - url: "http://grafana.test:3000/api/prometheus/grafana/api/v1/rules"
     method: GET
     status: 200
-    body: []
+    body:
+      status: "success"
+      data:
+        groups:
+          - name: "memory"
+            file: "Infrastructure"
+            folderUid: "infra"
+            rules:
+              - uid: "rule-mem"
+                name: "HighMemory"
+                type: "alerting"
+                state: "firing"
+                health: "ok"
+                lastError: ""
+                lastEvaluation: "2024-01-15T10:00:00Z"
+                labels:
+                  severity: "warning"
+                annotations:
+                  summary: "Memory usage above 85% on infra for 15 minutes"
+                alerts:
+                  - labels:
+                      alertname: "HighMemory"
+                      hostname: "infra"
+                    state: "Alerting"
+                    activeAt: "2024-01-15T09:45:00Z"
 
 rubric: |
   The answer should:

@@ -1,16 +1,24 @@
 """Integration tests for Prometheus tools with mocked HTTP responses."""
 
+import logging
+import time
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 
 from src.agent.tools.prometheus import (
+    PrometheusResponse,
+    _get_baseline_enrichment,
     prometheus_instant_query,
     prometheus_range_query,
     prometheus_search_metrics,
 )
+
+_EMPTY_MATRIX = {"status": "success", "data": {"resultType": "matrix", "result": []}}
+_EMPTY_VECTOR = {"status": "success", "data": {"resultType": "vector", "result": []}}
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +100,23 @@ class TestPrometheusInstantQuery:
         assert route.called
         assert route.calls.last.request.url.params["time"] == "1700000000"
 
+    @respx.mock
+    async def test_relative_time_sent_as_unix_seconds(self) -> None:
+        route = respx.get("http://prometheus.test:9090/api/v1/query").mock(
+            return_value=httpx.Response(200, json=_EMPTY_VECTOR)
+        )
+
+        before = time.time()
+        await prometheus_instant_query.ainvoke({"query": "up", "time": "now-1h"})
+        sent = float(route.calls.last.request.url.params["time"])
+        assert before - 3600 - 1 <= sent <= time.time() - 3600 + 1
+
+    @respx.mock
+    async def test_invalid_time_lists_accepted_forms(self) -> None:
+        result = await prometheus_instant_query.ainvoke({"query": "up", "time": "yesterday"})
+        assert "now-24h" in result
+        assert "RFC3339" in result
+
 
 @pytest.mark.integration
 class TestPrometheusRangeQuery:
@@ -151,7 +176,39 @@ class TestPrometheusRangeQuery:
         assert params["query"] == "up"
         assert params["start"] == "1700000000"
         assert params["end"] == "1700003600"
-        assert params["step"] == "5m"
+        assert params["step"] == "300"
+
+    @respx.mock
+    async def test_range_accepts_now_minus_24h(self) -> None:
+        """start="24h" used to fail with 'Invalid isoformat string' (F10); Unix seconds go upstream."""
+        route = respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
+            return_value=httpx.Response(200, json=_EMPTY_MATRIX)
+        )
+
+        result = await prometheus_range_query.ainvoke({"query": "up", "start": "now-24h"})
+        assert "no results" in result.lower()
+        params = route.calls.last.request.url.params
+        start, end = float(params["start"]), float(params["end"])
+        assert end - start == 86400
+        assert abs(end - time.time()) < 5
+        assert params["step"] == "900"
+
+    @respx.mock
+    async def test_defaults_query_the_last_hour(self) -> None:
+        route = respx.get("http://prometheus.test:9090/api/v1/query_range").mock(
+            return_value=httpx.Response(200, json=_EMPTY_MATRIX)
+        )
+
+        await prometheus_range_query.ainvoke({"query": "up"})
+        params = route.calls.last.request.url.params
+        assert float(params["end"]) - float(params["start"]) == 3600
+        assert params["step"] == "15"
+
+    @respx.mock
+    async def test_range_91_days_rejected(self) -> None:
+        result = await prometheus_range_query.ainvoke({"query": "up", "start": "91d"})
+        assert "Invalid range query parameters" in result
+        assert "90 days" in result
 
     async def test_invalid_range_end_before_start(self) -> None:
         result = await prometheus_range_query.ainvoke(
@@ -174,6 +231,7 @@ class TestPrometheusRangeQuery:
             }
         )
         assert "oo many data points" in result
+        assert "step='55s'" in result
 
 
 @pytest.mark.integration
@@ -254,7 +312,8 @@ class TestPrometheusSearchMetrics:
         await prometheus_search_metrics.ainvoke({"search_term": "foo.bar+baz"})
         match_param = route.calls.last.request.url.params["match[]"]
         # Dots and plus should be escaped for regex safety
-        assert r"foo\.bar\+baz" in match_param
+        # Regex-escaped, then PromQL-quoted: each backslash is doubled inside the string literal.
+        assert match_param == r'{__name__=~".*foo\\.bar\\+baz.*"}'
 
     @respx.mock
     async def test_connect_error_raises_tool_exception(self) -> None:
@@ -290,3 +349,54 @@ class TestPrometheusSearchMetrics:
         assert "Found 2 metrics" in result
         assert "node_cpu_seconds_total" in result
         assert "up" in result
+
+
+@pytest.mark.integration
+async def test_baseline_enrichment_failure_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A broken memory store must be visible in the logs, not silently dropped."""
+    data: PrometheusResponse = {
+        "status": "success",
+        "data": {"resultType": "vector", "result": [{"metric": {"__name__": "up"}, "value": [1, "1"]}]},
+    }
+    with (
+        patch("src.memory.context.enrich_with_baseline_context", side_effect=RuntimeError("db locked")),
+        caplog.at_level(logging.WARNING, logger="src.agent.tools.prometheus"),
+    ):
+        assert _get_baseline_enrichment(data) == ""
+    [record] = [r for r in caplog.records if r.name == "src.agent.tools.prometheus"]
+    assert record.levelno == logging.WARNING
+    assert "db locked" in record.getMessage()
+
+
+def _promql_literal_is_valid(selector: str) -> bool:
+    """True when the quoted literal in ``selector`` escapes only a backslash or a double quote."""
+    body = selector[selector.index('"') + 1 : selector.rindex('"')]
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            if i + 1 >= len(body) or body[i + 1] not in '\\"':
+                return False
+            i += 2
+            continue
+        if body[i] == '"':
+            return False
+        i += 1
+    return True
+
+
+@pytest.mark.integration
+class TestPrometheusSearchQuoting:
+    """Prometheus rejects Python's re.escape output as unknown escapes (HTTP 400, seen live 2026-11-11)."""
+
+    @pytest.mark.parametrize("term", ["process_start.time", "tube-archivist", 'x".*|{', "a b"])
+    @respx.mock
+    async def test_search_term_sent_as_valid_promql_literal(self, term: str) -> None:
+        values = respx.get("http://prometheus.test:9090/api/v1/label/__name__/values").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": []})
+        )
+        respx.get("http://prometheus.test:9090/api/v1/metadata").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": {}})
+        )
+        await prometheus_search_metrics.ainvoke({"search_term": term})
+        selector = values.calls.last.request.url.params["match[]"]
+        assert _promql_literal_is_valid(selector), selector

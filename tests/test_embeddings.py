@@ -104,6 +104,41 @@ class TestLoadRunbooks:
         assert "b.md" in sources
 
 
+def _is_heading_only(text: str) -> bool:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return bool(lines) and all(ln.startswith("#") for ln in lines)
+
+
+class TestHeadingFolding:
+    def test_heading_merged_into_following_section(self, tmp_path: Path) -> None:
+        (tmp_path / "a.md").write_text("# Title\n\n## Parent\n\n### Child\n\nChild body text.\n")
+        docs = _load_markdown_dir(tmp_path)
+        assert not any(_is_heading_only(d.page_content) for d in docs)
+        merged = [d for d in docs if "Child body text." in d.page_content]
+        assert len(merged) == 1
+        assert "## Parent" in merged[0].page_content
+        assert "### Child" in merged[0].page_content
+
+    def test_trailing_heading_folds_into_previous_section(self, tmp_path: Path) -> None:
+        (tmp_path / "a.md").write_text("# Title\n\nIntro.\n\n## Last\n")
+        docs = _load_markdown_dir(tmp_path)
+        assert len(docs) == 1
+        assert "Intro." in docs[0].page_content
+        assert "## Last" in docs[0].page_content
+
+    def test_heading_only_file_is_kept(self, tmp_path: Path) -> None:
+        (tmp_path / "a.md").write_text("# Only a title\n")
+        docs = _load_markdown_dir(tmp_path)
+        assert [d.page_content.strip() for d in docs] == ["# Only a title"]
+
+    def test_no_heading_only_chunks_in_repo_runbooks(self) -> None:
+        # Loads and splits the real runbooks/ directory; no embeddings or store.
+        docs = load_runbooks()
+        assert docs
+        bare = [d.page_content for d in docs if _is_heading_only(d.page_content)]
+        assert bare == []
+
+
 class TestLoadMarkdownDir:
     def test_includes_source_dir_metadata(self, tmp_path: Path) -> None:
         subdir = tmp_path / "documentation"
@@ -240,3 +275,17 @@ class TestLoadAllDocuments:
         assert "a.md" in sources
         assert "b.md" in sources
         assert "dns.md" in sources  # runbooks still present
+
+
+class TestOversizedSectionHeading:
+    def test_heading_before_oversized_paragraph_is_not_a_bare_chunk(self, tmp_path: Path) -> None:
+        wide = "| col |\n" + "| row row row row row row row row |\n" * 40
+        (tmp_path / "a.md").write_text(f"# T\n\n## Wide\n\n{wide}\n## After\n\nBody.\n")
+        docs = _load_markdown_dir(tmp_path)
+        assert not any(_is_heading_only(d.page_content) for d in docs)
+        assert any("## Wide" in d.page_content and "| col |" in d.page_content for d in docs)
+
+    def test_section_metadata_is_most_specific_heading(self, tmp_path: Path) -> None:
+        (tmp_path / "a.md").write_text("# Title\n\n## Parent\n\n### Child\n\nBody.\n")
+        docs = _load_markdown_dir(tmp_path)
+        assert [d.metadata["section"] for d in docs] == ["Child"]

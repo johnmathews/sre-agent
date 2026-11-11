@@ -54,10 +54,17 @@ mocks:
     body:
       status: "success"
       data: ["jellyfin", "media", "infra"]
-  - url: "http://loki.test:3100/ready"
+  # loki_correlate_changes counts the error/warn lines in the window with an instant query
+  - url: "http://loki.test:3100/loki/api/v1/query"
     method: GET
     status: 200
-    body: "ready"
+    body:
+      status: "success"
+      data:
+        resultType: "vector"
+        result:
+          - metric: {}
+            value: [1705312800, "2"]
   - url: "http://prometheus.test:9090/api/v1/query"
     method: GET
     status: 200

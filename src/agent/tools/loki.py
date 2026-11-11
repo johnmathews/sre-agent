@@ -7,17 +7,20 @@ Provides three tools:
 """
 
 import asyncio
+import json
 import logging
 import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import TypedDict
+from urllib.parse import quote
 
 import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import ERROR_LEVELS, WARN_LEVELS, format_utc, parse_time, promql_string, regex_literal
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,14 @@ DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 MAX_LOG_LINE_LENGTH = 500
+MAX_LOG_OUTPUT_CHARS = 60_000
+MAX_LABEL_VALUES = 200
+_LABEL_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+CORRELATE_ERROR_LIMIT = 200
+"""Newest error/warn lines ``loki_correlate_changes`` reads."""
+CORRELATE_LIFECYCLE_LIMIT = 100
+"""Newest docker-events lines ``loki_correlate_changes`` reads."""
 
 # --- Input schemas ---
 
@@ -48,14 +59,14 @@ class LokiQueryInput(BaseModel):
     start: str = Field(
         default="1h",
         description=(
-            "Start of the time range. Either a relative duration like '1h', '30m', '2d' "
+            "Start of the time range. Either a relative duration like '1h', '30m', '2d' or 'now-1h' "
             "(meaning that long ago from now), or an ISO 8601 timestamp. Default: '1h'."
         ),
     )
     end: str = Field(
         default="now",
         description=(
-            "End of the time range. Either 'now', a relative duration like '5m' "
+            "End of the time range. Either 'now', a relative duration like '5m' or 'now-5m' "
             "(meaning that long ago from now), or an ISO 8601 timestamp. Default: 'now'."
         ),
     )
@@ -81,6 +92,7 @@ class LokiLabelValuesInput(BaseModel):
         ),
         min_length=1,
         max_length=200,
+        pattern=_LABEL_NAME_PATTERN,
     )
     query: str | None = Field(
         default=None,
@@ -93,13 +105,14 @@ class LokiLabelValuesInput(BaseModel):
         default="6h",
         description=(
             "Start of the time range. Only values with log lines in the range are listed. Either a relative "
-            "duration like '6h', '7d' (meaning that long ago from now), or an ISO 8601 timestamp. Default: '6h'."
+            "duration like '6h', '7d' or 'now-6h' (meaning that long ago from now), or an ISO 8601 timestamp. "
+            "Default: '6h'."
         ),
     )
     end: str = Field(
         default="now",
         description=(
-            "End of the time range. Either 'now', a relative duration like '1d' "
+            "End of the time range. Either 'now', a relative duration like '1d' or 'now-1d' "
             "(meaning that long ago from now), or an ISO 8601 timestamp. Default: 'now'."
         ),
     )
@@ -230,43 +243,15 @@ class LokiLabelValuesResponse(TypedDict, total=False):
 
 # --- Time parsing helpers ---
 
-_RELATIVE_TIME_PATTERN = re.compile(r"^(\d+)([smhdw])$")
-
-_DURATION_MULTIPLIERS: dict[str, int] = {
-    "s": 1,
-    "m": 60,
-    "h": 3600,
-    "d": 86400,
-    "w": 604800,
-}
+_RELATIVE_TIME_PATTERN = re.compile(r"^(?:now)?-?(?:\d+(?:ms|[smhdw]))+$", re.IGNORECASE)
 
 
 def _parse_relative_time(time_str: str) -> datetime:
-    """Parse a relative time string like '1h', '30m', '2d' into a datetime.
+    """Parse 'now', a duration ('1h', '-1h', 'now-1h'), an ISO 8601 timestamp or epoch seconds into a UTC datetime.
 
-    Returns a datetime that many seconds in the past from now.
-    Also handles 'now' and ISO 8601 timestamps.
+    Delegates to ``_common.parse_time``; durations count back from now.
     """
-    if time_str == "now":
-        return datetime.now(tz=UTC)
-
-    match = _RELATIVE_TIME_PATTERN.match(time_str)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2)
-        seconds = amount * _DURATION_MULTIPLIERS[unit]
-        return datetime.now(tz=UTC) - timedelta(seconds=seconds)
-
-    # Try ISO 8601
-    try:
-        dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        return dt.replace(tzinfo=UTC if dt.tzinfo is None else dt.tzinfo)
-    except ValueError:
-        raise ValueError(
-            f"Cannot parse time '{time_str}'. "
-            "Use a relative duration (e.g. '1h', '30m', '2d'), 'now', "
-            "or an ISO 8601 timestamp (e.g. '2024-06-15T14:00:00Z')."
-        ) from None
+    return parse_time(time_str, datetime.now(tz=UTC))
 
 
 def _datetime_to_nanoseconds(dt: datetime) -> str:
@@ -293,70 +278,101 @@ async def _query_loki(
 # --- Formatting helpers ---
 
 
-def _format_log_lines(data: LokiQueryResponse, limit: int) -> str:
-    """Format Loki query results into readable log lines for the LLM."""
+def _stream_header(stream_labels: dict[str, str]) -> str:
+    """Name a stream once: the well-known labels in a fixed order, else the whole label set."""
+    parts = [
+        f"{key}={stream_labels[key]}"
+        for key in ("hostname", "service_name", "container", "detected_level")
+        if key in stream_labels
+    ]
+    return ", ".join(parts) if parts else str(stream_labels)
+
+
+def _format_log_lines(data: LokiQueryResponse, limit: int, window: str = "") -> str:
+    """Format Loki query results into readable log lines for the LLM.
+
+    Each stream's labels print once as a ``# ...`` header, followed by ``[YYYY-MM-DD HH:MM:SSZ] text`` lines.
+    Output stops at ``limit`` lines or ``MAX_LOG_OUTPUT_CHARS`` characters, whichever comes first, and says
+    "showing N of M lines".
+    ``window`` names the queried range (e.g. 'in the last 1h') for the empty-result text.
+    """
     status = data.get("status", "unknown")
     if status != "success":
         return f"Loki query failed with status: {status}"
 
-    query_data = data.get("data", {})
-    results = list(query_data.get("result", []))
+    results = [stream for stream in data.get("data", {}).get("result", []) if stream.get("values")]
+    where = f" {window}" if window else ""
 
     if not results:
         return (
-            "No log lines found. Check that the stream selector labels are correct. "
-            "Use loki_list_label_values to discover available hostnames, services, and containers."
+            f"No log lines found{where}. A valid selector can still be quiet: it matches no log lines in this range. "
+            "Widen start (e.g. '24h' or '7d'), or check the label values with loki_list_label_values."
         )
 
-    lines: list[str] = []
-    total_count = 0
-
+    total_available = sum(len(stream.get("values", [])) for stream in results)
+    body: list[str] = []
+    shown = 0
+    used = 0
+    budget_hit = False
     for stream in results:
-        stream_labels = stream.get("stream", {})
-        label_parts: list[str] = []
-        for key in ("hostname", "service_name", "container", "detected_level"):
-            if key in stream_labels:
-                label_parts.append(f"{key}={stream_labels[key]}")
-        label_str = ", ".join(label_parts) if label_parts else str(stream_labels)
-
-        values = stream.get("values", [])
-        for entry in values:
-            if total_count >= limit:
-                break
-            if len(entry) >= 2:
-                ts_ns = entry[0]
-                log_text = entry[1]
-                try:
-                    ts_seconds = int(ts_ns) / 1_000_000_000
-                    dt_str = datetime.fromtimestamp(ts_seconds, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, OSError):
-                    dt_str = ts_ns
-
-                # Truncate very long log lines
-                if len(log_text) > MAX_LOG_LINE_LENGTH:
-                    log_text = log_text[:MAX_LOG_LINE_LENGTH] + "..."
-
-                lines.append(f"[{dt_str}] ({label_str}) {log_text}")
-                total_count += 1
-
-        if total_count >= limit:
+        if shown >= limit or budget_hit:
             break
+        stream_lines: list[str] = []
+        header = "# " + _stream_header(stream.get("stream", {}))
+        for entry in stream.get("values", []):
+            if shown >= limit:
+                break
+            if len(entry) < 2:
+                continue
+            ts_ns, log_text = entry[0], entry[1]
+            try:
+                dt_str = datetime.fromtimestamp(int(ts_ns) / 1_000_000_000, tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+            except (ValueError, OSError):
+                dt_str = ts_ns
+            if len(log_text) > MAX_LOG_LINE_LENGTH:
+                log_text = log_text[:MAX_LOG_LINE_LENGTH] + "..."
+            line = f"[{dt_str}] {log_text}"
+            cost = len(line) + 1 + (0 if stream_lines else len(header) + 1)
+            if used + cost > MAX_LOG_OUTPUT_CHARS - 400:  # leave room for the summary line
+                budget_hit = True
+                break
+            if not stream_lines:
+                stream_lines.append(header)
+            stream_lines.append(line)
+            used += cost
+            shown += 1
+        body.extend(stream_lines)
 
-    header = f"Found {total_count} log lines"
-    if total_count >= limit:
-        header += f" (limited to {limit} — use a narrower time range or filter for more specific results)"
-    header += ":"
+    if budget_hit:
+        summary = (
+            f"Found {total_available} log lines, showing {shown} of {total_available} lines "
+            f"(output capped at {MAX_LOG_OUTPUT_CHARS} characters; use a narrower time range or filter):"
+        )
+    elif shown >= limit and total_available > shown:
+        summary = (
+            f"Found {shown} log lines, showing {shown} of {total_available} lines "
+            f"(limited to {limit} — use a narrower time range or filter for more specific results):"
+        )
+    elif shown >= limit:
+        summary = (
+            f"Found {shown} log lines "
+            f"(limited to {limit} — use a narrower time range or filter for more specific results):"
+        )
+    else:
+        summary = f"Found {shown} log lines:"
 
-    return header + "\n" + "\n".join(lines)
+    return summary + "\n" + "\n".join(body)
 
 
 def _describe_window(start: str, end: str) -> str:
     """Name a start/end pair as given, e.g. 'in the last 6h' or 'from 7d ago to 1d ago'."""
     if end == "now" and _RELATIVE_TIME_PATTERN.match(start):
-        return f"in the last {start}"
+        return f"in the last {start.removeprefix('now-').removeprefix('-')}"
 
     def point(value: str) -> str:
-        return f"{value} ago" if _RELATIVE_TIME_PATTERN.match(value) else value
+        if value != "now" and _RELATIVE_TIME_PATTERN.match(value):
+            return f"{value.removeprefix('now-').removeprefix('-')} ago"
+        return value
 
     return f"from {point(start)} to {point(end)}"
 
@@ -372,8 +388,15 @@ def _format_label_values(values: list[str], label: str, window: str) -> str:
         )
 
     sorted_values = sorted(values)
-    lines = [f"Found {len(sorted_values)} values for label '{label}' {window}:"]
-    for val in sorted_values:
+    shown_values = sorted_values[:MAX_LABEL_VALUES]
+    if len(sorted_values) > MAX_LABEL_VALUES:
+        lines = [
+            f"Found {len(sorted_values)} values for label '{label}' {window}, "
+            f"showing {MAX_LABEL_VALUES} of {len(sorted_values)} (narrow with the query selector):"
+        ]
+    else:
+        lines = [f"Found {len(sorted_values)} values for label '{label}' {window}:"]
+    for val in shown_values:
         lines.append(f"  {val}")
 
     return "\n".join(lines)
@@ -530,10 +553,163 @@ class _TimelineEvent:
         self.message = message
 
 
-_LIFECYCLE_KEYWORDS = re.compile(
-    r"\b(started|stopped|exited|restarting|signal|killed|oom|healthcheck|unhealthy|crashed)\b",
-    re.IGNORECASE,
-)
+_ERROR_AND_WARN_LEVELS = f"{ERROR_LEVELS}|{WARN_LEVELS}"
+_DOCKER_EVENTS_SERVICE = "docker-events"
+# Container actions that count as lifecycle events; exec_* (health checks, docker exec), create and
+# "health_status: healthy" are noise.
+_LIFECYCLE_ACTIONS = ("start", "stop", "restart", "die", "kill", "oom", "health_status: unhealthy")
+_LIFECYCLE_DETAIL_ATTRIBUTES = ("exitCode", "signal")
+_COMPOSE_SERVICE_ATTRIBUTE = "com.docker.compose.service"
+
+
+class _LokiResponseError(Exception):
+    """Loki answered, but not with a usable result. The message is safe to show."""
+
+
+# Failures a correlation query can hit at runtime. ValueError covers a body that is not JSON.
+_EXPECTED_QUERY_ERRORS: tuple[type[Exception], ...] = (httpx.HTTPError, ValueError, _LokiResponseError)
+
+
+def _correlation_error_selector(hostname: str | None, service_name: str | None) -> str:
+    """The stream selector for error and warning lines, with the filters LogQL-quoted.
+
+    Without a ``service_name`` filter the ``docker-events`` stream is left out: its JSON lines are
+    lifecycle events, read by their own query.
+    """
+    matchers: list[str] = []
+    if hostname:
+        matchers.append(f"hostname={promql_string(hostname)}")
+    if service_name:
+        matchers.append(f"service_name={promql_string(service_name)}")
+    matchers.append(f"detected_level=~{promql_string(_ERROR_AND_WARN_LEVELS)}")
+    if not service_name:
+        matchers.append(f"service_name!={promql_string(_DOCKER_EVENTS_SERVICE)}")
+    return "{" + ", ".join(matchers) + "}"
+
+
+def _docker_events_query(hostname: str | None, service_name: str | None) -> str:
+    """The LogQL query for container lifecycle events on the ``docker-events`` stream.
+
+    The stream holds ``docker events`` JSON. Loki extracts only ``Type`` and ``Action`` and keeps
+    container events with a lifecycle action, so health-check exec events do not use up the line
+    limit. A ``service_name`` filter becomes a line filter here;
+    :func:`_lifecycle_events_from_response` checks it exactly.
+    """
+    matchers = [f"service_name={promql_string(_DOCKER_EVENTS_SERVICE)}"]
+    if hostname:
+        matchers.append(f"hostname={promql_string(hostname)}")
+    query = "{" + ", ".join(matchers) + "}"
+    if service_name:
+        query += f" |= {promql_string(service_name)}"
+    actions = "|".join(regex_literal(action) for action in _LIFECYCLE_ACTIONS)
+    return query + f' | json Type="Type", Action="Action" | Type="container" | Action=~{promql_string(actions)}'
+
+
+def _parse_docker_event(text: str) -> tuple[object, str, dict[str, object], datetime | None] | None:
+    """``(Type, Action, Actor.Attributes, time)`` from one ``docker events`` JSON line, or None if it is not one.
+
+    The time comes from ``timeNano``, else ``time`` (seconds), else None.
+    """
+    try:
+        event: object = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(event, dict):
+        return None
+    actor: object = event.get("Actor")  # pyright: ignore[reportUnknownMemberType]
+    action: object = event.get("Action")  # pyright: ignore[reportUnknownMemberType]
+    attributes: object = actor.get("Attributes") if isinstance(actor, dict) else None  # pyright: ignore[reportUnknownMemberType]
+    if not isinstance(attributes, dict) or not isinstance(action, str):
+        return None
+    nano: object = event.get("timeNano")  # pyright: ignore[reportUnknownMemberType]
+    seconds: object = event.get("time")  # pyright: ignore[reportUnknownMemberType]
+    at: datetime | None = None
+    try:
+        if isinstance(nano, int) and not isinstance(nano, bool):
+            at = datetime.fromtimestamp(nano / 1_000_000_000, tz=UTC)
+        elif isinstance(seconds, int | float) and not isinstance(seconds, bool):
+            at = datetime.fromtimestamp(seconds, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        at = None  # out of range: the caller falls back to Loki's timestamp
+    event_type: object = event.get("Type")  # pyright: ignore[reportUnknownMemberType]
+    return event_type, action, {str(k): v for k, v in attributes.items()}, at  # pyright: ignore[reportUnknownVariableType]
+
+
+def _lifecycle_events_from_response(
+    data: LokiQueryResponse, service_name: str | None
+) -> tuple[list[_TimelineEvent], int]:
+    """Container lifecycle events from a ``docker-events`` query response, and how many lines were not events JSON.
+
+    Keeps ``Type=container`` events whose action is in ``_LIFECYCLE_ACTIONS``, e.g. ``die exitCode=137`` or
+    ``kill signal=15``. With ``service_name``, keeps events whose container name or Compose service equals it.
+    """
+    events: list[_TimelineEvent] = []
+    unparseable = 0
+    for stream in data.get("data", {}).get("result", []):
+        hostname = stream.get("stream", {}).get("hostname", "unknown")
+        for entry in stream.get("values", []):
+            parsed = _parse_docker_event(entry[1]) if len(entry) >= 2 else None
+            if parsed is None:
+                unparseable += 1
+                continue
+            event_type, action, attributes, at = parsed
+            if event_type != "container" or action not in _LIFECYCLE_ACTIONS:
+                continue
+            name = str(attributes.get("name", "unknown"))
+            if service_name and service_name not in (name, attributes.get(_COMPOSE_SERVICE_ATTRIBUTE)):
+                continue
+            if at is None:
+                try:
+                    at = datetime.fromtimestamp(int(entry[0]) / 1_000_000_000, tz=UTC)
+                except (ValueError, OSError):
+                    unparseable += 1
+                    continue
+            message = action
+            for key in _LIFECYCLE_DETAIL_ATTRIBUTES:
+                if key in attributes:
+                    message += f" {key}={attributes[key]}"
+            events.append(
+                _TimelineEvent(timestamp=at, service=name, hostname=hostname, level="lifecycle", message=message)
+            )
+    return events, unparseable
+
+
+def _parse_line_count(data: LokiMetricResponse) -> int:
+    """The single value of a ``sum(count_over_time(...))`` instant query; an empty result is 0."""
+    status = data.get("status")
+    if status != "success":
+        raise _LokiResponseError(f"Loki returned status {status!r}")
+    try:
+        result: list[LokiVectorSample] = data["data"]["result"]  # type: ignore[assignment]
+        return int(float(result[0]["value"][1])) if result else 0
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise _LokiResponseError("Loki returned an unexpected count response") from None
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """A one-line reason for a failed Loki query."""
+    if isinstance(exc, httpx.ConnectError):
+        return f"Cannot connect to Loki at {get_settings().loki_url}: {exc}"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"Loki query timed out after {DEFAULT_TIMEOUT_SECONDS}s: {exc}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = " ".join(exc.response.text.split())[:300]
+        return f"HTTP {exc.response.status_code} - {body}"
+    if isinstance(exc, httpx.HTTPError):
+        return f"request failed ({type(exc).__name__}: {exc})"
+    if isinstance(exc, _LokiResponseError):
+        return str(exc)
+    if isinstance(exc, ValueError):
+        return "Loki returned a body that is not JSON"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _ensure_success(data: LokiQueryResponse) -> LokiQueryResponse:
+    """Return a streams response, or raise ``_LokiResponseError`` when Loki says it failed."""
+    status = data.get("status")
+    if status != "success":
+        raise _LokiResponseError(f"Loki returned status {status!r}")
+    return data
 
 
 def _extract_events_from_response(
@@ -601,7 +777,7 @@ def _build_timeline(events: list[_TimelineEvent]) -> str:
     # Chronological timeline
     lines.append("## Chronological Timeline")
     for event in events:
-        dt_str = event.timestamp.strftime("%H:%M:%S")
+        dt_str = format_utc(event.timestamp)
         lines.append(f"  [{dt_str}] [{event.level.upper():5s}] {event.hostname}/{event.service}: {event.message}")
 
     lines.append("")
@@ -627,13 +803,14 @@ TOOL_DESCRIPTION_QUERY_LOGS = HOMELAB_CONTEXT + (
     "This homelab's Loki setup:\n"
     "- Logs are collected by Alloy from Docker containers and some systemd units\n"
     "- Available labels: `hostname`, `service_name`, `container`, `detected_level`\n"
-    "- `detected_level` values: debug, info, notice, warn, error, fatal, verbose, trace\n"
+    "- `detected_level` values: debug, info, notice, verbose, trace; warnings are "
+    + f"`{WARN_LEVELS}` and errors `{ERROR_LEVELS}`; services spell levels differently, so match the whole set\n"
     "- `hostname` identifies the VM/LXC (e.g. 'media', 'infra', 'jellyfin')\n"
     "- `service_name` identifies the Docker service or systemd unit\n\n"
     "LogQL examples:\n"
     '- `{hostname="media"}` — all logs from the media VM\n'
     '- `{service_name="traefik"}` — all traefik logs\n'
-    '- `{detected_level=~"error|warn"}` — all errors and warnings\n'
+    + f'- `{{detected_level=~"{ERROR_LEVELS}|{WARN_LEVELS}"}}` — all errors and warnings\n'
     '- `{hostname="infra"} |= "connection refused"` — search for a string\n'
     '- `{service_name="jellyfin"} |~ "(?i)transcode"` — case-insensitive regex\n\n'
     "IMPORTANT: Always include at least one label filter in the stream selector. "
@@ -674,13 +851,16 @@ TOOL_DESCRIPTION_METRIC_QUERY = HOMELAB_CONTEXT + (
 )
 
 TOOL_DESCRIPTION_CORRELATE = HOMELAB_CONTEXT + (
-    "Search for significant log events around a reference time. Use this for change "
+    "Search for significant log events in the window_minutes before a reference time. Use this for change "
     "correlation — 'what changed before this alert fired?' or 'what happened around 2pm?'.\n\n"
-    "This tool automatically searches for:\n"
-    "- Error/warn/fatal log entries in the time window\n"
-    "- Container lifecycle events (started, stopped, exited, restarting, crashed, OOM)\n\n"
-    "Returns a chronological timeline grouped by service. Use hostname and service_name "
-    "filters to narrow results when investigating a specific host or service."
+    "This tool searches for:\n"
+    f"- Error and warning lines (detected_level {ERROR_LEVELS}|{WARN_LEVELS}), the newest "
+    f"{CORRELATE_ERROR_LIMIT}. The header gives the total, e.g. 'showing newest 200 of 775'.\n"
+    "- Container lifecycle events from Docker's event stream: start, stop, restart, die (with exit code), "
+    "kill (with signal), oom and unhealthy.\n\n"
+    "Returns a chronological UTC timeline and a summary by service. A header line starting 'WARNING:' means "
+    "one of the two searches failed and the timeline is incomplete. Use hostname and service_name filters to "
+    "narrow results when investigating a specific host or service."
 )
 
 
@@ -732,7 +912,7 @@ async def loki_query_logs(
     except httpx.HTTPStatusError as e:
         raise ToolException(f"Loki API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
 
-    return _format_log_lines(data, limit)
+    return _format_log_lines(data, limit, _describe_window(start, end))
 
 
 loki_query_logs.description = TOOL_DESCRIPTION_QUERY_LOGS
@@ -809,6 +989,11 @@ async def loki_list_label_values(
     end: str = "now",
 ) -> str:
     """List available values for a Loki label. See TOOL_DESCRIPTION_LABEL_VALUES."""
+    if not re.fullmatch(_LABEL_NAME_PATTERN, label):
+        raise ToolException(
+            f"Invalid label name {label!r}: use letters, digits and underscores only, not starting with a digit "
+            "(e.g. 'hostname', 'service_name')."
+        )
     try:
         start_dt = _parse_relative_time(start)
         end_dt = _parse_relative_time(end)
@@ -830,7 +1015,7 @@ async def loki_list_label_values(
 
     logger.info("Loki label values: label=%s, query=%s (start=%s, end=%s)", label, query, start, end)
     try:
-        raw_data = await _query_loki(f"/loki/api/v1/label/{label}/values", params)
+        raw_data = await _query_loki(f"/loki/api/v1/label/{quote(label, safe='')}/values", params)
         data: LokiLabelValuesResponse = raw_data  # type: ignore[assignment]
     except httpx.ConnectError as e:
         raise ToolException(f"Cannot connect to Loki at {get_settings().loki_url}: {e}") from e
@@ -855,7 +1040,6 @@ async def loki_correlate_changes(
     service_name: str | None = None,
 ) -> str:
     """Correlate log events around a reference time. See TOOL_DESCRIPTION_CORRELATE."""
-    # Parse reference time
     try:
         ref_dt = _parse_relative_time(reference_time)
     except ValueError as e:
@@ -865,112 +1049,116 @@ async def loki_correlate_changes(
     start_ns = _datetime_to_nanoseconds(window_start)
     end_ns = _datetime_to_nanoseconds(ref_dt)
 
-    # Build label selector — Loki requires at least one label matcher in
-    # the stream selector.  When no filters are provided, match all hosts.
-    label_filters: list[str] = []
-    if hostname:
-        label_filters.append(f'hostname="{hostname}"')
-    if service_name:
-        label_filters.append(f'service_name="{service_name}"')
-
-    base_selector = "{" + ", ".join(label_filters) + "}" if label_filters else '{hostname=~".+"}'
-
-    all_events: list[_TimelineEvent] = []
-
-    # Query 1: Error/warn/fatal logs
-    error_selector = base_selector.rstrip("}")
-    if label_filters:
-        error_selector += ', detected_level=~"error|warn|fatal"}'
-    else:
-        error_selector = '{detected_level=~"error|warn|fatal"}'
+    error_selector = _correlation_error_selector(hostname, service_name)
+    lifecycle_query = _docker_events_query(hostname, service_name)
+    count_query = f"sum(count_over_time({error_selector}[{window_minutes * 60}s]))"
 
     logger.info(
-        "Loki correlation: ref=%s, window=%dm, selector=%s",
+        "Loki correlation: ref=%s, window=%dm, errors=%s, lifecycle=%s",
         reference_time,
         window_minutes,
         error_selector,
+        lifecycle_query,
     )
 
-    # Query 2: Container lifecycle events (search all levels for lifecycle keywords)
-    lifecycle_filter = ' |~ "(?i)(started|stopped|exited|restarting|signal|killed|oom|healthcheck|unhealthy|crashed)"'
-    lifecycle_query = base_selector + lifecycle_filter
+    def newest_lines(query: str, limit: int) -> dict[str, str]:
+        return {"query": query, "start": start_ns, "end": end_ns, "limit": str(limit), "direction": "backward"}
 
-    # Fire both queries concurrently — they are independent.
-    error_task = asyncio.create_task(
-        _query_loki(
-            "/loki/api/v1/query_range",
-            {
-                "query": error_selector,
-                "start": start_ns,
-                "end": end_ns,
-                "limit": "200",
-                "direction": "forward",
-            },
-        )
+    # Independent queries, run concurrently. Each may fail on its own; unexpected errors still raise.
+    results = await asyncio.gather(
+        _query_loki("/loki/api/v1/query_range", newest_lines(error_selector, CORRELATE_ERROR_LIMIT)),
+        _query_loki("/loki/api/v1/query_range", newest_lines(lifecycle_query, CORRELATE_LIFECYCLE_LIMIT)),
+        _query_loki("/loki/api/v1/query", {"query": count_query, "time": end_ns}),
+        return_exceptions=True,
     )
-    lifecycle_task = asyncio.create_task(
-        _query_loki(
-            "/loki/api/v1/query_range",
-            {
-                "query": lifecycle_query,
-                "start": start_ns,
-                "end": end_ns,
-                "limit": "100",
-                "direction": "forward",
-            },
-        )
-    )
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, _EXPECTED_QUERY_ERRORS):
+            raise result
+    error_raw, lifecycle_raw, count_raw = results
 
-    # Collect results — each query may fail independently.
+    error_events: list[_TimelineEvent] = []
+    error_failure: BaseException | None = None
     try:
-        error_data = await error_task
-        error_response: LokiQueryResponse = error_data  # type: ignore[assignment]
-        all_events.extend(_extract_events_from_response(error_response))
-    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
-        logger.warning("Loki correlation error query failed: %s", e)
+        if isinstance(error_raw, BaseException):
+            raise error_raw
+        error_response = _ensure_success(error_raw)  # type: ignore[arg-type]
+        error_events = _extract_events_from_response(error_response, max_events=CORRELATE_ERROR_LIMIT)
+    except _EXPECTED_QUERY_ERRORS as e:
+        error_failure = e
 
+    lifecycle_events: list[_TimelineEvent] = []
+    lifecycle_failure: BaseException | None = None
+    lifecycle_lines = 0
+    unparseable = 0
     try:
-        lifecycle_data = await lifecycle_task
-        lifecycle_response: LokiQueryResponse = lifecycle_data  # type: ignore[assignment]
-        lifecycle_events = _extract_events_from_response(lifecycle_response)
+        if isinstance(lifecycle_raw, BaseException):
+            raise lifecycle_raw
+        lifecycle_response = _ensure_success(lifecycle_raw)  # type: ignore[arg-type]
+        lifecycle_lines = sum(len(s.get("values", [])) for s in lifecycle_response.get("data", {}).get("result", []))
+        lifecycle_events, unparseable = _lifecycle_events_from_response(lifecycle_response, service_name)
+    except _EXPECTED_QUERY_ERRORS as e:
+        lifecycle_failure = e
 
-        # Only add lifecycle events that aren't already in error events (deduplicate)
-        existing_keys = {(e.timestamp, e.service, e.message) for e in all_events}
-        for evt in lifecycle_events:
-            key = (evt.timestamp, evt.service, evt.message)
-            if key not in existing_keys:
-                all_events.append(evt)
-                existing_keys.add(key)
-    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
-        logger.warning("Loki correlation lifecycle query failed: %s", e)
+    if error_failure is not None and lifecycle_failure is not None:
+        raise ToolException(
+            "Both correlation queries failed. "
+            + f"error/warn query failed: {_failure_reason(error_failure)}; "
+            + f"lifecycle query failed: {_failure_reason(lifecycle_failure)}"
+        ) from error_failure
 
-    # If both queries failed, raise an error
-    if not all_events and len(all_events) == 0:
-        # Check if we got here because queries failed
-        try:
-            # Test connectivity with a simple query
-            await _query_loki("/ready", {})
-        except httpx.ConnectError as e:
-            raise ToolException(f"Cannot connect to Loki at {get_settings().loki_url}: {e}") from e
-        except httpx.TimeoutException as e:
-            raise ToolException(f"Loki query timed out after {DEFAULT_TIMEOUT_SECONDS}s: {e}") from e
-        except (httpx.HTTPStatusError, Exception):
-            pass  # Loki is reachable but /ready may not exist — that's fine
+    total_errors: int | None = None
+    count_failure = ""
+    try:
+        if isinstance(count_raw, BaseException):
+            raise count_raw
+        total_errors = _parse_line_count(count_raw)  # type: ignore[arg-type]
+    except _EXPECTED_QUERY_ERRORS as e:
+        count_failure = _failure_reason(e)
+        logger.warning("Loki correlation line count failed: %s", count_failure)
 
-    window_info = (
-        f"Time window: {window_start.strftime('%Y-%m-%d %H:%M:%S')} "
-        f"to {ref_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC "
-        f"({window_minutes} minutes)"
-    )
-    filters = []
+    filters: list[str] = []
     if hostname:
         filters.append(f"hostname={hostname}")
     if service_name:
         filters.append(f"service_name={service_name}")
-    filter_info = f"Filters: {', '.join(filters)}" if filters else "Filters: none (all hosts/services)"
+    header = [
+        f"Time window: {format_utc(window_start)} to {format_utc(ref_dt)} ({window_minutes} minutes)",
+        f"Filters: {', '.join(filters)}" if filters else "Filters: none (all hosts/services)",
+    ]
 
-    timeline = _build_timeline(all_events)
-    return f"{window_info}\n{filter_info}\n\n{timeline}"
+    if error_failure is None:
+        shown = len(error_events)
+        if total_errors is None:
+            header.append(
+                f"Error/warn lines: {shown}, newest first (limit {CORRELATE_ERROR_LIMIT}); "
+                + f"the total count failed: {count_failure}"
+            )
+        elif shown < total_errors:
+            header.append(
+                f"Error/warn lines: showing newest {shown} of {total_errors} error/warn lines in the window. "
+                + "Narrow with hostname or service_name, or shorten window_minutes, to see older ones."
+            )
+        else:
+            header.append(f"Error/warn lines: {shown} in the window")
+    else:
+        reason = _failure_reason(error_failure)
+        logger.warning("Loki correlation error/warn query failed: %s", reason)
+        header.append(f"WARNING: error/warn query failed: {reason}; the timeline is incomplete")
+
+    if lifecycle_failure is None:
+        line = f"Container lifecycle events: {len(lifecycle_events)} from docker-events"
+        if lifecycle_lines >= CORRELATE_LIFECYCLE_LIMIT:
+            line += f" (newest {CORRELATE_LIFECYCLE_LIMIT} lines read; older ones not shown)"
+        if unparseable:
+            line += f"; {unparseable} docker-events line(s) were not docker events JSON and were skipped"
+        header.append(line)
+    else:
+        reason = _failure_reason(lifecycle_failure)
+        logger.warning("Loki correlation lifecycle query failed: %s", reason)
+        header.append(f"WARNING: lifecycle query failed: {reason}; the timeline is incomplete")
+
+    timeline = _build_timeline(error_events + lifecycle_events)
+    return "\n".join(header) + "\n\n" + timeline
 
 
 loki_correlate_changes.description = TOOL_DESCRIPTION_CORRELATE

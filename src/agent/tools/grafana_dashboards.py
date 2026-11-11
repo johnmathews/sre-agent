@@ -3,6 +3,7 @@
 import logging
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
@@ -83,8 +84,8 @@ async def _search_dashboards(query: str) -> list[dict[str, Any]]:
 
 
 async def _get_dashboard_by_uid(uid: str) -> dict[str, Any]:
-    """Fetch a dashboard by UID."""
-    result: dict[str, Any] = await _grafana_get_json(f"/api/dashboards/uid/{uid}")
+    """Fetch a dashboard by UID, percent-encoded so it stays one path segment."""
+    result: dict[str, Any] = await _grafana_get_json(f"/api/dashboards/uid/{quote(uid, safe='')}")
     return result
 
 

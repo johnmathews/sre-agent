@@ -1,32 +1,49 @@
 """Tests for the Prometheus tool input validation and result formatting."""
 
+from datetime import UTC, datetime
+
+import pytest
+
 from src.agent.tools.prometheus import (
+    MAX_RANGE_DURATION_SECONDS,
     MAX_SEARCH_RESULTS,
+    TOOL_DESCRIPTION_INSTANT,
     PrometheusData,
     PrometheusMetadataEntry,
     PrometheusResponse,
     PrometheusSeries,
+    _auto_step,
     _check_negative_max_over_time,
     _format_result,
     _format_search_results,
     _parse_duration,
     _parse_timestamp,
-    _validate_range_params,
+    _resolve_range,
 )
+
+NOW = datetime(2026, 11, 11, 12, 0, 0, tzinfo=UTC)
+NOW_TS = NOW.timestamp()
 
 
 class TestParseTimestamp:
     def test_unix_timestamp(self) -> None:
-        assert _parse_timestamp("1700000000") == 1700000000.0
+        assert _parse_timestamp("1700000000", NOW) == 1700000000.0
 
     def test_rfc3339(self) -> None:
-        ts = _parse_timestamp("2024-01-15T10:00:00Z")
-        assert isinstance(ts, float)
-        assert ts > 0
+        assert _parse_timestamp("2024-01-15T10:00:00Z", NOW) == datetime(2024, 1, 15, 10, tzinfo=UTC).timestamp()
 
     def test_rfc3339_with_offset(self) -> None:
-        ts = _parse_timestamp("2024-01-15T10:00:00+01:00")
-        assert isinstance(ts, float)
+        assert _parse_timestamp("2024-01-15T10:00:00+01:00", NOW) == datetime(2024, 1, 15, 9, tzinfo=UTC).timestamp()
+
+    def test_relative_forms_count_back_from_now(self) -> None:
+        assert _parse_timestamp("now", NOW) == NOW_TS
+        assert _parse_timestamp("24h", NOW) == NOW_TS - 86400
+        assert _parse_timestamp("now-24h", NOW) == NOW_TS - 86400
+
+    def test_invalid_names_accepted_forms(self) -> None:
+        with pytest.raises(ValueError, match="now-24h") as exc:
+            _ = _parse_timestamp("yesterday", NOW)
+        assert "RFC3339" in str(exc.value)
 
 
 class TestParseDuration:
@@ -48,27 +65,97 @@ class TestParseDuration:
     def test_numeric_string(self) -> None:
         assert _parse_duration("60") == 60.0
 
+    def test_compound(self) -> None:
+        assert _parse_duration("1h30m") == 5400.0
+
     def test_unparseable(self) -> None:
         assert _parse_duration("abc") is None
 
 
-class TestValidateRangeParams:
+class TestResolveRange:
     def test_valid_params(self) -> None:
-        errors = _validate_range_params("1700000000", "1700003600", "60s")
-        assert errors == []
+        window = _resolve_range("1700000000", "1700003600", "60s", NOW)
+        assert (window.start, window.end, window.step) == (1700000000.0, 1700003600.0, 60.0)
+
+    def test_defaults_are_last_hour(self) -> None:
+        window = _resolve_range("1h", "now", None, NOW)
+        assert (window.start, window.end) == (NOW_TS - 3600, NOW_TS)
+
+    def test_range_accepts_now_minus_24h_relative_forms(self) -> None:
+        for start in ("now-24h", "-24h", "24h"):
+            window = _resolve_range(start, "now", None, NOW)
+            assert window.end - window.start == 86400
 
     def test_end_before_start(self) -> None:
-        errors = _validate_range_params("1700003600", "1700000000", "60s")
-        assert any("end must be after start" in e for e in errors)
+        with pytest.raises(ValueError, match="end must be after start"):
+            _ = _resolve_range("1700003600", "1700000000", "60s", NOW)
 
     def test_range_too_large(self) -> None:
-        errors = _validate_range_params("1700000000", "1703000000", "60s")
-        assert any("too large" in e.lower() for e in errors)
+        with pytest.raises(ValueError, match="too large"):
+            _ = _resolve_range("100d", "now", None, NOW)
 
-    def test_too_many_data_points(self) -> None:
-        # 7 days with 1s step = too many points
-        errors = _validate_range_params("1700000000", "1700604800", "1")
-        assert any("too many data points" in e.lower() for e in errors)
+    def test_range_60_days_allowed(self) -> None:
+        """Retention is 90 days; the old 30-day cap rejected 60-day queries (F10)."""
+        window = _resolve_range("60d", "now", None, NOW)
+        assert window.end - window.start == 60 * 86400
+
+    def test_range_90_days_exactly_allowed(self) -> None:
+        window = _resolve_range("90d", "now", None, NOW)
+        assert window.end - window.start == MAX_RANGE_DURATION_SECONDS
+
+    def test_range_91_days_rejected_with_format_hint(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            _ = _resolve_range("91d", "now", None, NOW)
+        message = str(exc.value)
+        assert "90 days" in message
+        assert "now-24h" in message
+        assert "RFC3339" in message
+
+    def test_invalid_time_lists_accepted_forms(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            _ = _resolve_range("last tuesday", "now", None, NOW)
+        assert "now-24h" in str(exc.value)
+        assert "RFC3339" in str(exc.value)
+
+    def test_invalid_step_lists_accepted_forms(self) -> None:
+        with pytest.raises(ValueError, match="step") as exc:
+            _ = _resolve_range("1h", "now", "fast", NOW)
+        assert "1h30m" in str(exc.value)
+
+    def test_step_too_large(self) -> None:
+        with pytest.raises(ValueError, match="Step too large"):
+            _ = _resolve_range("30d", "now", "2d", NOW)
+
+    def test_auto_step_keeps_under_point_cap(self) -> None:
+        """90 days with no step must fit Prometheus's 11,000-point limit, and stay readable (<= 250 points)."""
+        window = _resolve_range("90d", "now", None, NOW)
+        points = (window.end - window.start) / window.step
+        assert points <= 250
+        assert points <= 11000
+
+    def test_too_many_points_message_suggests_step(self) -> None:
+        # 7 days at 1s = 604,800 points; the smallest step that fits 11,000 points is 55s.
+        with pytest.raises(ValueError, match="oo many data points") as exc:
+            _ = _resolve_range("1700000000", "1700604800", "1", NOW)
+        assert "step='55s'" in str(exc.value)
+        assert 604800 / 55 <= 11000
+
+
+class TestAutoStep:
+    @pytest.mark.parametrize(
+        ("duration", "step"),
+        [
+            (60, 15),  # floor of 15s
+            (3600, 15),  # 1h / 250 = 14.4s
+            (6 * 3600, 300),  # 86.4s rounds up to 5m
+            (86400, 900),  # 345.6s rounds up to 15m
+            (7 * 86400, 3600),  # 2419s rounds up to 1h
+            (30 * 86400, 21600),  # 10368s rounds up to 6h
+            (90 * 86400, 86400),  # 31104s rounds up to 1d
+        ],
+    )
+    def test_ladder(self, duration: float, step: int) -> None:
+        assert _auto_step(duration) == step
 
 
 class TestFormatResult:
@@ -99,7 +186,73 @@ class TestFormatResult:
         data: PrometheusResponse = {"status": "success", "data": result_data}
         output = _format_result(data)
         assert "WARNING" in output
-        assert "first 50" in output
+
+    def test_series_cap_says_n_of_m(self) -> None:
+        series_list: list[PrometheusSeries] = [
+            {"metric": {"hostname": f"host-{i}"}, "value": [1700000000, str(i)]} for i in range(120)
+        ]
+        result_data: PrometheusData = {"resultType": "vector", "result": series_list}
+        data: PrometheusResponse = {"status": "success", "data": result_data}
+        output = _format_result(data)
+        assert "showing 50 of 120 series" in output
+        assert "host-49" in output
+        assert "host-50" not in output
+
+    def test_empty_result_names_90_day_retention(self) -> None:
+        result_data: PrometheusData = {"resultType": "matrix", "result": []}
+        output = _format_result({"status": "success", "data": result_data})
+        assert "90 days" in output
+        assert "100 days" not in output
+
+    def test_matrix_timestamps_include_date_and_zone(self) -> None:
+        """A 30-day query used to print only [14:09:54] for every sample (F31)."""
+        series: PrometheusSeries = {
+            "metric": {"hostname": "media"},
+            "values": [[1700000000, "1"], [1700086400, "2"]],
+        }
+        result_data: PrometheusData = {"resultType": "matrix", "result": [series]}
+        output = _format_result({"status": "success", "data": result_data})
+        assert "[2023-11-14 22:13:20Z] 1" in output
+        assert "[2023-11-15 22:13:20Z] 2" in output
+
+    def test_short_matrix_prints_each_sample_once(self) -> None:
+        """Up to 6 samples print once each; the first-3 and last-3 slices used to overlap."""
+        series: PrometheusSeries = {"metric": {"hostname": "media"}, "values": [[1700000000, "1"], [1700000060, "2"]]}
+        result_data: PrometheusData = {"resultType": "matrix", "result": [series]}
+        output = _format_result({"status": "success", "data": result_data})
+        assert output.count("22:13:20Z] 1") == 1
+        assert output.count("22:14:20Z] 2") == 1
+
+    def test_container_label_hidden_unless_queried(self) -> None:
+        """cadvisor's container_label_* Compose labels cost ~1.4k chars per series (F13)."""
+        series: PrometheusSeries = {
+            "metric": {
+                "__name__": "container_memory_working_set_bytes",
+                "hostname": "media",
+                "name": "jellyfin",
+                "container_label_com_docker_compose_project": "media",
+                "container_label_com_docker_compose_service": "jellyfin",
+            },
+            "value": [1700000000, "123"],
+        }
+        other: PrometheusSeries = {
+            "metric": {"hostname": "media", "name": "sonarr", "container_label_com_docker_compose_project": "media"},
+            "value": [1700000000, "456"],
+        }
+        result_data: PrometheusData = {"resultType": "vector", "result": [series, other]}
+        data: PrometheusResponse = {"status": "success", "data": result_data}
+
+        hidden = _format_result(data, query='container_memory_working_set_bytes{hostname="media"}')
+        assert 'container_label_com_docker_compose_project="' not in hidden
+        assert 'name="jellyfin"' in hidden
+        assert hidden.count("container_label_* labels hidden") == 1
+        assert "2 cadvisor container_label_* labels hidden" in hidden
+
+        shown = _format_result(
+            data, query='container_memory_working_set_bytes{container_label_com_docker_compose_project="media"}'
+        )
+        assert 'container_label_com_docker_compose_service="jellyfin"' in shown
+        assert "labels hidden" not in shown
 
     def test_matrix_result_shows_summary_stats(self) -> None:
         """Matrix results include min/max/avg so the agent sees the full range."""
@@ -265,3 +418,21 @@ class TestFormatSearchResults:
         assert "up (gauge)" in output
         # No trailing colon when help is empty
         assert "up (gauge):" not in output
+
+
+class TestInstantDescription:
+    def test_names_exported_hostname_and_container_status(self) -> None:
+        """Container-status series carry hostname="infra"; a raw hostname="media" query comes back empty (F11)."""
+        assert "exported_hostname" in TOOL_DESCRIPTION_INSTANT
+        assert 'hostname="infra"' in TOOL_DESCRIPTION_INSTANT
+        assert "container_status" in TOOL_DESCRIPTION_INSTANT
+
+
+class TestHugeStep:
+    """A step too large for a float is a validation error, not a raw OverflowError."""
+
+    def test_digits_overflow_is_unparseable(self) -> None:
+        assert _parse_duration("9" * 400) is None
+
+    def test_infinite_duration_is_unparseable(self) -> None:
+        assert _parse_duration("9" * 400 + "s") is None

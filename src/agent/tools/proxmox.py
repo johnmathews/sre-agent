@@ -3,13 +3,15 @@
 import logging
 import ssl
 from datetime import UTC, datetime
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import httpx
 from langchain_core.tools import ToolException, tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
 from src.agent.tools import HOMELAB_CONTEXT
+from src.agent.tools._common import format_bytes, host_key, promql_string
+from src.agent.tools.prometheus import _query_prometheus  # pyright: ignore[reportPrivateUsage]
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -124,15 +126,6 @@ class PveGuestConfig(TypedDict, total=False):
 # --- Formatting helpers ---
 
 
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string."""
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024:
-            return f"{n:.1f} {unit}"
-        n = int(n / 1024)
-    return f"{n:.1f} PiB"
-
-
 def _format_guests(guests: list[PveGuestEntry]) -> str:
     """Format a list of PVE guests into a readable string."""
     if not guests:
@@ -153,7 +146,7 @@ def _format_guests(guests: list[PveGuestEntry]) -> str:
         cpu_pct = guest.get("cpu", 0.0) * 100
 
         type_label = "VM" if gtype == "qemu" else "CT" if gtype == "lxc" else gtype
-        mem_str = _format_bytes(maxmem) if maxmem else "?"
+        mem_str = format_bytes(maxmem) if maxmem else "?"
 
         status_marker = "+" if status == "running" else "-"
         if status == "running":
@@ -170,8 +163,50 @@ def _format_guests(guests: list[PveGuestEntry]) -> str:
     return "\n".join(lines)
 
 
-def _format_node_status(data: dict[str, object]) -> str:
-    """Format PVE node status into a readable string."""
+_GUEST_TYPES = ("qemu", "lxc")
+
+
+def _check_guest_type(guest_type: str | None) -> None:
+    """Raise ToolException unless guest_type is None, 'qemu' or 'lxc'.
+
+    The value goes into a URL path, so it is checked in the body as well as by the schema.
+    """
+    if guest_type is not None and guest_type not in _GUEST_TYPES:
+        raise ToolException(f"Invalid guest_type {guest_type!r}: use 'qemu' (VMs) or 'lxc' (containers).")
+
+
+async def _node_cpu_from_prometheus(node: str) -> str:
+    """Node CPU busy % averaged over 5 minutes from node_exporter, or 'unavailable: <reason>'."""
+    query = f'1 - avg(rate(node_cpu_seconds_total{{hostname={promql_string(host_key(node))}, mode="idle"}}[5m]))'
+    try:
+        response = await _query_prometheus("/api/v1/query", {"query": query})
+    except httpx.HTTPStatusError as e:
+        return f"unavailable: Prometheus HTTP {e.response.status_code}"
+    except httpx.TimeoutException:
+        return "unavailable: Prometheus request timed out"
+    except httpx.HTTPError as e:
+        return f"unavailable: Prometheus unreachable ({type(e).__name__})"
+    except ValueError as e:
+        return f"unavailable: Prometheus returned invalid JSON ({e})"
+    if response.get("status") != "success":
+        return f"unavailable: Prometheus query failed ({response.get('error', 'unknown error')})"
+    results = list(response.get("data", {}).get("result", []))
+    if not results:
+        return "unavailable: no data"
+    try:
+        value = float(results[0]["value"][1])  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "unavailable: unexpected Prometheus result"
+    if value != value:  # NaN
+        return "unavailable: no data"
+    return f"{value * 100:.1f}%"
+
+
+def _format_node_status(data: dict[str, object], node_cpu: str) -> str:
+    """Format PVE node status into a readable string.
+
+    ``node_cpu`` is the node_exporter 5-minute average ("12.3%") or "unavailable: <reason>".
+    """
     cpu = data.get("cpu")
     cpu_pct = f"{float(cpu) * 100:.1f}%" if cpu is not None else "?"  # type: ignore[arg-type]  # pyright: ignore[reportAny]
 
@@ -179,7 +214,7 @@ def _format_node_status(data: dict[str, object]) -> str:
     if isinstance(memory, dict):
         mem_used = int(memory.get("used", 0))  # pyright: ignore[reportAny]
         mem_total = int(memory.get("total", 0))  # pyright: ignore[reportAny]
-        mem_str = f"{_format_bytes(mem_used)} / {_format_bytes(mem_total)}"
+        mem_str = f"{format_bytes(mem_used)} / {format_bytes(mem_total)}"
     else:
         mem_str = "?"
 
@@ -196,13 +231,14 @@ def _format_node_status(data: dict[str, object]) -> str:
     if isinstance(rootfs, dict):
         root_used = int(rootfs.get("used", 0))  # pyright: ignore[reportAny]
         root_total = int(rootfs.get("total", 0))  # pyright: ignore[reportAny]
-        root_str = f"{_format_bytes(root_used)} / {_format_bytes(root_total)}"
+        root_str = f"{format_bytes(root_used)} / {format_bytes(root_total)}"
     else:
         root_str = "?"
 
     lines: list[str] = [
         "Proxmox Node Status:",
-        f"  CPU: {cpu_pct}",
+        f"  CPU (node_exporter 5-min avg): {node_cpu}",
+        f"  CPU (PVE instant sample): {cpu_pct}",
         f"  Memory: {mem_str}",
         f"  Root FS: {root_str}",
         f"  Load average: {load_str}",
@@ -305,7 +341,7 @@ def _format_guest_config(vmid: int, config: dict[str, object]) -> str:
 class ListGuestsInput(BaseModel):
     """Input for listing Proxmox guests."""
 
-    guest_type: str | None = Field(
+    guest_type: Literal["qemu", "lxc"] | None = Field(
         default=None,
         description="Filter by guest type: 'qemu' (VMs) or 'lxc' (containers). Omit to list both.",
     )
@@ -325,7 +361,7 @@ class GetGuestConfigInput(BaseModel):
             "resolves to the correct VMID and guest type. Preferred when you don't know the VMID."
         ),
     )
-    guest_type: str = Field(
+    guest_type: Literal["qemu", "lxc"] = Field(
         default="qemu",
         description="Guest type: 'qemu' for VMs, 'lxc' for containers. Ignored when using name lookup.",
     )
@@ -402,8 +438,9 @@ TOOL_DESCRIPTION_LIST_TASKS = HOMELAB_CONTEXT + (
 
 
 @tool("proxmox_list_guests", args_schema=ListGuestsInput)  # pyright: ignore[reportUnknownParameterType]
-async def proxmox_list_guests(guest_type: str | None = None) -> str:
+async def proxmox_list_guests(guest_type: Literal["qemu", "lxc"] | None = None) -> str:
     """List VMs and containers on the Proxmox node. See TOOL_DESCRIPTION_LIST_GUESTS."""
+    _check_guest_type(guest_type)
     settings = get_settings()
     if not settings.proxmox_url:
         raise ToolException("Proxmox VE is not configured (PROXMOX_URL is empty).")
@@ -412,7 +449,7 @@ async def proxmox_list_guests(guest_type: str | None = None) -> str:
     logger.info("Listing Proxmox guests (type=%s, node=%s)", guest_type, node)
 
     guests: list[PveGuestEntry] = []
-    types_to_fetch = [guest_type] if guest_type in ("qemu", "lxc") else ["qemu", "lxc"]
+    types_to_fetch = [guest_type] if guest_type else ["qemu", "lxc"]
 
     try:
         for gtype in types_to_fetch:
@@ -435,7 +472,7 @@ proxmox_list_guests.description = TOOL_DESCRIPTION_LIST_GUESTS
 proxmox_list_guests.handle_tool_error = True
 
 
-async def _resolve_guest_by_name(name: str) -> tuple[int, str]:
+async def _resolve_guest_by_name(name: str) -> tuple[int, Literal["qemu", "lxc"]]:
     """Resolve a guest name to (vmid, guest_type) by listing all guests.
 
     Raises ToolException if the name is not found or matches multiple guests.
@@ -444,9 +481,10 @@ async def _resolve_guest_by_name(name: str) -> tuple[int, str]:
     node = settings.proxmox_node
     name_lower = name.lower()
 
-    matches: list[tuple[int, str, str]] = []  # (vmid, guest_type, actual_name)
+    matches: list[tuple[int, Literal["qemu", "lxc"], str]] = []  # (vmid, guest_type, actual_name)
 
-    for gtype in ("qemu", "lxc"):
+    gtypes: tuple[Literal["qemu", "lxc"], ...] = ("qemu", "lxc")
+    for gtype in gtypes:
         data = await _pve_get(f"/nodes/{node}/{gtype}")
         raw_list: list[dict[str, object]] = data.get("data", [])  # type: ignore[assignment]  # pyright: ignore[reportAssignmentType]
         for entry in raw_list:
@@ -473,9 +511,10 @@ async def _resolve_guest_by_name(name: str) -> tuple[int, str]:
 async def proxmox_get_guest_config(
     vmid: int | None = None,
     name: str | None = None,
-    guest_type: str = "qemu",
+    guest_type: Literal["qemu", "lxc"] = "qemu",
 ) -> str:
     """Get configuration for a specific VM or container. See TOOL_DESCRIPTION_GET_CONFIG."""
+    _check_guest_type(guest_type)
     settings = get_settings()
     if not settings.proxmox_url:
         raise ToolException("Proxmox VE is not configured (PROXMOX_URL is empty).")
@@ -541,7 +580,7 @@ async def proxmox_node_status() -> str:
     except httpx.HTTPStatusError as e:
         raise ToolException(f"Proxmox API error: HTTP {e.response.status_code} - {e.response.text[:500]}") from e
 
-    return _format_node_status(status)
+    return _format_node_status(status, await _node_cpu_from_prometheus(node))
 
 
 proxmox_node_status.description = TOOL_DESCRIPTION_NODE_STATUS

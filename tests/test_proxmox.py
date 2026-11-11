@@ -5,32 +5,12 @@ import ssl
 from src.agent.tools.proxmox import (
     PveGuestEntry,
     PveTaskEntry,
-    _format_bytes,
     _format_guest_config,
     _format_guests,
     _format_node_status,
     _format_tasks,
     _pve_ssl_verify,
 )
-
-
-class TestFormatBytes:
-    def test_bytes(self) -> None:
-        assert _format_bytes(512) == "512.0 B"
-
-    def test_kibibytes(self) -> None:
-        assert _format_bytes(2048) == "2.0 KiB"
-
-    def test_mebibytes(self) -> None:
-        assert _format_bytes(1048576) == "1.0 MiB"
-
-    def test_gibibytes(self) -> None:
-        result = _format_bytes(4 * 1024 * 1024 * 1024)
-        assert "GiB" in result
-
-    def test_tebibytes(self) -> None:
-        result = _format_bytes(2 * 1024**4)
-        assert "TiB" in result
 
 
 class TestFormatGuests:
@@ -93,6 +73,12 @@ class TestFormatGuests:
 
 
 class TestFormatNodeStatus:
+    def test_memory_not_truncated(self) -> None:
+        """1.99 TiB prints as 2.0 TiB; the old int() division printed 1.0 TiB."""
+        data: dict[str, object] = {"memory": {"used": int(1.99 * 1024**4), "total": int(1.99 * 1024**4)}}
+        result = _format_node_status(data, "1.0%")
+        assert "2.0 TiB / 2.0 TiB" in result
+
     def test_full_status(self) -> None:
         data: dict[str, object] = {
             "cpu": 0.25,
@@ -103,15 +89,16 @@ class TestFormatNodeStatus:
             "kversion": "6.5.11-8-pve",
             "rootfs": {"used": 10 * 1024**3, "total": 100 * 1024**3},
         }
-        result = _format_node_status(data)
-        assert "25.0%" in result
+        result = _format_node_status(data, "12.3%")
+        assert "CPU (node_exporter 5-min avg): 12.3%" in result
+        assert "CPU (PVE instant sample): 25.0%" in result
         assert "GiB" in result
         assert "10 days" in result
         assert "1.5, 2.0, 1.8" in result
         assert "pve-manager/8.1.3" in result
 
     def test_missing_fields(self) -> None:
-        result = _format_node_status({})
+        result = _format_node_status({}, "unavailable: no data")
         assert "Proxmox Node Status:" in result
         assert "?" in result
 

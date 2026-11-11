@@ -19,6 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, field_validator
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -35,6 +36,7 @@ from src.agent.history import (
 from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
 from src.api.incidents import log_incident_explainer_status, missing_incident_settings, start_incident_recovery
 from src.api.incidents import router as incidents_router
+from src.api.mcp_access import McpAccessCheck, mcp_access_config
 from src.api.upgrades import router as upgrades_router
 from src.api.upgrades import warn_if_approval_unconfigured
 from src.config import get_settings
@@ -208,11 +210,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _ = migrate_history_files(settings.conversation_history_dir)
 
     async with AsyncExitStack() as stack:
-        # Mount MCP server — auth is handled by Cloudflare Access
+        # Mount the MCP server. McpAccessCheck runs inside it, ahead of the transport: it checks the Cloudflare Access
+        # JWT in the mode MCP_ACCESS_MODE sets (read once here) and names the client for the tool metrics.
         from src.api.mcp_server import build_fastmcp_server
 
         mcp_server = build_fastmcp_server(settings)
-        mcp_app = mcp_server.http_app(path="/", stateless_http=True)
+        access_check = Middleware(McpAccessCheck, config=mcp_access_config())
+        mcp_app = mcp_server.http_app(path="/", stateless_http=True, middleware=[access_check])
         await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
         app.state.mcp_server = mcp_server
         app.state.mcp_app = mcp_app

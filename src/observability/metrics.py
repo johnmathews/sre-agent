@@ -63,6 +63,12 @@ TOOL_RESULT_CHARS = Histogram(
     buckets=TOOL_RESULT_CHARS_BUCKETS,
 )
 
+MCP_HTTP_REQUESTS_TOTAL = Counter(
+    "sre_assistant_mcp_http_requests_total",
+    "HTTP requests to /mcp by client label and Access check result (verified, missing, invalid, unconfigured, off)",
+    labelnames=["client", "access"],
+)
+
 # ---------------------------------------------------------------------------
 # LLM metrics (populated by callback handler)
 # ---------------------------------------------------------------------------

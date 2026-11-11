@@ -169,6 +169,7 @@ def mock_settings() -> Generator[Any]:
         "src.upgrades.deploy.get_settings",
         "src.api.upgrades.get_settings",
         "src.api.mcp_identity.get_settings",
+        "src.api.mcp_access.get_settings",
         "src.api.incidents.get_settings",
         "src.incidents.evidence.get_settings",
         "src.incidents.verdict.get_settings",

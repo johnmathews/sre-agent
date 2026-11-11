@@ -17,10 +17,20 @@ HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "app
 PROM = "http://prometheus.test:9090"
 
 
-def _rpc(client: TestClient, request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    """POST one JSON-RPC request to ``/mcp`` (no trailing slash) and return the last SSE ``data:`` payload."""
+def _rpc(
+    client: TestClient,
+    request_id: int,
+    method: str,
+    params: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """POST one JSON-RPC request to ``/mcp`` (no trailing slash) and return the last SSE ``data:`` payload.
+
+    ``headers`` are sent beside the MCP ones (for example ``Cf-Access-Jwt-Assertion``)."""
     response = client.post(
-        "/mcp", headers=HEADERS, json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        "/mcp",
+        headers={**HEADERS, **(headers or {})},
+        json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
     )
     assert response.status_code == 200, response.text
     data = [line[6:] for line in response.text.splitlines() if line.startswith("data: ")]
@@ -29,12 +39,13 @@ def _rpc(client: TestClient, request_id: int, method: str, params: dict[str, Any
     return payload
 
 
-def _initialize(client: TestClient) -> dict[str, Any]:
+def _initialize(client: TestClient, headers: dict[str, str] | None = None) -> dict[str, Any]:
     return _rpc(
         client,
         1,
         "initialize",
         {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}},
+        headers,
     )
 
 
@@ -124,7 +135,7 @@ def test_one_log_line_per_mcp_call(mock_settings: Any, caplog: pytest.LogCapture
     parsed = fields(record)
     assert parsed["tool"] == "prometheus_search_metrics"
     assert parsed["source"] == "mcp"
-    assert parsed["client"] == "unknown"  # an HTTP request with no access check result (W12 sets it)
+    assert parsed["client"] == "unknown"  # mock_settings: log mode with no AUD, so the access check names no one
     assert parsed["outcome"] == "success"
     assert int(parsed["duration_ms"]) >= 0
     assert int(parsed["result_chars"]) > 0

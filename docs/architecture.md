@@ -227,20 +227,51 @@ Code, Claude Desktop, Cursor) to call individual tools directly without going th
 
 ### Configuration
 
-The MCP endpoint is always enabled at `/mcp`. Auth is handled externally by Cloudflare Access.
+The MCP endpoint is always enabled at `/mcp`. Cloudflare Access sits in front of it on the tunnel, and the app checks
+the Access JWT itself (see [Access check](#access-check)), because the container port is also reachable on the LAN.
 
 ```bash
-# Add to Claude Code (external access via Cloudflare tunnel)
+# Add to Claude Code (external access via Cloudflare tunnel, with an Access service token)
 claude mcp add --transport http \
   --header "CF-Access-Client-Id: <id>" \
   --header "CF-Access-Client-Secret: <secret>" \
-  -- sre-agent https://sre-mcp.itsa-pizza.com/mcp
+  -- sre-agent https://<sre-mcp-host>/mcp
 ```
+
+### Access check
+
+`McpAccessCheck` (`src/api/mcp_access.py`) is ASGI middleware inside the mounted FastMCP app, passed to
+`http_app(middleware=...)`, so it runs on every HTTP request to `/mcp` before the MCP transport. It reads the
+`Cf-Access-Jwt-Assertion` header that Cloudflare Access adds and verifies it with
+`src/upgrades/access.py:verify_access_identity` against the AUD tags in `MCP_CF_ACCESS_AUD` and the team domain in
+`CF_ACCESS_TEAM_DOMAIN`. A verified JWT names the caller: a person's `email` or a service token's `common_name` (its
+Client ID). `MCP_CLIENT_NAMES` maps that identity to a client name (`src/api/mcp_identity.py:client_label`).
+
+`MCP_ACCESS_MODE` picks what happens:
+
+| Mode | Valid JWT | No JWT / invalid JWT |
+| --- | --- | --- |
+| `off` | not checked; client `unknown` | passes; client `unknown` |
+| `log` (default) | passes; client = mapped name or `unmapped-service-token` / `unmapped-user` | passes; client `anonymous` / `invalid`, one WARNING per (peer, reason) per 10 minutes |
+| `enforce` | passes; client as in `log` | 403 `{"error":"Cloudflare Access JWT required"}`, same WARNING |
+
+- The mode and configuration are read once, when the lifespan builds the MCP app, and logged at INFO:
+  `MCP access check: mode=log aud_configured=yes team_domain_configured=yes client_names=2`.
+- `enforce` with an empty `MCP_CF_ACCESS_AUD` or `CF_ACCESS_TEAM_DOMAIN` logs an ERROR at startup, and `/mcp` answers
+  503 `{"error":"MCP access check misconfigured"}` while the rest of the app keeps running.
+- `log` with either one empty logs one WARNING at startup and then checks nothing, like `off`.
+- A verified request also carries `identity_ref` (sha256[:8] of the identity) into its `tool_call` lines. Neither the
+  token, its claims nor the raw identity is ever logged or used as a label.
+- `sre_assistant_mcp_http_requests_total{client, access}` counts every HTTP request to `/mcp`. `access` is `verified`,
+  `missing` (no header), `invalid` (a header that failed verification), `unconfigured` (no AUD or team domain) or
+  `off`.
+- The mode switches back with `MCP_ACCESS_MODE=off` and a restart. The plan is to run `log` until only expected
+  clients show as `verified`, then switch to `enforce`.
 
 ### Architecture
 
 - **Transport:** Streamable HTTP (stateless mode — no session affinity needed)
-- **Auth:** Cloudflare Access (service token headers)
+- **Auth:** Cloudflare Access on the tunnel, and the in-app JWT check above (`MCP_ACCESS_MODE`)
 - **Mount:** a small ASGI shim, `MCPDispatch` in `src/api/main.py`, is mounted once on the FastAPI app at `/mcp` when
   the module is imported. It forwards to `app.state.mcp_app`, which the lifespan sets at startup and clears at
   shutdown, and answers 503 `{"error":"MCP server not started"}` while that is unset. A second lifespan (a restart,
@@ -257,9 +288,10 @@ claude mcp add --transport http \
 
 ### Security
 
-The MCP endpoint exposes raw tool calls — any connected client can execute arbitrary PromQL
-(`prometheus_instant_query`) or LogQL (`loki_query_logs`). Restrict access to the local network or Tailscale. Do not
-expose through the public Cloudflare tunnel without additional auth (OAuth).
+The MCP endpoint exposes raw tool calls: any caller it accepts can run arbitrary PromQL (`prometheus_instant_query`) or
+LogQL (`loki_query_logs`). Cloudflare Access guards the tunnel route. The container port is also open on the LAN, so
+only `MCP_ACCESS_MODE=enforce` refuses a LAN caller without a valid Access JWT; `log` mode names callers but refuses
+none.
 
 ## Self-Instrumentation (Observability)
 
@@ -286,15 +318,19 @@ Every tool call writes exactly one line on the `src.observability.tool_calls` lo
 `src/observability/tool_calls.py:observe_tool_call`, which records the tool metrics in the same call:
 
 ```
-tool_call tool=loki_query_logs source=mcp client=unknown outcome=success duration_ms=184 result_chars=5120 args="limit=50 query='{job=\"nginx\"}'"
+tool_call tool=loki_query_logs source=mcp client=claude-code outcome=success duration_ms=184 result_chars=5120 args="limit=50 query='{job=\"nginx\"}'" identity_ref=1a2b3c4d
 tool_call tool=prometheus_range_query source=agent client=agent outcome=error duration_ms=12 result_chars=0 args="end='now' query='up' start='bad'" error_class=ToolException error="Invalid range query parameters: …"
 ```
 
 - **`source`**: `mcp` for a call on `/mcp`, `agent` for the chat agent's own calls (the SDK tool server and the
   LangGraph callback both use it).
-- **`client`**: who called. `agent` on the agent path. On `/mcp` it comes from `request.state.mcp_client`: `unknown`
-  when no access check has set it, `in-process` when the call has no HTTP request (a test or an in-process client).
-  Client values are fixed labels, never a raw identity.
+- **`client`**: who called. `agent` on the agent path. On `/mcp` the access check sets it in
+  `request.state.mcp_client`: the mapped client name, `unmapped-service-token` or `unmapped-user` for a verified JWT,
+  `anonymous` (no JWT) or `invalid` (a JWT that failed), and `unknown` when the check is off or unconfigured.
+  `in-process` means the call has no HTTP request (a test or an in-process client). Client values are fixed labels,
+  never a raw identity.
+- **`identity_ref`**: on a verified `/mcp` call only, sha256[:8] of the caller's identity, so one caller's lines can be
+  matched without naming it. Never a metric label.
 - **`outcome`**: `success`, `error` (the tool's own failure, a `ToolException`), `invalid_args` (argument validation or
   an unknown argument name), `unknown_tool`, `timeout` (an `httpx.TimeoutException`) or `internal` (anything else).
   `internal` logs at ERROR with the traceback; every other outcome logs at INFO.
@@ -327,6 +363,7 @@ in the log line), and `client` holds only fixed values.
 | `sre_assistant_tool_call_duration_seconds` | Histogram | `tool_name`, `source` (mcp/agent)                      |
 | `sre_assistant_tool_calls_total`           | Counter   | `tool_name`, `status` (the call's outcome), `source`, `client` |
 | `sre_assistant_tool_result_chars`          | Histogram | `tool_name`, `source` (successful calls only)          |
+| `sre_assistant_mcp_http_requests_total`    | Counter   | `client`, `access` (verified/missing/invalid/unconfigured/off) |
 | `sre_assistant_llm_calls_total`            | Counter   | `status`                                               |
 | `sre_assistant_llm_token_usage`            | Counter   | `type` (prompt/completion)                             |
 | `sre_assistant_llm_estimated_cost_dollars` | Counter   | —                                                      |

@@ -9,7 +9,9 @@ without going through the agent loop.
 Each ``tools/call`` passes through ``ToolCallObserver``, which writes the call's one ``tool_call`` log line and
 records the tool metrics (``src/observability/tool_calls.py``).
 
-Auth is handled externally by Cloudflare Access.
+Cloudflare Access guards the tunnel route, and ``McpAccessCheck`` (``src/api/mcp_access.py``) checks the Access JWT on
+every HTTP request in front of this server. It sets ``request.state.mcp_client`` (the client label) and, for a verified
+caller, ``request.state.mcp_identity_ref``, which ``ToolCallObserver`` passes into the ``tool_call`` line.
 """
 
 import logging
@@ -28,6 +30,7 @@ from mcp.types import ToolAnnotations
 from pydantic import PrivateAttr
 
 from src.agent.tool_registry import ToolSpec, enabled_specs, input_schema, run_tool
+from src.api.mcp_access import STATE_CLIENT, STATE_IDENTITY_REF
 from src.config import Settings, get_settings
 from src.observability.tool_calls import classify_tool_error, observe_tool_call
 
@@ -75,7 +78,7 @@ class RegistryTool(Tool):
 
 
 def mcp_client_label() -> str:
-    """The caller's client label: ``request.state.mcp_client`` when an access check set it.
+    """The caller's client label: ``request.state.mcp_client`` as the access check set it.
 
     ``unknown`` for an HTTP request without one, ``in-process`` for a call with no HTTP request (a test, or a client
     in the same process).
@@ -84,8 +87,18 @@ def mcp_client_label() -> str:
         request = get_http_request()
     except RuntimeError:
         return "in-process"
-    client = getattr(request.state, "mcp_client", None)
+    client = getattr(request.state, STATE_CLIENT, None)
     return client if isinstance(client, str) and client else "unknown"
+
+
+def mcp_identity_ref() -> str | None:
+    """``request.state.mcp_identity_ref``: set by the access check for a verified caller only, else ``None``."""
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return None
+    ref = getattr(request.state, STATE_IDENTITY_REF, None)
+    return ref if isinstance(ref, str) and ref else None
 
 
 def _result_chars(result: Any) -> int:
@@ -109,6 +122,7 @@ class ToolCallObserver(Middleware):
         name = context.message.name
         arguments = context.message.arguments or {}
         client = mcp_client_label()
+        ref = mcp_identity_ref()
         start = time.monotonic()
         try:
             result = await call_next(context)
@@ -124,6 +138,7 @@ class ToolCallObserver(Middleware):
                 duration_s=time.monotonic() - start,
                 result_chars=0,
                 arguments=arguments,
+                identity_ref=ref,
             )
             raise
         observe_tool_call(
@@ -136,6 +151,7 @@ class ToolCallObserver(Middleware):
             duration_s=time.monotonic() - start,
             result_chars=_result_chars(result),
             arguments=arguments,
+            identity_ref=ref,
         )
         return result
 

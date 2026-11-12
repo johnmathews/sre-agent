@@ -7,6 +7,7 @@ would break the UI fails here instead of in the browser. The /mcp contract has i
 """
 
 import ast
+import importlib
 import re
 from pathlib import Path
 from typing import Any, get_type_hints
@@ -75,21 +76,22 @@ def _server_event_types() -> set[str]:
     return types
 
 
-def _models() -> dict[str, tuple[Any, str]]:
-    """UI interface -> (server type, direction). Imported lazily: src.api.main reads settings."""
-    from src.agent.history import Turn
-    from src.api import main
+# UI interface -> (module, server type, direction). Resolved lazily: importing src.api.main reads settings.
+_MAPPING: dict[str, tuple[str, str, str]] = {
+    "StreamRequest": ("src.api.main", "AskRequest", "request"),
+    "HealthResponse": ("src.api.main", "HealthResponse", "response"),
+    "ComponentHealth": ("src.api.main", "ComponentHealth", "response"),
+    "ConversationSummary": ("src.api.main", "ConversationSummary", "response"),
+    "ConversationDetail": ("src.api.main", "ConversationDetail", "response"),
+    "ConversationSearchResult": ("src.api.main", "ConversationSearchResult", "response"),
+    "SearchMatch": ("src.api.main", "SearchMatch", "response"),
+    "ConversationTurn": ("src.agent.history", "Turn", "response"),
+}
 
-    return {
-        "StreamRequest": (main.AskRequest, "request"),
-        "HealthResponse": (main.HealthResponse, "response"),
-        "ComponentHealth": (main.ComponentHealth, "response"),
-        "ConversationSummary": (main.ConversationSummary, "response"),
-        "ConversationDetail": (main.ConversationDetail, "response"),
-        "ConversationSearchResult": (main.ConversationSearchResult, "response"),
-        "SearchMatch": (main.SearchMatch, "response"),
-        "ConversationTurn": (Turn, "response"),
-    }
+
+def _server_model(interface: str) -> tuple[Any, str]:
+    module, name, direction = _MAPPING[interface]
+    return getattr(importlib.import_module(module), name), direction
 
 
 def _server_fields(model: Any) -> dict[str, bool]:
@@ -103,27 +105,15 @@ def _server_fields(model: Any) -> dict[str, bool]:
 def test_every_mapped_interface_exists_in_the_ui(mock_settings: Any) -> None:
     """A renamed or deleted UI type must be remapped here, or the checks below go quiet."""
     interfaces = _ts_interfaces(_ts_sources())
-    missing = sorted(set(_models()) - set(interfaces))
-    assert not missing, f"web/src no longer declares {missing}; update _models() in this test"
+    missing = sorted(set(_MAPPING) - set(interfaces))
+    assert not missing, f"web/src no longer declares {missing}; update _MAPPING in this test"
 
 
-@pytest.mark.parametrize(
-    "interface",
-    [
-        "StreamRequest",
-        "HealthResponse",
-        "ComponentHealth",
-        "ConversationSummary",
-        "ConversationDetail",
-        "ConversationSearchResult",
-        "SearchMatch",
-        "ConversationTurn",
-    ],
-)
+@pytest.mark.parametrize("interface", list(_MAPPING))
 def test_ui_type_matches_server_model(mock_settings: Any, interface: str) -> None:
     """Fields the UI reads must exist on the server, and fields the server requires must be sent."""
     ui_fields = _ts_interfaces(_ts_sources())[interface]
-    model, direction = _models()[interface]
+    model, direction = _server_model(interface)
     server = _server_fields(model)
 
     unknown = sorted(set(ui_fields) - set(server))

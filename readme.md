@@ -8,7 +8,7 @@ An MCP server, AI agent and web UI for a Proxmox homelab. It serves read-only to
 Proxmox VE, Proxmox Backup Server (PBS), TrueNAS and a runbook knowledge base over MCP at `/mcp`, and the same tools to a
 chat agent at `/ask`, which the Vue web UI in `web/` puts in front of a person.
 
-`/mcp` and the web UI are both first-class interfaces (ADR-0007). MCP clients are Claude Code sessions, the claude.ai
+`/mcp` and the web UI are both first-class interfaces ([ADR-0007](docs/adr/0007-mcp-and-the-web-ui-are-both-first-class.md)). MCP clients are Claude Code sessions, the claude.ai
 connector and other homelab apps. The chat agent backs the web UI and a CLI. The app also writes a
 weekly reliability report, explains Gatus outages and reviews pending container image upgrades.
 
@@ -102,8 +102,11 @@ make check
 ```
 
 The web UI lives in `web/` (Vue 3, npm, Node 22). `make web-install` once, then `make web-dev` serves it on `:5173` and
-proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck and Playwright suite. See
-[docs/web/development.md](docs/web/development.md).
+proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck and Playwright suite, and `make web-image` builds its image locally.
+
+Web UI docs: [architecture](docs/web/architecture.md), [API integration](docs/web/api-integration.md),
+[deployment](docs/web/deployment.md), [development](docs/web/development.md) and the
+[stream-failure runbook](docs/web/runbooks/triaging-webapp-stream-failures.md).
 
 ### macOS: Local Network Access
 

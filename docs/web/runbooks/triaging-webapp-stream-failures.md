@@ -108,7 +108,7 @@ an agent failure.**
 
 | Backend FastAPI log | nginx response code | Conversation persisted | Cause | Action |
 |---|---|---|---|---|
-| `200 OK` | `200`, full body size | Yes | Mid-stream socket close (client missed bytes — see Step 5) | Recovery layer should have caught this silently. If user saw `Connection dropped mid-reply`, check `streamWithRecovery.ts:101` `tryRecoverPersistedAnswer` — recovery may have failed for a real reason. If user saw silent answer, no further action; system worked as designed. |
+| `200 OK` | `200`, full body size | Yes | Mid-stream socket close (client missed bytes — see Step 5) | Recovery layer should have caught this silently. If user saw `Connection dropped mid-reply`, check `tryRecoverPersistedAnswer` in `streamWithRecovery.ts` — recovery may have failed for a real reason. If user saw silent answer, no further action; system worked as designed. |
 | `5xx` + exception trace | `5xx` | Partial / no | Agent / LLM / upstream failure | Investigate the FastAPI stack trace. Webapp behaved correctly by surfacing `http-5xx`. |
 | `4xx` | `4xx` | No | Validation / auth / rate-limit | Confirm `ErrorBubble` category matches (`http-4xx` / `Session expired` for 401, etc.). |
 | No FastAPI entry, but traefik shows the request | `502`/`504` | No | Backend container down / restarting | Check `docker compose ps` and `sre-agent` container health. |

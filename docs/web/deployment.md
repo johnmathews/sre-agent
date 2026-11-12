@@ -27,7 +27,7 @@ Single environment variable:
 
 | Variable       | Default                   | Purpose                            |
 |----------------|---------------------------|------------------------------------|
-| `API_UPSTREAM` | `http://sre-api:8000`     | Where nginx proxies `/api/*`       |
+| `API_UPSTREAM` | `http://sre-agent:8000`     | Where nginx proxies `/api/*`       |
 
 `API_UPSTREAM` is substituted into the nginx config at container start via
 nginx's built-in `envsubst` entrypoint.
@@ -52,15 +52,15 @@ services:
     ports:
       - "8080:80"
     environment:
-      - API_UPSTREAM=http://sre-api:8000
+      - API_UPSTREAM=http://sre-agent:8000
     depends_on:
-      sre-api:
+      sre-agent:
         condition: service_healthy
     restart: unless-stopped
     mem_limit: 64m
 ```
 
-The service must share a docker network with `sre-api` so `sre-api:8000`
+The service must share a docker network with `sre-agent` so `sre-agent:8000`
 resolves. The default `docker-compose.yml` user-defined network is fine.
 
 ## Running outside docker-compose

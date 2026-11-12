@@ -33,7 +33,7 @@ server {
     #
     # We assign ${API_UPSTREAM} to a variable so nginx defers DNS resolution
     # to request time instead of startup. Without this, nginx would refuse to
-    # boot if the upstream host (e.g. the docker service `sre-api`) is not
+    # boot if the upstream host (e.g. the docker service `sre-agent`) is not
     # yet resolvable when the container starts.
     #
     # 127.0.0.11 is Docker's embedded DNS resolver inside a user-defined

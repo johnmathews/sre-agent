@@ -18,7 +18,7 @@ FROM nginx:1.27-alpine AS runtime
 # nginx:1.19+ runs envsubst on any *.template file in /etc/nginx/templates/
 # at container start. Only the listed vars are substituted — anything else
 # (e.g. nginx's own $uri) is left alone.
-ENV API_UPSTREAM=http://sre-api:8000 \
+ENV API_UPSTREAM=http://sre-agent:8000 \
     NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d \
     NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template \
     NGINX_ENVSUBST_FILTER=API_UPSTREAM

@@ -74,11 +74,11 @@ changes `web/`:
 ```sh
 docker pull ghcr.io/johnmathews/sre-webapp:latest
 docker run --rm -p 8080:80 \
-  -e API_UPSTREAM=http://sre-api:8000 \
+  -e API_UPSTREAM=http://sre-agent:8000 \
   ghcr.io/johnmathews/sre-webapp:latest
 ```
 
-`API_UPSTREAM` defaults to `http://sre-api:8000` — the expected service name
+`API_UPSTREAM` defaults to `http://sre-agent:8000` — the expected service name
 when the frontend and backend run in the same docker-compose network.
 
 See [`docs/web/deployment.md`](../docs/web/deployment.md) for the full compose stack,

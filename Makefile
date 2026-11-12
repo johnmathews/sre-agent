@@ -1,4 +1,4 @@
-.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down web-install web-dev web-check web-build
+.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down web-install web-dev web-check web-image
 
 install:
 	uv sync
@@ -74,5 +74,6 @@ web-dev:
 web-check:
 	cd web && npm run typecheck && npx playwright test
 
-web-build:
+# Build the production UI image locally (CI's web-build job builds and pushes it).
+web-image:
 	docker build -t sre-webapp:local web

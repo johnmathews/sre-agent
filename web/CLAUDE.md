@@ -3,8 +3,7 @@
 Vue 3 SPA frontend for the SRE Agent, one of the server's two first-class
 interfaces (ADR-0007). The backend is the rest of this repo (FastAPI, `src/`);
 the root `CLAUDE.md` covers it. This file covers only `web/`. Paths below are
-relative to `web/` unless they start with the repo root's `docs/`, `tests/` or
-`src/api/main.py`.
+relative to `web/`, except those marked "repo root".
 
 ## Stack
 
@@ -59,9 +58,9 @@ relies on either Vite's proxy (dev) or nginx's `API_UPSTREAM` upstream (prod).
 - `POST /ask/stream` — Server-Sent Events; chunks of assistant text plus
   tool-progress events parsed in `src/api/stream.ts`
 
-When changing endpoints, change the backend (`src/api/main.py`), the types in
-`src/api/*.ts` and `docs/web/api-integration.md` in the same PR. The repo
-root's `tests/test_web_contract.py` fails when the TypeScript types, stream
+When changing endpoints, change the backend (repo root `src/api/main.py`), the
+types in `src/api/*.ts` and repo root `docs/web/api-integration.md` in the same
+PR. Repo root `tests/test_web_contract.py` fails when the TypeScript types, stream
 event types or special-cased error reasons drift from the server.
 
 ## Deployment
@@ -72,7 +71,7 @@ Image is published to `ghcr.io/johnmathews/sre-webapp:latest` on every push to
 `.github/workflows/ci.yml`, job `web-build`).
 
 The nginx config is a `.template` that envsubsts `API_UPSTREAM` at container
-start (default `http://sre-api:8000`). Do not hardcode upstream hosts — set
+start (default `http://sre-agent:8000`). Do not hardcode upstream hosts — set
 them through the env var.
 
 The root `docker-compose.demo.yml` is the canonical "pull from GHCR and run"

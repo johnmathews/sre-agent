@@ -46,6 +46,24 @@ Limits: the regex parser reads `export interface` blocks and string-literal unio
 (a `type X = { ... }` alias, generics) is not seen, and `test_every_mapped_interface_exists_in_the_ui` fails rather
 than passing silently when a mapped interface disappears.
 
-## 5. Left open
+## 5. Wrap-up fixes
 
-- `docs/web/runbooks/triaging-webapp-stream-failures.md` is outside `runbooks/`, so RAG ingest does not load it.
+A docs audit against the shipped code found leftovers from the standalone repo, fixed on the branch:
+
+- The web image defaulted `API_UPSTREAM` to `http://sre-api:8000`, a service name this repo never used. The default is
+  now `http://sre-agent:8000`. Production is unaffected (confirmed: the infra compose template sets
+  `API_UPSTREAM=http://sre-agent:8000` explicitly).
+- The local image target is `make web-image`, so it does not share a name with CI's `web-build` job, which pushes.
+- `docs/web/development.md` described the Playwright web server as `npm run dev`; it is its own Vite on `:5175` with an
+  unreachable proxy target.
+- `docs/web/` gained links from the readme, including the stream-failure runbook, which nothing linked to.
+
+## 6. What is deliberately not done
+
+- One image serving the SPA from FastAPI. It would remove the nginx container, but it changes ports, the Access setup
+  and the infra compose. Separate decision.
+- A shared type generator (OpenAPI to TypeScript). The contract test catches drift at a fraction of the tooling cost.
+- Moving the stream-failure runbook into `runbooks/` for RAG: #55.
+- A linter for the UI: #56.
+- The infra compose template (home-server repo) has a comment saying the agent and web app "come from separate repos";
+  it is now stale but harmless. Left for the home-server repo.

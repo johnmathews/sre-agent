@@ -7,16 +7,19 @@
   root) — only needed for live chat; the E2E test suite mocks the backend.
 
 From the repo root, `make web-install` runs `npm ci` and installs the
-Playwright browsers, `make web-dev` starts Vite, and `make web-check` runs
-the typecheck and the Playwright suite. The npm commands below run inside
+Playwright browsers, `make web-dev` starts Vite, `make web-check` runs
+the typecheck and the Playwright suite, and `make web-image` builds the
+production image locally as `sre-webapp:local`. When a reply errors in
+production, start with the
+[stream-failure runbook](runbooks/triaging-webapp-stream-failures.md). The npm commands below run inside
 `web/`.
 
 ## Commands
 
 ```sh
-npm install           # install deps (also installs Playwright browsers via postinstall? no — see below)
+npm ci                # install deps; browsers: npx playwright install chromium webkit (or make web-install)
 npm run dev           # Vite dev server on :5173 (auto-picks :5174 if busy)
-npm run build         # vue-tsc --noEmit + vite build -> dist/
+npm run build         # vue-tsc -b + vite build -> dist/
 npm run preview       # serve the built bundle locally
 npm test              # Playwright E2E tests (mocked backend)
 npm run test:headed   # same, but with a visible browser
@@ -90,8 +93,10 @@ See Playwright docs: <https://playwright.dev/docs/intro>. Tests live in
 `web/tests/e2e/` and mock the `/api/*` endpoints with
 `page.route('**/api/**', ...)` so they run without the backend.
 
-The `playwright.config.ts` starts `npm run dev` as a `webServer` before
-tests run, so `npm test` is a single command.
+`playwright.config.ts` starts its own Vite server as a `webServer` on
+`:5175` with `VITE_API_PROXY_TARGET` pointed at an unreachable address, so
+`npm test` is a single command and any endpoint a test forgot to mock fails
+loudly. A `make web-dev` server on `:5173` does not get in its way.
 
 ## Cross-browser projects
 

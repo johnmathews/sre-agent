@@ -40,6 +40,7 @@ deployment, development). Journal entries go in the root journal/.
 npm run dev        # Vite on :5173, proxies /api/* → http://localhost:8000
 npm run build      # vue-tsc + vite build → dist/
 npm run typecheck  # vue-tsc -b
+npm run lint       # ESLint, no warnings allowed (lint:fix autofixes)
 npm run preview    # serve the built dist/
 npm test           # playwright test (mocked backend; no real API needed)
 npm run test:headed
@@ -172,6 +173,10 @@ changes. CI runs typecheck, ESLint and Playwright on every PR that touches `web/
 `recommended` rules with no warnings allowed; formatting rules are off. `vue/no-v-html` is an error:
 any `v-html` needs a disable comment saying how its input is made safe (`src/lib/markdown.ts` for
 model output, escaping for search snippets).
+
+`package.json` overrides `minimatch` to `^11.0.8`: ESLint 10's dependencies pull in
+10.2.6, which GHSA-g3hv-75wg-m249 flags. Drop the override once `npm ls minimatch`
+without it shows 11.0.1 or later.
 
 ## Related
 

@@ -102,7 +102,8 @@ make check
 ```
 
 The web UI lives in `web/` (Vue 3, npm, Node 22). `make web-install` once, then `make web-dev` serves it on `:5173` and
-proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck, ESLint and Playwright suite, and `make web-image` builds its image locally.
+proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck, ESLint and Playwright suite, and
+`make web-image` builds its image locally.
 
 Web UI docs: [architecture](docs/web/architecture.md), [API integration](docs/web/api-integration.md),
 [deployment](docs/web/deployment.md), [development](docs/web/development.md) and the

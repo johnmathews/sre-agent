@@ -37,15 +37,18 @@ each tag matters.
 - **Tailwind CSS v4** (styling)
 - **marked** + **DOMPurify** (safe markdown rendering of LLM output)
 - **Playwright** (E2E tests)
+- **ESLint** (Vue `essential` + typescript-eslint `recommended`)
 
 ## Development
 
 Requires Node 22+ and npm 10+.
 
 ```sh
-npm install
+npm ci
 npm run dev        # Vite dev server on :5173
 npm run build      # type-check + bundle to dist/
+npm run typecheck  # vue-tsc -b
+npm run lint       # ESLint, no warnings allowed
 npm run preview    # serve the built bundle
 npm test           # Playwright E2E (mocked backend)
 ```

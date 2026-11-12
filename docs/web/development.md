@@ -8,11 +8,11 @@
 
 From the repo root, `make web-install` runs `npm ci` and installs the
 Playwright browsers, `make web-dev` starts Vite, `make web-lint` runs ESLint,
-`make web-check` runs the typecheck, ESLint and the Playwright suite, and `make web-image` builds the
-production image locally as `sre-webapp:local`. When a reply errors in
-production, start with the
-[stream-failure runbook](../../runbooks/triaging-webapp-stream-failures.md). The npm commands below run inside
-`web/`.
+`make web-check` runs the typecheck, ESLint and the Playwright suite, and
+`make web-image` builds the production image locally as `sre-webapp:local`.
+When a reply errors in production, start with the
+[stream-failure runbook](../../runbooks/triaging-webapp-stream-failures.md).
+The npm commands below run inside `web/`.
 
 ## Commands
 

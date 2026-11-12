@@ -2,7 +2,7 @@
 #
 # This file pulls pre-built images from GHCR, so you can run the full stack
 # without cloning the source. For local development against this repo's
-# source, use docker-compose.yml instead (which uses `build: .`).
+# source, use docker-compose.yml instead (which builds both images from source).
 #
 # Usage:
 #   1. Create a .env file in this directory — see .env.example for vars.

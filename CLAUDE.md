@@ -145,7 +145,7 @@ modifying eval cases.
 - `src/agent/` — agent setup and tools:
   - `tool_registry.py`: `TOOL_SPECS`, the one list of tools, with `enabled_specs` and `run_tool`
   - `tools/`: the tool modules
-  - `retrieval/`: embeddings and `runbook_search`
+  - `retrieval/`: embeddings, `runbook_search`, and `index.py` (the runbook index: fingerprint, manifest, rebuild and the server's check loop)
   - `sdk_agent.py`: the Claude Agent SDK path, with `mcp_tools.py`, its in-process `sre` tool server
   - `agent.py`: `build_agent`, the LangGraph path and the dispatch between the two
 - `src/api/` — FastAPI application (`main.py`). `mcp_server.py` builds `/mcp` from the registry, and `mcp_access.py`

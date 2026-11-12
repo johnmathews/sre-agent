@@ -9,6 +9,7 @@ A rebuild embeds into a new collection, then points the manifest at it, then del
 leaves the live collection and manifest untouched, and a search during a build reads the old collection.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -34,6 +35,7 @@ from src.agent.retrieval.embeddings import (
     load_documents,
     source_dirs,
 )
+from src.observability.metrics import RUNBOOK_INDEX_REBUILDS_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,27 @@ class IndexState:
     fingerprint: str
     in_sync: bool
     error: str | None = None
+
+    @property
+    def built_at(self) -> float:
+        """Unix time the live collection was built, 0 when there is no manifest."""
+        return self.manifest.built_at if self.manifest else 0.0
+
+    def describe(self) -> str:
+        """One line on why the index is not in sync, for logs and /health."""
+        if self.error:
+            return self.error
+        if not self.exists:
+            return "no runbook index has been built"
+        if self.chunks == 0:
+            return f"the runbook index collection {self.collection} is empty or missing"
+        if self.manifest is None:
+            return "the runbook index has no manifest (built before manifests existed)"
+        if self.manifest.fingerprint != self.fingerprint:
+            return "the runbook index is out of date with the runbooks in this image"
+        if self.chunks != self.manifest.chunks:
+            return f"the runbook index holds {self.chunks} chunks, its manifest says {self.manifest.chunks}"
+        return "the runbook index is in sync"
 
 
 def chroma_client(persist_dir: Path | None = None) -> ClientAPI:
@@ -238,3 +261,53 @@ def index_state(*, persist_dir: Path | None = None, dirs: list[Path] | None = No
 
     in_sync = manifest is not None and manifest.fingerprint == fingerprint and chunks == manifest.chunks > 0
     return IndexState(True, manifest, collection, chunks, fingerprint, in_sync, error)
+
+
+async def check_index_once(
+    auto_rebuild: bool,
+    *,
+    persist_dir: Path | None = None,
+    dirs: list[Path] | None = None,
+    embeddings: Embeddings | None = None,
+) -> IndexState:
+    """Compare the index with the sources and, when it is out of date and auto_rebuild is on, rebuild it.
+
+    A failed rebuild is logged and counted, and leaves the live index as it was; the next check tries again.
+    Store and embedding work runs in a thread so the event loop keeps serving requests.
+    """
+    state = await asyncio.to_thread(index_state, persist_dir=persist_dir, dirs=dirs)
+    if state.in_sync:
+        logger.info("Runbook index in sync (%s, %d chunks)", state.collection, state.chunks)
+        return state
+    if not auto_rebuild:
+        logger.warning("Runbook index not in sync: %s. RUNBOOK_INDEX_AUTO_REBUILD is off", state.describe())
+        return state
+
+    logger.info("Runbook index not in sync: %s. Rebuilding", state.describe())
+    try:
+        await asyncio.to_thread(rebuild_index, "sre-agent", persist_dir=persist_dir, embeddings=embeddings, dirs=dirs)
+    except Exception:
+        RUNBOOK_INDEX_REBUILDS_TOTAL.labels(status="error").inc()
+        logger.exception("Runbook index rebuild failed; the live index is unchanged and the next check retries")
+    else:
+        RUNBOOK_INDEX_REBUILDS_TOTAL.labels(status="success").inc()
+    return await asyncio.to_thread(index_state, persist_dir=persist_dir, dirs=dirs)
+
+
+async def keep_index_current(
+    interval_s: float,
+    auto_rebuild: bool,
+    *,
+    persist_dir: Path | None = None,
+    dirs: list[Path] | None = None,
+    embeddings: Embeddings | None = None,
+) -> None:
+    """Check the index now, then every interval_s seconds. An interval of 0 checks once."""
+    while True:
+        try:
+            await check_index_once(auto_rebuild, persist_dir=persist_dir, dirs=dirs, embeddings=embeddings)
+        except Exception:
+            logger.exception("Runbook index check failed")
+        if interval_s <= 0:
+            return
+        await asyncio.sleep(interval_s)

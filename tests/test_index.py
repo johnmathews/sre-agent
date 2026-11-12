@@ -11,10 +11,12 @@ import pytest
 from chromadb.errors import NotFoundError
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
+from prometheus_client import REGISTRY
 
 from src.agent.retrieval import index
 from src.agent.retrieval.embeddings import COLLECTION_NAME, build_vector_store, load_documents
 from src.agent.retrieval.runbooks import runbook_search
+from src.observability.metrics import observe_runbook_index
 
 
 @pytest.fixture(autouse=True)
@@ -208,3 +210,76 @@ class TestSearchDuringRebuild:
             result = runbook_search.invoke({"query": "restart DNS"})
 
         assert "Found 1 relevant runbook chunk" in result
+
+
+def _rebuilds(status: str) -> float:
+    return REGISTRY.get_sample_value("sre_assistant_runbook_index_rebuilds_total", {"status": status}) or 0.0
+
+
+class TestCheckLoop:
+    async def test_out_of_sync_index_is_rebuilt(self, sources: Path, store: Path) -> None:
+        before = _rebuilds("success")
+
+        state = await index.check_index_once(True, persist_dir=store, dirs=[sources], embeddings=EMBEDDINGS)
+
+        assert state.in_sync
+        assert index.read_manifest(store) is not None
+        assert _rebuilds("success") == before + 1
+
+    async def test_in_sync_index_is_left_alone(self, sources: Path, store: Path) -> None:
+        live = _rebuild(sources, store)
+        before = _rebuilds("success")
+
+        state = await index.check_index_once(True, persist_dir=store, dirs=[sources], embeddings=EMBEDDINGS)
+
+        assert state.in_sync
+        assert index.read_manifest(store) == live
+        assert _rebuilds("success") == before
+
+    async def test_failed_rebuild_is_counted_and_retried_next_tick(self, sources: Path, store: Path) -> None:
+        live = _rebuild(sources, store)
+        (sources / "nfs.md").write_text("# NFS\n\nRemount the share.\n")
+        errors = _rebuilds("error")
+
+        failed = await index.check_index_once(
+            True, persist_dir=store, dirs=[sources], embeddings=BrokenEmbeddings(size=8)
+        )
+
+        assert not failed.in_sync
+        assert index.read_manifest(store) == live
+        assert _rebuilds("error") == errors + 1
+
+        healed = await index.check_index_once(True, persist_dir=store, dirs=[sources], embeddings=EMBEDDINGS)
+        assert healed.in_sync
+
+    async def test_auto_rebuild_off_only_reports(self, sources: Path, store: Path) -> None:
+        state = await index.check_index_once(False, persist_dir=store, dirs=[sources], embeddings=EMBEDDINGS)
+
+        assert not state.in_sync
+        assert not store.exists()
+
+    async def test_loop_with_interval_zero_checks_once(self, sources: Path, store: Path) -> None:
+        await index.keep_index_current(0, True, persist_dir=store, dirs=[sources], embeddings=EMBEDDINGS)
+
+        assert index.index_state(persist_dir=store, dirs=[sources]).in_sync
+
+
+class TestGauges:
+    def test_gauges_read_the_index_on_each_scrape(self, sources: Path, store: Path) -> None:
+        observe_runbook_index(lambda: index.index_state(persist_dir=store, dirs=[sources]), max_age_s=0)
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_in_sync") == 0.0
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_chunks") == 0.0
+
+        manifest = _rebuild(sources, store)
+
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_in_sync") == 1.0
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_chunks") == manifest.chunks
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_built_timestamp_seconds") == manifest.built_at
+
+    def test_a_failing_read_exports_out_of_sync(self) -> None:
+        def broken() -> index.IndexState:
+            raise OSError("disk gone")
+
+        observe_runbook_index(broken, max_age_s=0)
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_in_sync") == 0.0
+        assert REGISTRY.get_sample_value("sre_assistant_runbook_index_chunks") == 0.0

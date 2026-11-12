@@ -12,6 +12,9 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from src.agent.retrieval.index import IndexState
+from tests._index_states import EMPTY_INDEX, HEALTHY_INDEX, MISSING_INDEX, STALE_INDEX
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -161,8 +164,7 @@ class TestHealthEndpoint:
         )
         respx.get("https://truenas.test/api/v2.0/core/ping").mock(return_value=httpx.Response(200, text="pong"))
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-            mock_chroma_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             resp = client.get("/health")
 
         assert resp.status_code == 200
@@ -186,8 +188,7 @@ class TestHealthEndpoint:
             return_value=httpx.Response(200, json={"data": {"version": "3.1.2"}})
         )
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-            mock_chroma_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             resp = client.get("/health")
 
         body = resp.json()
@@ -209,8 +210,7 @@ class TestHealthEndpoint:
             return_value=httpx.Response(200, json={"data": {"version": "3.1.2"}})
         )
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-            mock_chroma_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             resp = client.get("/health")
 
         body = resp.json()
@@ -236,8 +236,7 @@ class TestHealthEndpoint:
         )
         respx.get("https://truenas.test/api/v2.0/core/ping").mock(return_value=httpx.Response(200, text="pong"))
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-            mock_chroma_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             resp = client.get("/health")
 
         assert resp.status_code == 200
@@ -256,8 +255,7 @@ class TestHealthEndpoint:
         respx.get("https://pbs.test:8007/api2/json/version").mock(side_effect=httpx.ConnectError("connection refused"))
         respx.get("https://truenas.test/api/v2.0/core/ping").mock(side_effect=httpx.ConnectError("connection refused"))
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-            mock_chroma_dir.is_dir.return_value = False
+        with patch("src.api.main.index_state", return_value=MISSING_INDEX):
             resp = client.get("/health")
 
         body = resp.json()
@@ -267,14 +265,51 @@ class TestHealthEndpoint:
         assert all(c["status"] == "unhealthy" for c in non_mcp)
 
 
+def _vector_store_component(client: TestClient, state: IndexState) -> dict[str, Any]:
+    with respx.mock:
+        respx.route().mock(return_value=httpx.Response(200, json={}))
+        with patch("src.api.main.index_state", return_value=state):
+            body = client.get("/health").json()
+    [component] = [c for c in body["components"] if c["name"] == "vector_store"]
+    return component
+
+
+class TestHealthVectorStore:
+    """vector_store is unhealthy when search would find nothing; an out-of-date index is healthy with a detail."""
+
+    @pytest.mark.integration
+    def test_in_sync_index_is_healthy(self, client: TestClient) -> None:
+        component = _vector_store_component(client, HEALTHY_INDEX)
+        assert component["status"] == "healthy"
+        assert component["detail"] is None
+
+    @pytest.mark.integration
+    def test_missing_store_is_unhealthy(self, client: TestClient) -> None:
+        component = _vector_store_component(client, MISSING_INDEX)
+        assert component["status"] == "unhealthy"
+        assert "no runbook index" in component["detail"]
+
+    @pytest.mark.integration
+    def test_empty_collection_is_unhealthy(self, client: TestClient) -> None:
+        """The case the old directory-exists check passed: a store with nothing in it."""
+        component = _vector_store_component(client, EMPTY_INDEX)
+        assert component["status"] == "unhealthy"
+        assert "empty" in component["detail"]
+
+    @pytest.mark.integration
+    def test_out_of_date_index_is_healthy_with_detail(self, client: TestClient) -> None:
+        component = _vector_store_component(client, STALE_INDEX)
+        assert component["status"] == "healthy"
+        assert "out of date" in component["detail"]
+
+
 def _mock_dependencies_healthy() -> None:
     """Every HTTP dependency /health pings answers 200 (inside a respx mock)."""
     respx.route().mock(return_value=httpx.Response(200, json={}))
 
 
 def _mcp_component(client: TestClient) -> dict[str, Any]:
-    with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_chroma_dir:
-        mock_chroma_dir.is_dir.return_value = True
+    with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
         body = client.get("/health").json()
     others = [c for c in body["components"] if c["name"] != "mcp_server"]
     assert all(c["status"] == "healthy" for c in others), others

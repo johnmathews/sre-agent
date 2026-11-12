@@ -69,6 +69,9 @@ def mock_settings() -> Generator[Any]:
             "anthropic_model": "claude-sonnet-4-20250514",
             "claude_credentials_check_interval_s": 900.0,
             "extra_docs_dirs": "",
+            # The lifespan's index check only reports in tests; it never embeds.
+            "runbook_index_auto_rebuild": False,
+            "runbook_index_check_interval_s": 0.0,
             "prometheus_url": "http://prometheus.test:9090",
             "grafana_url": "http://grafana.test:3000",
             "grafana_service_account_token": "glsa_test_fake",

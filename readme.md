@@ -106,7 +106,7 @@ proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck, 
 
 Web UI docs: [architecture](docs/web/architecture.md), [API integration](docs/web/api-integration.md),
 [deployment](docs/web/deployment.md), [development](docs/web/development.md) and the
-[stream-failure runbook](docs/web/runbooks/triaging-webapp-stream-failures.md).
+[stream-failure runbook](runbooks/triaging-webapp-stream-failures.md).
 
 ### macOS: Local Network Access
 

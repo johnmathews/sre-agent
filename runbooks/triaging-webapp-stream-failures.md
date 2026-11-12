@@ -6,7 +6,7 @@
 > answer correctly but the client shows an error.
 
 The procedure below is what produced the original triage on 2026-05-05
-([journal](../../../journal/260505-mobile-ux-overhaul.md)) — codified so
+([journal](../journal/260505-mobile-ux-overhaul.md)) — codified so
 the next investigation takes ~5 minutes instead of half an hour.
 
 ## Step 1 — Get the timestamp + context
@@ -17,7 +17,7 @@ Ask the user for:
    phone's local time).
 2. **What the error said** — the heading on the `ErrorBubble`, not the
    "Details" disclosure. The heading maps to a `StreamError.category`
-   (see [`api-integration.md`](../api-integration.md) §"Error categories
+   (see [`api-integration.md`](../docs/web/api-integration.md) §"Error categories
    and contracts").
 3. **What they were doing when it happened** — typing a long reply,
    walking out of the house (Wi-Fi → cellular handoff), phone went to
@@ -158,13 +158,13 @@ the timestamp, and the category that surfaced.
 
 ## Related
 
-- [`docs/web/api-integration.md`](../api-integration.md) — error categories
+- [`docs/web/api-integration.md`](../docs/web/api-integration.md) — error categories
   and the resilience contract
-- [`src/api/stream.ts`](../../../web/src/api/stream.ts) — `StreamError`
+- [`src/api/stream.ts`](../web/src/api/stream.ts) — `StreamError`
   classification
-- [`src/api/streamWithRecovery.ts`](../../../web/src/api/streamWithRecovery.ts) —
+- [`src/api/streamWithRecovery.ts`](../web/src/api/streamWithRecovery.ts) —
   retry + recovery layer
-- [`src/components/ErrorBubble.vue`](../../../web/src/components/ErrorBubble.vue) —
+- [`src/components/ErrorBubble.vue`](../web/src/components/ErrorBubble.vue) —
   what the user actually sees
-- [`journal/260505-mobile-ux-overhaul.md`](../../../journal/260505-mobile-ux-overhaul.md) —
+- [`journal/260505-mobile-ux-overhaul.md`](../journal/260505-mobile-ux-overhaul.md) —
   the original triage this runbook is distilled from

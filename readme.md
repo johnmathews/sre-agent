@@ -197,13 +197,15 @@ volumes:
   chroma_data:
 ```
 
-`sre-ingest` sits in the `setup` profile, so `docker compose up` skips it. Create `.env` next to the compose file, then
-build the vector store and start the services:
+Create `.env` next to the compose file, then start the services. `sre-agent` builds the vector store in the background
+at startup (see "Vector Store Persistence" below):
 
 ```bash
-docker compose run --rm sre-ingest
 docker compose up -d sre-agent sre-webapp
 ```
+
+`sre-ingest` sits in the `setup` profile, so `docker compose up` skips it. Run `docker compose run --rm sre-ingest` only
+to rebuild the store at once rather than at the next check.
 
 ### Environment Variables
 
@@ -229,6 +231,7 @@ Optional settings. An empty value turns the feature off:
 | `MEMORY_DB_PATH`                            | Memory store and its tools (4)                                                |
 | `MCP_ACCESS_MODE`, `MCP_CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN`, `MCP_CLIENT_NAMES` | The `/mcp` Access check (`off`, `log` (default) or `enforce`) and client names |
 | `EXTRA_DOCS_DIRS`                           | More directories for the runbook store (comma-separated absolute paths)       |
+| `RUNBOOK_INDEX_AUTO_REBUILD`, `RUNBOOK_INDEX_CHECK_INTERVAL_S` | Runbook index rebuilds when the runbooks change (default `true`), checked at startup and every N seconds (default 600; 0 checks at startup only) |
 | `CONVERSATION_HISTORY_HOST_DIR`             | Host path bind-mounted to `/app/conversations` for conversation files         |
 | `REQUEST_TIMEOUT_SECONDS`                   | `/ask` timeout (default 120). A request that runs longer gets HTTP 504        |
 | `USER_TIMEZONE`                             | IANA timezone for the prompt, `get_current_time` and the cron jobs. Default `UTC` |
@@ -293,7 +296,6 @@ The repo's `docker-compose.yml` builds the image locally (`build: .`). [`docker-
 runs the same stack from the published images:
 
 ```bash
-docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
 docker compose -f docker-compose.demo.yml up -d
 ```
 
@@ -410,7 +412,8 @@ No failure is silent. Each one shows up in the response, the logs or a metric.
 | LLM rate limit, 5xx or network error | The report narrative, incident verdict and upgrade review calls retry with doubling backoff inside a time budget |
 | A component is down                  | `/health` reports each component, `mcp_server` included, sets `sre_assistant_component_healthy`, and returns `degraded` |
 | Memory store off or unusable         | Startup logs a WARNING (unset) or an ERROR (unusable) and sets `sre_assistant_memory_store_enabled` to 0  |
-| Vector store missing or empty        | `runbook_search` finds nothing, and `/health` marks `vector_store` unhealthy                               |
+| Vector store missing or empty        | `runbook_search` returns `Runbook search failed (...)` naming the runbook to fix it, and `/health` marks `vector_store` unhealthy |
+| Runbook index out of date            | `sre-agent` rebuilds it at the next check. `/health` keeps `vector_store` healthy with a detail line, and `sre_assistant_runbook_index_in_sync` goes to 0 until the rebuild lands |
 
 ---
 
@@ -433,7 +436,7 @@ has the file format.
 
 ## Self-Observability
 
-The app exports 25 Prometheus metrics at `GET /metrics` (26 with `LLM_PROVIDER=anthropic`), shown in the Grafana dashboard
+The app exports 29 Prometheus metrics at `GET /metrics` (30 with `LLM_PROVIDER=anthropic`), shown in the Grafana dashboard
 `dashboards/sre-assistant-sli.json`. Each tool call, on `/mcp` and in the agent, writes one `tool_call` log line with
 the tool, source, client, outcome, duration and result size, then updates the tool metrics.
 `sre_assistant_mcp_http_requests_total{client, access}` counts every HTTP request to `/mcp`.

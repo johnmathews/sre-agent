@@ -130,6 +130,5 @@ for (const [name, size] of [
   ['apple-touch-icon-180.png', 180],
 ]) {
   writeFileSync(`public/${name}`, makePng(size))
-  // eslint-disable-next-line no-console
   console.log(`wrote public/${name} (${size}×${size})`)
 }

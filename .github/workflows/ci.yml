@@ -129,7 +129,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   web-test:
-    name: web-test (typecheck + Playwright)
+    name: web-test (typecheck + lint + Playwright)
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
@@ -153,6 +153,9 @@ jobs:
       # happens once, inside the image's builder stage.
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
 
       - name: Get Playwright version
         id: pw

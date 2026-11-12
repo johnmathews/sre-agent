@@ -1,4 +1,4 @@
-.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down web-install web-dev web-check web-image
+.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down web-install web-dev web-lint web-check web-image
 
 install:
 	uv sync
@@ -70,9 +70,13 @@ web-install:
 web-dev:
 	cd web && npm run dev
 
-# What CI's web-test job runs: typecheck, then Playwright against a mocked backend.
+# ESLint on web/ (Vue essential + typescript-eslint recommended; no warnings allowed).
+web-lint:
+	cd web && npm run lint
+
+# What CI's web-test job runs: typecheck, lint, then Playwright against a mocked backend.
 web-check:
-	cd web && npm run typecheck && npx playwright test
+	cd web && npm run typecheck && npm run lint && npx playwright test
 
 # Build the production UI image locally (CI's web-build job builds and pushes it).
 web-image:

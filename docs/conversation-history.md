@@ -185,7 +185,7 @@ The migration is idempotent — delete the marker file to force a re-run.
 
 ## UI Sidebar
 
-The web UI sidebar (separate repo: [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) calls
+The web UI sidebar (`web/src/components/Sidebar.vue`) calls
 `GET /conversations` on mount and after each turn. Per conversation:
 
 - Clicking the title button loads the conversation via

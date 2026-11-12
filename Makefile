@@ -1,4 +1,4 @@
-.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down
+.PHONY: install dev lint format typecheck test test-e2e check serve ingest chat hooks eval report advisor smoke docker-build docker-up docker-down web-install web-dev web-check web-image
 
 install:
 	uv sync
@@ -60,3 +60,20 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+# --- Web UI (web/, npm) ---
+
+web-install:
+	cd web && npm ci && npx playwright install chromium webkit
+
+# Vite on :5173, proxying /api/* to `make serve` on :8000.
+web-dev:
+	cd web && npm run dev
+
+# What CI's web-test job runs: typecheck, then Playwright against a mocked backend.
+web-check:
+	cd web && npm run typecheck && npx playwright test
+
+# Build the production UI image locally (CI's web-build job builds and pushes it).
+web-image:
+	docker build -t sre-webapp:local web

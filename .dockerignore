@@ -31,3 +31,6 @@ docs/
 
 # OS files
 .DS_Store
+
+# Web UI (built from web/ into its own image)
+web/

@@ -1,0 +1,48 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Secrets / credentials (defensive — repo currently has no .env, but
+# anyone running `npm run dev` against a non-default backend may add one)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+vault_password
+*.secret
+
+# Claude Code workspace-local config
+.claude/
+
+# Engineering team working dir (evaluation reports, plans, screenshots)
+.engineering-team/
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/.playwright-mcp/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

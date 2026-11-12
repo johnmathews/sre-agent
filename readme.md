@@ -1,14 +1,15 @@
 # HomeLab SRE Assistant
 
-**Status:** active. **Last updated:** 2026-11-11. **Last verified:** 2026-11-11 (claims checked against `src/` at
-`69a7f84`. Live deployment not re-verified).
+**Status:** active. **Last updated:** 2026-11-12. **Last verified:** 2026-11-12 (web UI and CI claims checked against
+`web/` and `.github/workflows/ci.yml` on branch `eng-web-monorepo`; the rest against `src/` at `69a7f84`. Live
+deployment not re-verified).
 
-An MCP server and AI agent for a Proxmox homelab. It serves read-only tools for Prometheus, Grafana, Loki, Proxmox VE,
-Proxmox Backup Server (PBS), TrueNAS and a runbook knowledge base over MCP at `/mcp`, and the same tools to a chat agent
-at `/ask`.
+An MCP server, AI agent and web UI for a Proxmox homelab. It serves read-only tools for Prometheus, Grafana, Loki,
+Proxmox VE, Proxmox Backup Server (PBS), TrueNAS and a runbook knowledge base over MCP at `/mcp`, and the same tools to a
+chat agent at `/ask`, which the Vue web UI in `web/` puts in front of a person.
 
-Most use comes from MCP clients: Claude Code sessions, the claude.ai connector and other homelab apps. The chat agent
-backs a separate Vue web UI ([sre-webapp](https://github.com/johnmathews/sre-webapp)) and a CLI. The app also writes a
+`/mcp` and the web UI are both first-class interfaces ([ADR-0007](docs/adr/0007-mcp-and-the-web-ui-are-both-first-class.md)). MCP clients are Claude Code sessions, the claude.ai
+connector and other homelab apps. The chat agent backs the web UI and a CLI. The app also writes a
 weekly reliability report, explains Gatus outages and reviews pending container image upgrades.
 
 ---
@@ -100,8 +101,12 @@ make report
 make check
 ```
 
-The web UI lives in [sre-webapp](https://github.com/johnmathews/sre-webapp). In development, `npm run dev` there proxies
-`/api` to this server on `:8000`.
+The web UI lives in `web/` (Vue 3, npm, Node 22). `make web-install` once, then `make web-dev` serves it on `:5173` and
+proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck and Playwright suite, and `make web-image` builds its image locally.
+
+Web UI docs: [architecture](docs/web/architecture.md), [API integration](docs/web/api-integration.md),
+[deployment](docs/web/deployment.md), [development](docs/web/development.md) and the
+[stream-failure runbook](docs/web/runbooks/triaging-webapp-stream-failures.md).
 
 ### macOS: Local Network Access
 
@@ -113,16 +118,16 @@ route to host`. tmux runs under `launchd`, so the Python process loses the termi
 
 ## Deploying with Docker
 
-The backend builds one image that runs as two services. The web UI is a separate image.
+The backend builds one image that runs as two services. The web UI builds its own image from `web/`.
 
 | Service      | Image                            | Port | Description                                                   |
 | ------------ | -------------------------------- | ---- | ------------------------------------------------------------- |
 | `sre-ingest` | `ghcr.io/johnmathews/sre-agent`  | none | One-shot job that builds the Chroma vector store              |
 | `sre-agent`  | `ghcr.io/johnmathews/sre-agent`  | 8000 | FastAPI app: `/mcp`, the chat agent, reports and the jobs     |
-| `sre-webapp` | `ghcr.io/johnmathews/sre-webapp` | 8080 | Vue 3 SPA ([johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp)) |
+| `sre-webapp` | `ghcr.io/johnmathews/sre-webapp` | 8080 | Vue 3 SPA built from `web/`, nginx proxying `/api` to `sre-agent` |
 
-The intended host is a Linux VM or LXC on the same LAN as Prometheus, Grafana and the other monitored systems. Both
-images are published on every push to `main` of their repos.
+The intended host is a Linux VM or LXC on the same LAN as Prometheus, Grafana and the other monitored systems. CI publishes
+each image on a push to `main` that changes its files (see CI/CD).
 
 ### Endpoints
 
@@ -298,17 +303,24 @@ docker compose -f docker-compose.demo.yml up -d
 
 ## CI/CD
 
-One GitHub Actions workflow, `.github/workflows/ci.yml`, runs two jobs:
+One GitHub Actions workflow, `.github/workflows/ci.yml`, tests both halves and publishes two images. A `changes` job
+sorts each push into the server's files (`src/`, `scripts/`, `runbooks/`, `pyproject.toml`, `uv.lock`, `Dockerfile`,
+`.dockerignore`) and `web/`; a change to the workflow counts as both.
 
-1. **check** runs on pushes to `main` and on pull requests: `make lint`, `make typecheck` and `make test`. `make test`
-   runs the unit and integration tests under `coverage` and fails below the floor (`fail_under` in `pyproject.toml`).
-2. **build** runs on pushes to `main` after `check` passes. It builds the image, smoke-tests it, then pushes
+1. **check** runs on pushes to `main` and on pull requests, whatever changed: `make lint`, `make typecheck` and
+   `make test`. `make test` runs the unit and integration tests under `coverage` and fails below the floor
+   (`fail_under` in `pyproject.toml`). It includes `tests/test_web_contract.py`, which checks the UI's types against
+   the server.
+2. **web-test** runs when `web/` changed: the UI's typecheck and its Playwright suite on four browser projects.
+3. **build** runs on pushes to `main` that changed the server's files, after `check` passes. It builds the image, smoke-tests it, then pushes
    `ghcr.io/johnmathews/sre-agent:latest` and `:sha-<commit>`. The smoke test (`scripts/smoke_image.sh`, or `make smoke`
    locally) starts the image with dummy config and checks `/health`, the `/mcp` `initialize` and `tools/list` calls (at
    least 10 tools) and the bundled Claude CLI. If it fails then the job prints the container logs and pushes nothing.
+4. **web-build** runs on pushes to `main` that changed `web/`, after `web-test` passes. It pushes
+   `ghcr.io/johnmathews/sre-webapp:latest` and `:sha-<commit>`.
 
-The home server's What's Up Docker (WUD) redeploys `:latest` about a minute after a push, so `main` reaches production
-only through these two gates.
+The home server's What's Up Docker (WUD) redeploys each `:latest` about a minute after a push, so `main` reaches
+production only through these gates. A UI-only push leaves the server, and `/mcp`, running.
 
 `make hooks` installs a pre-commit hook (ruff lint and format check) and a pre-push hook (`make check`). It works from a
 git worktree too.
@@ -318,7 +330,7 @@ git worktree too.
 ## Architecture
 
 ```
-MCP clients (Claude Code, claude.ai,          Web UI (sre-webapp)        CLI (make chat)
+MCP clients (Claude Code, claude.ai,          Web UI (web/)              CLI (make chat)
 other homelab apps)                                  │                         │
         │                                            │                         │
 Cloudflare tunnel + Access                           │                         │
@@ -466,7 +478,7 @@ APIs. It scores tool selection deterministically and answer quality with an LLM 
 | LLM             | Anthropic API or OpenAI API                                      |
 | Vector store    | Chroma, with OpenAI embeddings                                   |
 | Backend         | FastAPI on uvicorn                                               |
-| Frontend        | Vue 3 SPA (separate repo) and a CLI                              |
+| Frontend        | Vue 3 SPA in `web/` (Vite, Pinia, Tailwind v4) and a CLI         |
 | Scheduling      | APScheduler                                                      |
 | Storage         | SQLite (memory, Upgrade Advisor, incidents), JSON (conversations) |
 | Observability   | Prometheus, Grafana, Loki                                        |
@@ -537,13 +549,13 @@ Ansible project. Production secrets come from Ansible Vault as environment varia
 
 ```
 sre-agent/
-├── .github/workflows/ci.yml   # check, then build, smoke-test and push the image
+├── .github/workflows/ci.yml   # check and web-test, then build and push each changed image
 ├── .env.example               # every setting, with placeholder values
 ├── CLAUDE.md                  # guidance for Claude Code in this repo
 ├── Dockerfile                 # two-stage build on python:3.13-slim, uvicorn on :8000
 ├── docker-compose.yml         # sre-ingest, sre-agent, sre-webapp, built locally
 ├── docker-compose.demo.yml    # the same stack from published images
-├── Makefile                   # dev, check, serve, ingest, chat, eval, report, advisor, smoke, hooks
+├── Makefile                   # dev, check, serve, ingest, chat, eval, report, advisor, smoke, hooks, web-*
 ├── pyproject.toml, uv.lock    # dependencies, ruff, mypy, pytest and coverage settings
 ├── pyrightconfig.json         # pyright settings
 ├── dashboards/
@@ -551,6 +563,7 @@ sre-agent/
 ├── docs/
 │   ├── adr/                   # architecture decision records
 │   ├── archive/               # superseded design docs
+│   ├── web/                   # the web UI: architecture, API integration, deployment, development
 │   ├── architecture.md        # components, data flow, MCP, observability, deployment
 │   ├── code-flow.md           # request lifecycle, tool registration, metrics flow
 │   ├── conversation-history.md # conversation file format and resume
@@ -578,7 +591,8 @@ sre-agent/
 │   ├── upgrades/              # Upgrade Advisor
 │   ├── cli.py                 # interactive CLI
 │   └── config.py              # settings (pydantic-settings)
-└── tests/                     # unit and integration tests, MCP contract snapshot
+├── tests/                     # unit and integration tests, MCP contract snapshot, web UI contract
+└── web/                       # the Vue web UI: src/, tests/e2e/ (Playwright), Dockerfile, nginx template
 ```
 
 ---

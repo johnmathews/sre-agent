@@ -6,7 +6,8 @@
 #
 # Embedding into an existing stack:
 #   Copy the sre-agent and sre-webapp services below into your compose file.
-#   Replace `build: .` with `image: ghcr.io/johnmathews/sre-agent:latest`,
+#   Replace `build: .` with `image: ghcr.io/johnmathews/sre-agent:latest` and
+#   `build: web` with `image: ghcr.io/johnmathews/sre-webapp:latest`,
 #   adjust ports, and add your network. The sre-ingest step only needs to run
 #   once to populate the chroma_data volume.
 #
@@ -62,8 +63,8 @@ services:
       start_period: 15s
 
   sre-webapp:
-    # Vue 3 SPA frontend — see johnmathews/sre-webapp
-    image: ghcr.io/johnmathews/sre-webapp:latest
+    # Vue 3 SPA frontend, built from web/ (docs/web/deployment.md)
+    build: web # or: image: ghcr.io/johnmathews/sre-webapp:latest
     ports:
       - "${SRE_WEBAPP_PORT:-8080}:80"
     restart: unless-stopped

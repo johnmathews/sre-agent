@@ -47,8 +47,8 @@ A user question arrives via one of four interfaces:
 
 - **FastAPI** — `POST /ask` with JSON body `{"question": "...", "session_id": "..."}` (`src/api/main.py`)
 - **FastAPI (streaming)** — `POST /ask/stream` with the same JSON body, returns Server-Sent Events (`src/api/main.py`)
-- **Web UI** — chat input calls `/ask/stream` SSE endpoint for live tool progress (separate repo:
-  [johnmathews/sre-webapp](https://github.com/johnmathews/sre-webapp))
+- **Web UI** — chat input calls `/ask/stream` SSE endpoint for live tool progress (`web/src/api/stream.ts`; see
+  [web/api-integration.md](web/api-integration.md))
 - **CLI** — interactive REPL calls the agent directly (`src/cli.py`)
 
 ### 2. Agent Invocation

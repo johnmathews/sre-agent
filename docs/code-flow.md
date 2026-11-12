@@ -611,7 +611,8 @@ verify_deploy(id)   # after the delay, or from verify_pending()
 5. Proxmox VE (if configured) — `GET /api2/json/version` with API token
 6. PBS (if configured) — `GET /api2/json/version` with API token
 7. OAuth token (`LLM_PROVIDER=anthropic` only) — `oauth_refresh.get_token_health()`
-8. Vector store — checks if the `.chroma_db/` directory exists
+8. Vector store — `index_state()` (`src/agent/retrieval/index.py`): unhealthy when the store is missing or its live
+   collection is empty; an index out of date with the runbooks is healthy with a detail line
 9. MCP server — healthy only when the lifespan set the server and the dispatch target, and `list_tools()` returns
    exactly the count the registry enables (above zero)
 

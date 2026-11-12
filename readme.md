@@ -85,7 +85,7 @@ make dev
 # and ANTHROPIC_API_KEY when LLM_PROVIDER=anthropic.
 cp .env.example .env
 
-# Build the runbook vector store
+# Build the runbook vector store now (optional: make serve builds it at startup)
 make ingest
 
 # Start the API (with /mcp) on :8000
@@ -123,7 +123,7 @@ The backend builds one image that runs as two services. The web UI builds its ow
 
 | Service      | Image                            | Port | Description                                                   |
 | ------------ | -------------------------------- | ---- | ------------------------------------------------------------- |
-| `sre-ingest` | `ghcr.io/johnmathews/sre-agent`  | none | One-shot job that builds the Chroma vector store              |
+| `sre-ingest` | `ghcr.io/johnmathews/sre-agent`  | none | One-shot manual rebuild of the Chroma vector store            |
 | `sre-agent`  | `ghcr.io/johnmathews/sre-agent`  | 8000 | FastAPI app: `/mcp`, the chat agent, reports and the jobs     |
 | `sre-webapp` | `ghcr.io/johnmathews/sre-webapp` | 8080 | Vue 3 SPA built from `web/`, nginx proxying `/api` to `sre-agent` |
 
@@ -247,32 +247,29 @@ Prometheus and Grafana run in Docker on the same host, a shared Docker network l
 
 ### Vector Store Persistence
 
-The Chroma store lives in the `chroma_data` volume and survives restarts and image updates. Ingest reads `.md` files
-from the `runbooks/` directory baked into the image and from any directory in `EXTRA_DOCS_DIRS`. To add host docs such
-as an Ansible repo, mount them read-only into `sre-ingest`:
+The Chroma store lives in the `chroma_data` volume and survives restarts and image updates. It indexes the `.md`
+files in the `runbooks/` directory baked into the image and in any directory in `EXTRA_DOCS_DIRS`.
+
+`sre-agent` keeps it current. At startup and every `RUNBOOK_INDEX_CHECK_INTERVAL_S` (default 600 s) it compares the
+store with those files, and rebuilds it in the background when they differ, so a new image with changed runbooks needs
+no manual step. `sre_assistant_runbook_index_in_sync` reports the result, and
+`runbooks/rebuilding-the-vector-store.md` covers the details and the alert.
+
+To index host docs such as an Ansible repo, mount them read-only into `sre-agent`, and into `sre-ingest` if you use
+it:
 
 ```yaml
-  sre-ingest:
-    image: ghcr.io/johnmathews/sre-agent:latest
-    command: ["python", "-m", "scripts.ingest_runbooks"]
-    env_file: .env
+  sre-agent:
     volumes:
       - chroma_data:/app/.chroma_db
       - /path/to/home-server:/app/ansible:ro
     environment:
       - EXTRA_DOCS_DIRS=/app/ansible
-    profiles: ["setup"]
 ```
 
-Re-run ingest after a new image or a change to the external docs, then restart the agent so it reads the rebuilt store:
-
-```bash
-docker compose run --rm sre-ingest
-docker compose restart sre-agent
-```
-
-Ingest checks its settings and makes one embedding call before it clears the old store, so a missing key leaves the
-current index in place. It needs `OPENAI_API_KEY` and, with `LLM_PROVIDER=anthropic`, a non-empty `ANTHROPIC_API_KEY`.
+`sre-ingest` is the manual fallback: `docker compose run --rm sre-ingest` rebuilds the store, and the running agent
+reads the new collection on its next search. It needs only `OPENAI_API_KEY`: it runs as `LLM_PROVIDER=openai`,
+because it only embeds. A failed build leaves the current index in place.
 
 ### Updating
 

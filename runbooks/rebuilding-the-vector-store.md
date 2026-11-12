@@ -1,200 +1,131 @@
 # Rebuilding the Chroma vector store
 
-> **Use when:** you've added or edited a runbook (or anything in
-> `EXTRA_DOCS_DIRS`) and want it to appear in the agent's RAG search;
-> the agent's runbook search returns nothing or stale results; you're
-> setting the stack up on a new host for the first time; or a fresh
-> deploy hits a `readonly database` error from Chroma.
+> **Use when:** the "SRE agent on Infra VM: runbook index out of date" alert fires; the agent's runbook search returns nothing
+> or stale results; `/health` shows `vector_store` unhealthy; you're setting the stack up on a new host; or Chroma
+> fails with `readonly database`.
 
-The sre-agent's runbook search is backed by a Chroma vector store at
-`/app/.chroma_db` inside the container, mounted from the
-`chroma_data` Docker volume. The store is **rebuilt by hand on
-demand** — there is no live re-index. New runbooks aren't searchable
-until you run an ingest.
+The agent's runbook search reads a Chroma vector store at `/app/.chroma_db` inside the container, mounted from the
+`chroma_data` Docker volume (`infra_chroma_data` on infra). **sre-agent keeps it current itself.** At startup and every
+`RUNBOOK_INDEX_CHECK_INTERVAL_S` (default 600 s) it compares the store with the runbooks in its image, and rebuilds
+the store in the background when they differ. A new image with changed runbooks is indexed within a minute or two of
+WUD redeploying it, with no restart and no manual step.
 
 ## TL;DR
 
 ```bash
-# Routine rebuild (re-indexes all configured sources)
+# Is it current? 1 = in sync. (Prometheus, or the sre-agent MCP prometheus_instant_query)
+max(sre_assistant_runbook_index_in_sync{job="sre-agent"})
+
+# Why not? The check loop logs every decision.
+docker logs sre-agent 2>&1 | grep -i "runbook index"
+
+# Rebuild by hand (from /srv/infra on infra). No restart needed afterwards.
 docker compose run --rm sre-ingest
 ```
 
-That's it for the common case. The `--profile setup` flag is *not*
-required — naming the service explicitly auto-activates its profile
-for that one invocation. Read the rest of this runbook only if the
-common case fails or you're doing something unusual.
+## How the index knows it is current
+
+The store holds one live collection, named `runbooks-<fingerprint>-<build id>`, and a manifest beside it,
+`/app/.chroma_db/index-manifest.json`:
+
+```json
+{ "fingerprint": "835cf138faad…", "collection": "runbooks-835cf138faad-33d764cf",
+  "chunks": 292, "files": 20, "built_at": 1762953600.0, "built_by": "sre-agent" }
+```
+
+- **The fingerprint** is a SHA-256 over every indexed `.md` file (its name and bytes) plus the chunk size, chunk
+  overlap and embedding model. Any edit, new file, rename or chunking change changes it.
+- **In sync** means the manifest's fingerprint equals the fingerprint of the files present now, and the collection
+  holds the manifest's chunk count.
+- **A rebuild** embeds into a new collection, rewrites the manifest to point at it, then deletes the old collections.
+  A failed build changes nothing, and a search during a build reads the old collection.
+- **The code** is `src/agent/retrieval/index.py`.
 
 ## What gets indexed
 
-`scripts/ingest_runbooks.py` calls `load_all_documents()` from
-`src/agent/retrieval/embeddings.py`. The corpus is:
+1. Every `*.md` file directly in `runbooks/`, baked into the image at build time.
+2. Every `*.md` file directly in each directory in `EXTRA_DOCS_DIRS` (comma-separated absolute paths; empty on
+   infra). Relative or missing paths are skipped with a warning, so a directory has to be mounted into `sre-agent`
+   (and into `sre-ingest`, if you run it) to be indexed.
 
-1. Everything in `runbooks/` inside the repo (these get baked into
-   the image at build time via
-   `COPY --from=builder --chown=1001:1001 /app/runbooks/ runbooks/`).
-2. Plus any directories listed in the `EXTRA_DOCS_DIRS` env var
-   (colon-separated). Used in production to mount
-   `/path/to/ansible-home-server` into the container so Ansible
-   playbooks/inventories are searchable too.
+## Signals
 
-Whatever exists *on disk inside the container at ingest time* gets
-indexed. Files added to the host repo after the image was built
-are visible only if they're in a bind-mount or a directory listed
-in `EXTRA_DOCS_DIRS`.
+| Signal | Meaning |
+|---|---|
+| `sre_assistant_runbook_index_in_sync` | 1 when in sync, 0 otherwise. Read from the store on each scrape. |
+| `sre_assistant_runbook_index_chunks` | Chunks in the live collection (292 from 20 runbooks on 2026-11-12). |
+| `sre_assistant_runbook_index_built_timestamp_seconds` | When the live collection was built; 0 with no manifest. |
+| `sre_assistant_runbook_index_rebuilds_total{status}` | Rebuilds the check loop started: `success` or `error`. |
+| `/health` → `vector_store` | Unhealthy when the store is missing or empty. Out of date is healthy, with a detail line. |
+| Grafana "SRE agent on Infra VM: runbook index out of date" | `in_sync` below 1 for 30 min, or no data. Pushover. |
 
-## Runtime variants
+The alert's 30 minutes spans three checks, so it fires only when rebuilds keep failing, auto-rebuild is off, or
+sre-agent is down.
+
+## When the alert fires
+
+1. Read the loop's log: `docker logs sre-agent 2>&1 | grep -i "runbook index"`. Each check logs one line: in sync,
+   or not in sync with the reason, then either the new collection or `Runbook index rebuild failed` with a traceback.
+2. Match the failure:
+   - **`Embeddings preflight failed`** — `OPENAI_API_KEY` is missing, revoked or out of credit. Embeddings always use
+     OpenAI, whatever `LLM_PROVIDER` says. Fix the key in `/srv/infra/.env`, then `docker compose up -d sre-agent`.
+   - **`readonly database`** or a permission error — see "Permissions" below.
+   - **`No documents found`** — the image has no runbooks, which means a broken build. Check the image.
+   - **No data** (the gauge is absent) — sre-agent is down or Prometheus can't scrape it. The "Scrape target down"
+     rule fires alongside.
+3. Once the cause is fixed, the next check (within 10 minutes) rebuilds. To rebuild now, run
+   `docker compose run --rm sre-ingest`, or `docker restart sre-agent` (its startup check rebuilds; `/mcp` drops for
+   about 20 s).
+
+## Rebuilding by hand
 
 | Where you are | Command |
 |---|---|
-| Inside the repo, on the host, no Docker | `make ingest` (= `uv run python -m scripts.ingest_runbooks`) — writes to a host-local `.chroma_db/` directory; **does not** touch the container's volume. |
-| Local dev with the docker-compose stack | `docker compose run --rm sre-ingest` — runs the setup-profile container, writes to the `chroma_data` volume that `sre-agent` reads. |
-| Production (`infra` VM) | Same: `docker compose run --rm sre-ingest` from the deploy directory. The Ansible role for sre-agent uses this in its `restart` handler when runbooks change. |
+| Production (infra, `/srv/infra`) | `docker compose run --rm sre-ingest` |
+| Local docker-compose stack | `docker compose run --rm sre-ingest` |
+| The repo on the host, no Docker | `make ingest` — writes a host-local `.chroma_db/`, separate from any container's volume |
 
-The host-local `.chroma_db/` and the container volume `chroma_data`
-are *separate stores*. If you `make ingest` on the host then start
-the container, the container will still see only what was previously
-in its volume. This is a frequent source of "I added the runbook,
-why doesn't the agent see it?" — the answer is almost always "you
-ran the wrong variant for your runtime".
+`sre-ingest` runs `python -m scripts.ingest_runbooks` from the same image. It needs `OPENAI_API_KEY` and nothing
+else from the LLM settings: it runs as `LLM_PROVIDER=openai` whatever `.env` says, because it only embeds. Naming the
+service auto-activates its `setup` profile, so `--profile setup` is not needed.
 
-## What the script actually does
+A running sre-agent reads the new collection on its next search, because every search opens the collection the
+manifest names. No restart is needed.
 
-`scripts/ingest_runbooks.py:21-32` — clears the existing store first:
-
-```python
-if CHROMA_PERSIST_DIR.exists():
-    for child in CHROMA_PERSIST_DIR.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-```
-
-Note the *contents* are deleted, not the directory itself — when
-running in Docker, the directory is a volume mountpoint and removing
-it would fail with `EBUSY`. After clearing, `build_vector_store()`
-re-embeds everything and persists. The rebuild is destructive — there
-is no incremental ingest path. Cost is minor (low hundreds of small
-markdown files) but worth knowing.
+`--wipe` deletes the whole store before building:
+`docker compose run --rm sre-ingest python -m scripts.ingest_runbooks --wipe` (arguments after the service name
+replace its command, so give the whole command). Use it only when
+Chroma cannot open the store at all. It gives up the "a failed build changes nothing" guarantee: if the build then
+fails, the store is empty until the next successful one.
 
 ## Permissions: the uid 1001 gotcha
 
-Both `sre-agent` and `sre-ingest` run as **uid 1001** (the `app`
-user defined in `Dockerfile:33`, with `USER 1001:1001` set as the
-runtime default). Both share the `chroma_data` volume.
-
-If the volume on the host was created or written-to by a different
-uid, Chroma fails at runtime with `readonly database`. This bit us
-once (see `journal/260504-runbook-search-perms-and-docs-mcp-wiring.md`)
-when the production volume `infra_chroma_data` had been populated
-under root.
-
-**Fix on the prod host (one-shot):**
+Both `sre-agent` and `sre-ingest` run as **uid 1001** (the `app` user in the `Dockerfile`). If the volume was written
+by another uid, Chroma fails with `readonly database`. This happened once, when `infra_chroma_data` had been populated
+as root (`journal/260504-runbook-search-perms-and-docs-mcp-wiring.md`). Fix on the host:
 
 ```bash
 sudo chown -R 1001:1001 /var/lib/docker/volumes/infra_chroma_data/_data
 docker compose run --rm sre-ingest
-docker compose up -d
 ```
 
-Local docker-compose volumes are usually owned by your host user
-(uid 1000 on most Linux distros) and the same fix applies — use
-the actual volume path from `docker volume inspect <name>`.
+A fresh, empty volume needs no fix: the first build creates its files as uid 1001.
 
-This is **only** an issue when:
+## Turning auto-rebuild off
 
-1. The volume already has files on it.
-2. Those files were created by a uid that isn't 1001.
-3. You're running `sre-ingest` (or `sre-agent`) for the first time
-   after a Docker / volume / uid change.
+Set `RUNBOOK_INDEX_AUTO_REBUILD=false` in `.env` and `docker compose up -d sre-agent`. The loop then only reports,
+the gauge still goes to 0 when the index falls behind, and the alert tells you to run `sre-ingest`.
+`RUNBOOK_INDEX_CHECK_INTERVAL_S=0` keeps the startup check only.
 
-A fresh empty volume mounts cleanly without intervention because
-the ingest creates files itself, owned by uid 1001.
+## Verifying a rebuild
 
-## Verifying the rebuild
-
-After the ingest container exits cleanly, verify:
-
-```bash
-# Confirm something was written.
-docker run --rm -v <project>_chroma_data:/data alpine \
-  ls -la /data | head
-
-# Or, more usefully, ask the agent to search a runbook you know exists.
-# From the API:
-curl -s -X POST http://localhost:8000/ask/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"What is in the disk-management runbook?"}' \
-  | tail -20
-```
-
-Or from the SRE agent webapp, ask a question whose answer is in a
-runbook you just added. If the agent's response cites the new
-runbook content, ingest worked. If it answers without citing
-anything new, the runbook either wasn't in the indexed paths or
-the ingest didn't re-run.
-
-## Adding `EXTRA_DOCS_DIRS` for the first time
-
-In `.env`:
-
-```bash
-EXTRA_DOCS_DIRS=/app/ansible-home-server:/app/some-other-docs
-```
-
-In `docker-compose.yml`, mount the host directories so the paths
-exist inside the container:
-
-```yaml
-sre-agent:
-  volumes:
-    - chroma_data:/app/.chroma_db
-    - /home/john/projects/ansible-home-server:/app/ansible-home-server:ro
-sre-ingest:
-  volumes:
-    - chroma_data:/app/.chroma_db
-    - /home/john/projects/ansible-home-server:/app/ansible-home-server:ro
-```
-
-Then rebuild: `docker compose run --rm sre-ingest`.
-
-The mount must exist on **both** services — `sre-ingest` to read
-the docs at index time, `sre-agent` because the retriever stores
-absolute paths and may attempt to re-read source files when
-producing citations.
-
-## Common mistakes
-
-1. **Ran `make ingest` on the host expecting the container to see
-   it.** Different stores. Use `docker compose run --rm sre-ingest`
-   for the container variant.
-2. **Forgot the new doc isn't baked into the image.** Files in
-   `runbooks/` are copied at image build time; rebuilding the
-   *vector store* doesn't rebuild the *image*. If you added the
-   doc to the repo and rebuilt the image (`docker compose build`),
-   then ran ingest, you're fine. If you only edited a file inside
-   the running container, that's lost on next pull.
-3. **Set `EXTRA_DOCS_DIRS` but didn't mount the path into the
-   `sre-ingest` container.** The path exists on the host, but the
-   ingest container can't see it — `load_all_documents()` silently
-   skips missing dirs. Add the volume mount on `sre-ingest`, not
-   just on `sre-agent`.
-4. **Ran ingest while `sre-agent` was actively serving requests.**
-   The ingest container clears the store before re-populating it.
-   Concurrent `sre-agent` reads during the clear-then-rebuild window
-   can fail or return empty results. Either bring the agent down
-   first (`docker compose stop sre-agent`) or accept a few-second
-   blip during rebuild.
+- `in_sync` is 1 and `chunks` is about 292 (it grows with the runbooks).
+- The log shows `Index collection runbooks-… is live (N chunks, fingerprint …)`.
+- Through the agent or the sre-agent MCP: `runbook_search` for a phrase you know is in a new runbook returns it.
 
 ## Related
 
-- `Makefile` — the `ingest` target and the host-side variant.
-- `scripts/ingest_runbooks.py` — the actual entry point.
-- `src/agent/retrieval/embeddings.py` —
-  `load_all_documents()` and the `EXTRA_DOCS_DIRS` parsing
-  (line 145+).
-- `Dockerfile:33-46` — the uid 1001 setup.
-- `docker-compose.yml` `sre-ingest` service — profile, env, volumes.
-- `journal/260504-runbook-search-perms-and-docs-mcp-wiring.md` —
-  the original incident that motivated the uid-1001 fix and this
-  runbook.
+- `src/agent/retrieval/index.py`: fingerprint, manifest, rebuild, check loop.
+- `scripts/ingest_runbooks.py`: the manual entry point.
+- home-server `documentation/grafana-alerting.md`, note 11: the alert rule.
+- `journal/261112-ingest-auto-rebuild-and-alert.md`: why it works this way (issue #59).

@@ -18,12 +18,15 @@
 
 | ADR | Decision | Date |
 | --- | --- | --- |
-| [ADR-0001](0001-mcp-is-the-primary-interface.md) | MCP at `/mcp` is the primary interface | 2026-11-11 |
 | [ADR-0002](0002-mcp-auth-is-access-plus-an-in-app-check.md) | MCP authentication is Cloudflare Access plus an in-app JWT check | 2026-11-11 |
 | [ADR-0003](0003-deploy-is-never-an-agent-or-mcp-tool.md) | The deploy capability is never an agent or MCP tool | 2026-10-26, recorded 2026-11-11 |
 | [ADR-0004](0004-the-langgraph-path-stays-for-now.md) | The LangGraph/OpenAI agent path stays for now | 2026-03-21, recorded 2026-11-11 |
 | [ADR-0005](0005-the-memory-store-stays-off-and-says-so.md) | The memory store stays off, and says so | 2026-11-11 |
+| [ADR-0006](0006-the-web-ui-lives-in-this-repo.md) | The web UI lives in this repo under `web/` | 2026-11-12 |
+| [ADR-0007](0007-mcp-and-the-web-ui-are-both-first-class.md) | `/mcp` and the web UI are both first-class interfaces | 2026-11-12 |
 
 ## 3. Superseded
 
-None yet.
+| ADR | Decision | Superseded by |
+| --- | --- | --- |
+| [ADR-0001](0001-mcp-is-the-primary-interface.md) | MCP at `/mcp` is the primary interface | [ADR-0007](0007-mcp-and-the-web-ui-are-both-first-class.md), 2026-11-12 |

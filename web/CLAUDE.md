@@ -1,7 +1,10 @@
-# sre-webapp — Claude Code instructions
+# Web UI (`web/`) — Claude Code instructions
 
-Vue 3 SPA frontend for the SRE Agent. The companion backend lives in the sibling
-repo `sre-agent/` (FastAPI + LangChain). This repo contains *only* the frontend.
+Vue 3 SPA frontend for the SRE Agent, one of the server's two first-class
+interfaces (ADR-0007). The backend is the rest of this repo (FastAPI, `src/`);
+the root `CLAUDE.md` covers it. This file covers only `web/`. Paths below are
+relative to `web/` unless they start with the repo root's `docs/`, `tests/` or
+`src/api/main.py`.
 
 ## Stack
 
@@ -26,9 +29,10 @@ src/
   App.vue       root layout (sidebar + chat), mobile breakpoint, visualViewport tracking
   style.css     Tailwind import + global resets, safe-area helpers, markdown styles
 docker/         nginx.conf.template (used at container start via envsubst)
-docs/           architecture, api-integration, deployment, development
-journal/        dated entries — YYMMDD-descriptive-name.md
 tests/e2e/      Playwright specs
+
+Docs live in the repo root's docs/web/ (architecture, api-integration,
+deployment, development). Journal entries go in the root journal/.
 ```
 
 ## Commands
@@ -55,22 +59,25 @@ relies on either Vite's proxy (dev) or nginx's `API_UPSTREAM` upstream (prod).
 - `POST /ask/stream` — Server-Sent Events; chunks of assistant text plus
   tool-progress events parsed in `src/api/stream.ts`
 
-When changing endpoints, update both the backend (in `sre-agent/`) **and**
-`docs/api-integration.md` so the contract stays documented.
+When changing endpoints, change the backend (`src/api/main.py`), the types in
+`src/api/*.ts` and `docs/web/api-integration.md` in the same PR. The repo
+root's `tests/test_web_contract.py` fails when the TypeScript types, stream
+event types or special-cased error reasons drift from the server.
 
 ## Deployment
 
 Multi-stage Dockerfile builds the SPA with Node, then serves `dist/` via nginx.
 Image is published to `ghcr.io/johnmathews/sre-webapp:latest` on every push to
-`main` (workflow: `.github/workflows/ci.yml`).
+`main` that changes `web/`, after `web-test` passes (root
+`.github/workflows/ci.yml`, job `web-build`).
 
 The nginx config is a `.template` that envsubsts `API_UPSTREAM` at container
 start (default `http://sre-api:8000`). Do not hardcode upstream hosts — set
 them through the env var.
 
-`docker-compose.demo.yml` is the canonical "pull from GHCR and run" stack
-(webapp + backend). Production deploy lives on the `infra` VM (see the
-parent-repo `CLAUDE.md`).
+The root `docker-compose.demo.yml` is the canonical "pull from GHCR and run"
+stack (webapp + backend); the root `docker-compose.yml` builds both from
+source. Production runs on the `infra` VM (root `CLAUDE.md`, "Shipping").
 
 ## iOS / mobile considerations
 
@@ -133,7 +140,7 @@ If you change the mobile layout, verify on a real iPhone PWA install.
 The Playwright suite covers a lot — including a simulated-inset test on
 all four projects — but device-only behaviour (real keyboard, real
 network handoff, real Dynamic Island) needs a real-device pass. See
-`docs/development.md` § "Mobile testing checklist".
+`docs/web/development.md` § "Mobile testing checklist".
 
 ## Conventions
 
@@ -157,11 +164,9 @@ they don't require the real FastAPI service. Add tests when:
 - Fixing a regression that wasn't caught (write the failing test first)
 - Touching streaming or SSE parsing — these are the most fragile areas
 
-Run `npm test` before pushing UI changes. CI runs typecheck + Playwright on
-every PR.
+Run `npm test` (or `make web-check` from the repo root) before pushing UI
+changes. CI runs typecheck + Playwright on every PR that touches `web/`.
 
 ## Related
 
-- Backend: `../sre-agent/` (FastAPI + LangChain agent, separate git repo)
-- Parent repo `CLAUDE.md`: `../CLAUDE.md` (covers the MCP tools available
-  for querying live homelab infrastructure)
+- Backend and repo-wide rules: the root `CLAUDE.md` (`../CLAUDE.md`).

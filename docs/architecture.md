@@ -6,11 +6,14 @@ The HomeLab SRE Assistant serves read-only SRE tools for a Proxmox homelab with 
 telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a runbook knowledge base. The app has three
 surfaces, all in one FastAPI process:
 
-1. **MCP server at `/mcp`**, the primary surface. Claude Code sessions, the claude.ai connector, the nanoclaw
+`/mcp` and the web UI are both first-class interfaces ([ADR-0007](adr/0007-mcp-and-the-web-ui-are-both-first-class.md)).
+
+1. **MCP server at `/mcp`.** Claude Code sessions, the claude.ai connector, the nanoclaw
    assistant and other homelab apps call its tools directly over Streamable HTTP. No agent loop runs and no LLM is
    called on this side. See [MCP Server Endpoint](#mcp-server-endpoint) and [mcp-clients.md](mcp-clients.md).
-2. **Chat agent at `/ask` and `/ask/stream`**, used by the webapp (sre-webapp) and the CLI. An LLM picks the tools
-   and writes the answer.
+2. **Chat agent at `/ask` and `/ask/stream`**, used by the web UI in `web/` ([docs/web/](web/architecture.md)) and
+   the CLI. An LLM picks the tools and writes the answer. `tests/test_web_contract.py` checks the UI's types against
+   these endpoints.
 3. **Background jobs:** the weekly reliability report, the Upgrade Advisor and the incident explainer (a Gatus
    webhook).
 
@@ -888,8 +891,10 @@ the standalone version.
 ### How a change reaches production
 
 1. A push to `main` runs the CI `check` job (`.github/workflows/ci.yml`): lint, typecheck, and the tests under the
-   coverage floor.
-2. The `build` job runs on a push only, and only after `check` passes. It builds the image, then
+   coverage floor. A `changes` job decides which images the push touches: the server's files (`src/`, `scripts/`,
+   `runbooks/`, `pyproject.toml`, `uv.lock`, `Dockerfile`, `.dockerignore`) or `web/`. Changing the workflow file
+   counts as both.
+2. The `build` job runs on a push that touched the server's files, and only after `check` passes. It builds the image, then
    `scripts/smoke_image.sh` runs it with dummy config and checks `/health`, the `/mcp` `initialize` and `tools/list`
    (at least 10 tools) and the SDK's bundled `claude --version`. Then it pushes `ghcr.io/johnmathews/sre-agent:latest`
    and `:sha-<commit>`.
@@ -898,6 +903,10 @@ the standalone version.
 4. While the container restarts, `/mcp` is down for about 20 s and clients get a Cloudflare 502 (home-server #426).
 
 `make smoke` runs the same image check locally.
+
+The web UI follows the same pattern: a push that touched `web/` runs `web-test` (typecheck and Playwright), then
+`web-build` pushes `ghcr.io/johnmathews/sre-webapp:latest` and `:sha-<commit>` from `web/`, and WUD redeploys
+`sre-webapp`. A UI-only push does not restart the server, so `/mcp` stays up.
 
 ### Request path
 
@@ -926,8 +935,8 @@ topology) that the RAG agent needs for useful answers. The deployment strategy h
 
 ### Container Architecture
 
-One Docker image (multi-stage build, `python:3.13-slim`) runs both `sre-ingest` and `sre-agent`. The webapp has its
-own image. The `docker-compose.yml` overrides the command per service:
+One Docker image (multi-stage build, `python:3.13-slim`) runs both `sre-ingest` and `sre-agent`. The web UI has its
+own image, built from `web/` (Node build stage, nginx runtime). The `docker-compose.yml` overrides the command per service:
 
 ```
 docker-compose.yml
@@ -945,12 +954,12 @@ docker-compose.yml
   |     Env: CLAUDE_CONFIG_DIR=/app/.claude, HOME=/app
   |     restart: unless-stopped
   |
-  +-- sre-webapp (Vue 3 SPA frontend, separate image)
-        Image: ghcr.io/johnmathews/sre-webapp:latest
+  +-- sre-webapp (Vue 3 SPA frontend, its own image)
+        Build: web/ (or image: ghcr.io/johnmathews/sre-webapp:latest)
         Port: 8080 -> 80
         Env: API_UPSTREAM=http://sre-agent:8000
         restart: unless-stopped, starts after api is healthy
-        See: github.com/johnmathews/sre-webapp
+        See: docs/web/deployment.md
 ```
 
 The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. Run it explicitly

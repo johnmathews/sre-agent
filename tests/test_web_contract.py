@@ -1,4 +1,4 @@
-"""The HTTP contract between the server and the web UI in web/ (ADR-0003).
+"""The HTTP contract between the server and the web UI in web/ (ADR-0006, ADR-0007).
 
 The UI declares what it reads and sends as TypeScript types in web/src/api/. These tests read those
 types and compare them with the server's Pydantic models and SSE events, so a server change that

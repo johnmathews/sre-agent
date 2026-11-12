@@ -4,13 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HomeLab SRE Assistant — an MCP server and AI agent for homelab infrastructure (Python). Its read-only tools query live
-telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a RAG knowledge base (runbooks).
+HomeLab SRE Assistant — an MCP server, AI agent and web UI for homelab infrastructure (Python server, Vue UI in
+`web/`). Its read-only tools query live telemetry (Prometheus, Grafana, Loki, Proxmox VE, PBS, TrueNAS) and a RAG
+knowledge base (runbooks).
 
-- **`/mcp` is the primary surface.** Claude Code sessions, the claude.ai connector, the nanoclaw assistant and other
-  homelab apps call the tools directly over Streamable HTTP. `docs/mcp-clients.md` is the client guide.
-- **`/ask` and `/ask/stream`** run the chat agent for the webapp and the CLI: it explains alerts, correlates changes
-  and writes incident reports.
+Two first-class interfaces (ADR-0007). A change that serves one must not break the other:
+
+- **`/mcp`.** Claude Code sessions, the claude.ai connector, the nanoclaw assistant and other homelab apps call the
+  tools directly over Streamable HTTP. `docs/mcp-clients.md` is the client guide.
+- **The web UI (`web/`)**, through `/ask/stream`, `/conversations*` and `/health`. The chat agent behind `/ask` explains
+  alerts, correlates changes and writes incident reports; the CLI uses it too. `tests/test_web_contract.py` checks the
+  UI's TypeScript types against the server, so change both sides in the same PR. `web/CLAUDE.md` holds the UI's own
+  conventions (iOS PWA details included).
 - **Background jobs:** the weekly reliability report, the Upgrade Advisor and the incident explainer.
 
 Target environment: Proxmox homelab with 80+ services across multiple VMs and LXCs.
@@ -36,7 +41,7 @@ On `/ask` the agent decides which approach to use based on the question. On `/mc
   `LLM_PROVIDER=openai`, which the eval framework is written against
 - **Vector store:** Chroma
 - **Backend:** FastAPI (`/mcp`, `/ask`, `/ask/stream`, `/report`, `/health`, `/metrics`)
-- **Frontend:** Vue 3 SPA (separate repo: johnmathews/sre-webapp) or CLI
+- **Frontend:** Vue 3 SPA in `web/` (Vite, Pinia, Tailwind v4, Playwright; npm, Node 22), or the CLI
 - **Observability:** Prometheus metrics, Grafana dashboards, Loki logs
 - **Infrastructure:** Proxmox, Ansible
 
@@ -69,6 +74,10 @@ make eval          # Run the eval cases (real LLM calls, costs money)
 make advisor       # Upgrade Advisor dry run (no email, no batch, no deploy)
 make hooks         # Install git pre-commit + pre-push hooks (works from a worktree; installs into the shared hooks dir)
 uv run pytest tests/test_foo.py::test_bar  # Run a single test
+
+make web-install   # npm ci in web/ plus the Playwright browsers
+make web-dev       # Vite dev server on :5173, proxying /api/* to make serve on :8000
+make web-check     # Typecheck + the Playwright suite (mocked backend, no server needed)
 ```
 
 ## Shipping
@@ -80,6 +89,10 @@ uv run pytest tests/test_foo.py::test_bar  # Run a single test
     drops for about 20 s during the swap.
     Check: Prometheus `max(process_start_time_seconds{job="sre-agent"})` is after the merge (for example through the
     sre-agent MCP `prometheus_instant_query`)
+  - production web UI (infra VM): when `web/` changes, CI on `main` runs `web-test`, then pushes
+    `ghcr.io/johnmathews/sre-webapp:latest` (job `web-build`); WUD redeploys it. A change outside `web/` and the
+    server's image files publishes neither image.
+    Check: `docker inspect sre-webapp --format '{{.Created}}'` on the infra VM is after the merge
 
 ## Testing Strategy
 
@@ -144,6 +157,8 @@ modifying eval cases.
 - `docs/` — Design documentation: `architecture.md`, `code-flow.md`, `tool-reference.md` (one section per tool, kept
   in step by `tests/test_docs_tool_reference.py`), `mcp-clients.md` (connecting MCP clients), `dependencies.md`,
   `incident-explainer.md`, and `adr/` (decision records, index in `docs/adr/README.md`)
+- `web/` — the Vue web UI: `src/api/` (fetch wrappers, SSE parser), `src/stores/`, `src/components/`,
+  `tests/e2e/` (Playwright), `docker/nginx.conf.template`, its own `Dockerfile`. Docs in `docs/web/`
 - `runbooks/` — Operational runbooks (markdown)
 - `ansible/` — Symlink/submodule to ansible home-server project
 - `dashboards/` — Grafana dashboard JSON exports

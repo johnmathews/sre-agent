@@ -1,6 +1,8 @@
 # sre-webapp
 
-Vue 3 SPA frontend for the [HomeLab SRE Agent](https://github.com/johnmathews/sre-agent).
+Vue 3 SPA frontend for the HomeLab SRE Assistant, built and shipped from this
+directory of the [sre-agent](../readme.md) repo. Its docs are in
+[`docs/web/`](../docs/web/).
 Streams chat responses from a FastAPI backend over Server-Sent Events.
 
 ## Primary use case
@@ -24,7 +26,7 @@ diverge.
 
 The PWA shell (`manifest.webmanifest`, `apple-mobile-web-app-capable`,
 status-bar style, theme-color) is wired up in `index.html`. See
-[`docs/architecture.md`](./docs/architecture.md) §"PWA shell" for why
+[`docs/web/architecture.md`](../docs/web/architecture.md) §"PWA shell" for why
 each tag matters.
 
 ## Stack
@@ -53,7 +55,7 @@ Override with `VITE_API_PROXY_TARGET=http://other-host:8000 npm run dev`.
 
 ## Architecture
 
-See [`docs/architecture.md`](./docs/architecture.md) for a full walkthrough.
+See [`docs/web/architecture.md`](../docs/web/architecture.md) for a full walkthrough.
 
 ```
 src/
@@ -66,7 +68,8 @@ src/
 
 ## Docker
 
-A multi-arch image is published to GHCR on every push to `main`:
+A `linux/amd64` image is published to GHCR on every push to `main` that
+changes `web/`:
 
 ```sh
 docker pull ghcr.io/johnmathews/sre-webapp:latest
@@ -78,10 +81,11 @@ docker run --rm -p 8080:80 \
 `API_UPSTREAM` defaults to `http://sre-api:8000` — the expected service name
 when the frontend and backend run in the same docker-compose network.
 
-See [`docs/deployment.md`](./docs/deployment.md) for the full compose stack,
-or [`docker-compose.demo.yml`](./docker-compose.demo.yml) for a ready-to-run
+See [`docs/web/deployment.md`](../docs/web/deployment.md) for the full compose stack,
+or [`docker-compose.demo.yml`](../docker-compose.demo.yml) for a ready-to-run
 stack (webapp + sre-agent backend) pulled straight from GHCR.
 
-## Related repos
+## Related
 
-- **Backend (FastAPI + LangChain agent):** [johnmathews/sre-agent](https://github.com/johnmathews/sre-agent)
+- **Backend (FastAPI server, MCP and chat agent):** the rest of this repo; start at [`../readme.md`](../readme.md).
+- **Contract:** `tests/test_web_contract.py` checks `src/api/*.ts` against the server's models.

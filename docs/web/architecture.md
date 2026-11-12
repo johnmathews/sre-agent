@@ -1,8 +1,9 @@
 # Architecture
 
-`sre-webapp` is a single-page Vue 3 application that talks to the FastAPI
-backend at [johnmathews/sre-agent](https://github.com/johnmathews/sre-agent).
-It replaces the earlier Streamlit UI with a first-class frontend stack.
+The web UI (`web/`, image `sre-webapp`) is a single-page Vue 3 application
+that talks to the FastAPI backend in the same repo. It replaces the earlier
+Streamlit UI and is one of the server's two first-class interfaces, next to
+`/mcp` ([ADR-0007](../adr/0007-mcp-and-the-web-ui-are-both-first-class.md)).
 
 ## Why a SPA?
 

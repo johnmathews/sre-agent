@@ -1,6 +1,6 @@
 # ADR-0001: MCP at `/mcp` is the primary interface
 
-**Status:** Accepted. **Date:** 2026-11-11.
+**Status:** Superseded by [ADR-0007](0007-mcp-and-the-web-ui-are-both-first-class.md) (2026-11-12). **Date:** 2026-11-11.
 
 ## 1. Context
 

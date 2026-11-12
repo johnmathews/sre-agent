@@ -3,9 +3,13 @@
 ## Prerequisites
 
 - Node 22+ and npm 10+
-- The backend ([johnmathews/sre-agent](https://github.com/johnmathews/sre-agent))
-  running at `http://localhost:8000` (use `make serve` in that repo) — only
-  needed for live chat; the E2E test suite mocks the backend.
+- The backend running at `http://localhost:8000` (`make serve` at the repo
+  root) — only needed for live chat; the E2E test suite mocks the backend.
+
+From the repo root, `make web-install` runs `npm ci` and installs the
+Playwright browsers, `make web-dev` starts Vite, and `make web-check` runs
+the typecheck and the Playwright suite. The npm commands below run inside
+`web/`.
 
 ## Commands
 
@@ -83,7 +87,7 @@ playwright.config.ts
 ## Testing
 
 See Playwright docs: <https://playwright.dev/docs/intro>. Tests live in
-`tests/e2e/` and mock the `/api/*` endpoints with
+`web/tests/e2e/` and mock the `/api/*` endpoints with
 `page.route('**/api/**', ...)` so they run without the backend.
 
 The `playwright.config.ts` starts `npm run dev` as a `webServer` before

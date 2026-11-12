@@ -6,16 +6,20 @@ bundle and reverse-proxies `/api/*` to the FastAPI backend.
 
 ## Image
 
-`ghcr.io/johnmathews/sre-webapp`, built for `linux/amd64` and `linux/arm64`
-by GitHub Actions on every push to `main`.
+`ghcr.io/johnmathews/sre-webapp`, built from `web/` for `linux/amd64` by the
+`web-build` job in `.github/workflows/ci.yml`. It runs on a push to `main`
+that changed `web/`, after `web-test` (typecheck and Playwright) passes.
+WUD on the infra VM redeploys `sre-webapp` when `latest` moves.
 
 Tags published:
 
-| Tag                | Meaning                               |
-|--------------------|---------------------------------------|
-| `latest`           | Most recent push to `main`            |
-| `main`             | Alias of the current main HEAD        |
-| `sha-<short>`      | Exact commit (e.g. `sha-49d53be`)     |
+| Tag                | Meaning                                         |
+|--------------------|-------------------------------------------------|
+| `latest`           | Most recent push to `main` that changed `web/`  |
+| `sha-<commit>`     | Exact commit, full SHA                          |
+
+The image's `org.opencontainers.image.source` label points at
+`johnmathews/sre-agent`, and `revision` at the commit.
 
 ## Configuration
 
@@ -34,12 +38,12 @@ backend isn't up yet.
 
 ## docker-compose
 
-See [`docker-compose.demo.yml`](../docker-compose.demo.yml) at the repo root
-for a ready-to-run stack (webapp + sre-agent backend) using pre-built GHCR
-images — nothing to build locally.
+See [`docker-compose.demo.yml`](../../docker-compose.demo.yml) at the repo
+root for a ready-to-run stack (webapp + sre-agent backend) using pre-built
+GHCR images — nothing to build locally. [`docker-compose.yml`](../../docker-compose.yml)
+builds both images from source.
 
-Or embed into the existing [`sre-agent`](https://github.com/johnmathews/sre-agent)
-stack:
+Or add it to an existing stack:
 
 ```yaml
 services:

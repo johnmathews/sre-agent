@@ -1,7 +1,6 @@
 # API integration
 
-The frontend talks to the FastAPI backend
-([johnmathews/sre-agent](https://github.com/johnmathews/sre-agent))
+The frontend (`web/`) talks to the FastAPI backend in the same repo
 through the `/api/*` prefix. In development Vite proxies `/api` to
 `http://localhost:8000`; in production, nginx/Traefik does the same rewrite.
 Frontend code only ever calls relative URLs — it never knows the backend's
@@ -19,9 +18,12 @@ real origin.
 | DELETE | `/conversations/{id}`          | Delete                          |
 | GET    | `/conversations/search?q=...`  | Full-text search                |
 
-All JSON payloads match the Pydantic models in
-`src/api/main.py` of the backend repo. See `src/api/*.ts` for the
-corresponding TypeScript types.
+All JSON payloads match the Pydantic models in `src/api/main.py`. See
+`web/src/api/*.ts` for the corresponding TypeScript types.
+`tests/test_web_contract.py` checks the two against each other, along with
+the stream event types and the error `reason` values the UI special-cases,
+so a change to either side that breaks the other fails CI. Change both in
+the same PR.
 
 ## Streaming (SSE over POST)
 

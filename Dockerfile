@@ -27,7 +27,7 @@ FROM python:3.13-slim
 
 # Non-root user. uid/gid 1001 matches the ownership expected on the host-mounted
 # chroma_data, conversations, and .claude volumes. Both the API server and the
-# `make ingest` setup container run from this image, so baking the user in keeps
+# `sre-ingest` setup container run from this image, so baking the user in keeps
 # files written by ingest readable+writable by the runtime (chromadb 1.x opens
 # the sqlite read-write even on read paths, so a uid mismatch breaks RAG).
 RUN groupadd --system --gid 1001 app \

@@ -45,3 +45,26 @@ Issue #59. `docker compose run --rm sre-ingest` failed on infra. Nothing had not
   got by hand), `in_sync` 0 → 1, and a search for "how do I rebuild the vector store" returns this runbook.
 - The live proof on infra (ingest with no flags, auto-rebuild on deploy, a real page and its resolution) is recorded
   in home-server's journal entry for the alert rule, which lands after it.
+
+## Wrap-up audit (same day, after #61 and #62 merged)
+
+An independent docs audit of `d815da0..2aca5bc` against the shipped code found claims the PR left stale in files it
+did not touch (confirmed by reading the code):
+
+- `docs/architecture.md`, the Docker section, still said `sre-ingest` needs `LLM_PROVIDER=anthropic` with an
+  `ANTHROPIC_API_KEY`, that it clears the old store, and that `sre-agent` must be restarted afterwards.
+- `readme.md` and both compose files presented `sre-ingest` as a required first step.
+- The readme's failure-mode row said a missing store makes `runbook_search` "find nothing". It returns an error.
+- The readme's metric count was 25 (26). It is 29 (30) with the four `runbook_index` families.
+- There was no env-table row for the two `RUNBOOK_INDEX_*` settings.
+
+All of these were fixed in a follow-up PR, together with two comment wordings.
+
+## What is deliberately not done
+
+- **No backoff after a failed rebuild.** The loop retries every check, and a failure costs about $0.003 of embeddings.
+  The alert and `_rebuilds_total{status="error"}` make a persistent failure visible.
+- **No lock around the metrics cache.** Two concurrent scrapes can both read the store. That is wasted work, not a
+  wrong value.
+- **Shutdown cancels the check task without awaiting it.** A rebuild in flight is abandoned. It never touches the
+  live collection until the swap, so the next start simply rebuilds.

@@ -1,15 +1,15 @@
 # SRE Agent Docker Compose
 #
 # Standalone usage:
-#   docker compose --profile setup run sre-ingest   # build vector store (first time)
-#   docker compose up -d                             # start API + webapp
+#   docker compose up -d                             # start API + webapp; sre-agent builds the vector store
+#   docker compose run --rm sre-ingest               # optional: rebuild the vector store now
 #
 # Embedding into an existing stack:
 #   Copy the sre-agent and sre-webapp services below into your compose file.
 #   Replace `build: .` with `image: ghcr.io/johnmathews/sre-agent:latest` and
 #   `build: web` with `image: ghcr.io/johnmathews/sre-webapp:latest`,
-#   adjust ports, and add your network. The sre-ingest step only needs to run
-#   once to populate the chroma_data volume.
+#   adjust ports, and add your network. sre-agent keeps the chroma_data volume's
+#   runbook index current; sre-ingest is only for an immediate rebuild.
 #
 # For a ready-to-run demo using published images instead of `build: .`,
 # see docker-compose.demo.yml.

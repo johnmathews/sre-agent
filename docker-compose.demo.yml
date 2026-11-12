@@ -6,10 +6,10 @@
 #
 # Usage:
 #   1. Create a .env file in this directory — see .env.example for vars.
-#   2. Build the vector store (one-time, and after runbook updates):
-#        docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
-#   3. Start the stack:
+#   2. Start the stack (sre-agent builds the vector store at startup):
 #        docker compose -f docker-compose.demo.yml up -d
+#   3. Optional, to rebuild the vector store at once:
+#        docker compose -f docker-compose.demo.yml --profile setup run --rm sre-ingest
 #   4. Open http://localhost:8080 (webapp) — API is on http://localhost:8000
 #
 # Prerequisites for LLM_PROVIDER=anthropic:

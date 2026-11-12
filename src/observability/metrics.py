@@ -246,8 +246,9 @@ def observe_runbook_index(read: Callable[[], RunbookIndexReading], max_age_s: fl
     """Export the runbook index gauges, read from the store on each scrape.
 
     ``sre_assistant_runbook_index_in_sync`` is 1 when the live collection was built from the runbooks present now
-    and holds every chunk, 0 otherwise. Grafana's "SRE agent: runbook index out of date" rule reads it. One reading
-    serves all three gauges for ``max_age_s``, so a scrape reads the store once. A failed read exports 0s.
+    and holds every chunk, 0 otherwise. Grafana's "SRE agent on Infra VM: runbook index out of date" rule reads
+    it. One reading serves all three gauges for ``max_age_s``, so a scrape reads the store once. A failed read
+    exports 0s.
     """
     global _runbook_index_gauges  # noqa: PLW0603
 

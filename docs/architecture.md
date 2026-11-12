@@ -976,12 +976,13 @@ docker-compose.yml
         See: docs/web/deployment.md
 ```
 
-The `sre-ingest` service is under the `setup` profile — it won't run during normal `docker compose up`. Run it explicitly
-with `docker compose run --rm sre-ingest`. It needs the same settings as `sre-agent` (with `LLM_PROVIDER=anthropic`,
-a non-empty `ANTHROPIC_API_KEY`, though ingest never calls Anthropic) plus `OPENAI_API_KEY` for embeddings. It loads
-the runbooks and makes one embedding call before it clears the old store, so a settings or key error leaves the live
-index in place. **Restart `sre-agent` afterwards:** chromadb caches its client per path in the running process, which
-does not see a store rebuilt underneath it until it restarts.
+`sre-agent` keeps the runbook index current by itself: it checks at startup and every
+`RUNBOOK_INDEX_CHECK_INTERVAL_S`, and rebuilds in the background when the runbooks differ (see [RAG Retrieval](#rag-retrieval) above).
+The `sre-ingest` service is under the `setup` profile, so `docker compose up` skips it. It is optional: run
+`docker compose run --rm sre-ingest` to rebuild now rather than at the next check. It runs as `LLM_PROVIDER=openai`
+whatever `.env` says, so it needs only `OPENAI_API_KEY`. It builds a new collection and switches to it only once the
+build succeeded, so a settings or key error leaves the live index in place, and the running `sre-agent` serves the new
+collection without a restart. `runbooks/rebuilding-the-vector-store.md` has the details.
 
 Both services run as uid/gid **1001:1001** (baked into the image via `USER 1001:1001` in the Dockerfile). They share
 the `chroma_data` volume, so matching uids matter: chromadb 1.x opens the persisted sqlite read-write even on read paths
@@ -1011,7 +1012,8 @@ All secrets live in Ansible Vault, like the rest of the homelab:
 The vector store is built from multiple directories configured via `EXTRA_DOCS_DIRS`:
 
 - `runbooks/` — bundled in this repo, operational procedures and architecture docs
-- External documentation directories — referenced by absolute path on the host, mounted into the ingest container
+- External documentation directories — referenced by absolute path on the host, mounted read-only into `sre-agent`
+  (and into `sre-ingest`, if you run it)
 
-The ingest process is strictly read-only — it reads `.md` files via `Path.read_text()` and writes only to the
-`.chroma_db/` directory.
+Indexing is read-only towards the sources: `sre-agent`'s check loop and `sre-ingest` read `.md` files via
+`Path.read_text()` and write only to the Chroma directory (`.chroma_db/`, the `chroma_data` volume in Docker).

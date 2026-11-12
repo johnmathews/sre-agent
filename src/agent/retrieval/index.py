@@ -10,12 +10,16 @@ leaves the live collection and manifest untouched, and a search during a build r
 """
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -23,6 +27,7 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.errors import NotFoundError
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from src.agent.retrieval.embeddings import (
@@ -40,6 +45,8 @@ from src.observability.metrics import RUNBOOK_INDEX_REBUILDS_TOTAL
 logger = logging.getLogger(__name__)
 
 MANIFEST_NAME = "index-manifest.json"
+LOCK_NAME = ".index-build.lock"
+_KEY_FRAGMENT = re.compile(r"sk-[A-Za-z0-9_*\-]+")
 # Bump when the fingerprint's inputs change shape, so every store rebuilds once.
 FINGERPRINT_VERSION = 1
 
@@ -177,9 +184,24 @@ def rebuild_index(
         embedder = embeddings or get_embeddings()
         embedder.embed_query("ingest preflight")
     except Exception as exc:
-        raise IndexBuildError(f"Embeddings preflight failed: {type(exc).__name__}: {exc}") from exc
+        raise IndexBuildError(f"Embeddings preflight failed: {type(exc).__name__}: {_redact(str(exc))}") from exc
 
     store_dir.mkdir(parents=True, exist_ok=True)
+    # One build at a time per store, across threads and processes (the server's check loop and a manual sre-ingest
+    # share the volume). Without it, one build's cleanup can delete the other's collection just before that one
+    # becomes live.
+    with _build_lock(store_dir):
+        return _build_and_swap(built_by, store_dir, embedder, documents, fingerprint, files)
+
+
+def _build_and_swap(
+    built_by: str,
+    store_dir: Path,
+    embedder: Embeddings,
+    documents: list[Document],
+    fingerprint: str,
+    files: int,
+) -> Manifest:
     client = chroma_client(store_dir)
     collection = f"{COLLECTION_NAME}-{fingerprint[:12]}-{uuid.uuid4().hex[:8]}"
     logger.info("Building index collection %s from %d chunks in %d files", collection, len(documents), files)
@@ -190,6 +212,15 @@ def rebuild_index(
         chunks = store._collection.count()  # pyright: ignore[reportPrivateUsage]
         if chunks != len(documents):
             raise IndexBuildError(f"Collection {collection} holds {chunks} chunks, expected {len(documents)}")
+        manifest = Manifest(
+            fingerprint=fingerprint,
+            collection=collection,
+            chunks=chunks,
+            files=files,
+            built_at=time.time(),
+            built_by=built_by,
+        )
+        _write_manifest(manifest, store_dir)
     except Exception as exc:
         try:
             client.delete_collection(collection)
@@ -197,17 +228,7 @@ def rebuild_index(
             logger.warning("Could not delete the partial collection %s", collection, exc_info=True)
         if isinstance(exc, IndexBuildError):
             raise
-        raise IndexBuildError(f"Building {collection} failed: {type(exc).__name__}: {exc}") from exc
-
-    manifest = Manifest(
-        fingerprint=fingerprint,
-        collection=collection,
-        chunks=chunks,
-        files=files,
-        built_at=time.time(),
-        built_by=built_by,
-    )
-    _write_manifest(manifest, store_dir)
+        raise IndexBuildError(f"Building {collection} failed: {type(exc).__name__}: {_redact(str(exc))}") from exc
     logger.info("Index collection %s is live (%d chunks, fingerprint %s)", collection, chunks, fingerprint[:12])
 
     for old in client.list_collections():
@@ -218,6 +239,22 @@ def rebuild_index(
             except Exception:
                 logger.warning("Could not delete old index collection %s", old.name, exc_info=True)
     return manifest
+
+
+@contextmanager
+def _build_lock(store_dir: Path) -> Iterator[None]:
+    """An exclusive flock on a file in the store. flock excludes other open files, so threads exclude each other too."""
+    with (store_dir / LOCK_NAME).open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _redact(text: str) -> str:
+    """Drop API key fragments (OpenAI auth errors quote a masked key) before a message reaches logs."""
+    return _KEY_FRAGMENT.sub("sk-[redacted]", text)
 
 
 def active_collection(persist_dir: Path | None = None) -> str:
@@ -248,16 +285,22 @@ def index_state(*, persist_dir: Path | None = None, dirs: list[Path] | None = No
     if not store_dir.is_dir():
         return IndexState(False, None, None, 0, fingerprint, False)
 
-    manifest = read_manifest(store_dir)
-    collection = manifest.collection if manifest else COLLECTION_NAME
     error: str | None = None
-    try:
-        chunks = chroma_client(store_dir).get_collection(collection).count()
-    except NotFoundError:
-        chunks = 0
-    except Exception as exc:
-        chunks = 0
-        error = f"reading collection {collection} failed: {type(exc).__name__}: {exc}"
+    for attempt in (1, 2):
+        manifest = read_manifest(store_dir)
+        collection = manifest.collection if manifest else COLLECTION_NAME
+        try:
+            chunks = chroma_client(store_dir).get_collection(collection).count()
+            break
+        except NotFoundError:
+            # A rebuild may have swapped the collection out between reading the manifest and counting: read again.
+            chunks = 0
+            if attempt == 2:
+                break
+        except Exception as exc:
+            chunks = 0
+            error = f"reading collection {collection} failed: {type(exc).__name__}: {exc}"
+            break
 
     in_sync = manifest is not None and manifest.fingerprint == fingerprint and chunks == manifest.chunks > 0
     return IndexState(True, manifest, collection, chunks, fingerprint, in_sync, error)

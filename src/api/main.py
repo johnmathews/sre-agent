@@ -399,8 +399,11 @@ async def _with_heartbeats(
 
 @app.get("/metrics")
 async def metrics() -> Response:
-    """Expose Prometheus metrics in exposition format."""
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    """Expose Prometheus metrics in exposition format.
+
+    Rendered in a thread: the runbook index gauges read the store and the runbook files, which must not block /mcp.
+    """
+    return Response(content=await asyncio.to_thread(generate_latest), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/ask", response_model=AskResponse)

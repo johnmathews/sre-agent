@@ -117,6 +117,21 @@ class TestState:
 
         assert not index.index_state(persist_dir=store, dirs=[sources]).in_sync
 
+    def test_state_read_mid_swap_reads_the_manifest_again(
+        self, sources: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manifest named a collection a rebuild deleted before the count: read the manifest again."""
+        stale = _rebuild(sources, store)
+        live = _rebuild(sources, store)
+        reads = iter([stale, live])
+        monkeypatch.setattr(index, "read_manifest", lambda persist_dir=None: next(reads))
+
+        state = index.index_state(persist_dir=store, dirs=[sources])
+
+        assert state.collection == live.collection
+        assert state.chunks == live.chunks
+        assert state.in_sync
+
     def test_unreadable_manifest_is_out_of_sync(self, sources: Path, store: Path) -> None:
         _rebuild(sources, store)
         (store / index.MANIFEST_NAME).write_text("{not json")
@@ -177,6 +192,64 @@ class TestRebuild:
 
         assert index.read_manifest(store) == live
         assert _collections(store) == [live.collection]
+
+    def test_failed_manifest_write_leaves_the_live_index(
+        self, sources: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        live = _rebuild(sources, store)
+
+        def disk_full(manifest: index.Manifest, persist_dir: Path) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(index, "_write_manifest", disk_full)
+
+        with pytest.raises(index.IndexBuildError, match="No space left"):
+            _rebuild(sources, store)
+
+        assert index.read_manifest(store) == live
+        assert _collections(store) == [live.collection]
+
+    def test_preflight_error_drops_key_fragments(self, sources: Path, store: Path) -> None:
+        class BadKey(DeterministicFakeEmbedding):
+            def embed_query(self, text: str) -> list[float]:
+                raise RuntimeError("Incorrect API key provided: sk-proj-abc1****wxyz.")
+
+        with pytest.raises(index.IndexBuildError) as raised:
+            index.rebuild_index("test", persist_dir=store, embeddings=BadKey(size=8), dirs=[sources])
+
+        assert "abc1" not in str(raised.value)
+        assert "sk-[redacted]" in str(raised.value)
+
+    def test_overlapping_builds_leave_a_live_manifest(
+        self, sources: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The server's loop and a manual sre-ingest overlap: the later build must not delete the earlier one's
+        collection between its count check and its manifest write."""
+        import threading
+
+        real_write = index._write_manifest  # pyright: ignore[reportPrivateUsage]
+        second_done = threading.Event()
+        first_writer = threading.Event()
+
+        def write(manifest: index.Manifest, persist_dir: Path) -> None:
+            if not first_writer.is_set():
+                first_writer.set()
+                second_done.wait(timeout=1.0)  # without the build lock, the second build finishes in this window
+            real_write(manifest, persist_dir)
+
+        monkeypatch.setattr(index, "_write_manifest", write)
+        first = threading.Thread(target=_rebuild, args=(sources, store))
+        first.start()
+        first_writer.wait(timeout=5.0)
+        second = threading.Thread(target=lambda: (_rebuild(sources, store), second_done.set()))
+        second.start()
+        first.join()
+        second.join()
+
+        manifest = index.read_manifest(store)
+        assert manifest is not None
+        assert _collections(store) == [manifest.collection]
+        assert index.index_state(persist_dir=store, dirs=[sources]).in_sync
 
     def test_no_documents_is_an_error(self, tmp_path: Path, store: Path) -> None:
         empty = tmp_path / "empty"

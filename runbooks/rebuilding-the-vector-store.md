@@ -90,13 +90,23 @@ else from the LLM settings: it runs as `LLM_PROVIDER=openai` whatever `.env` say
 service auto-activates its `setup` profile, so `--profile setup` is not needed.
 
 A running sre-agent reads the new collection on its next search, because every search opens the collection the
-manifest names. No restart is needed.
+manifest names. No restart is needed. A manual build and the server's own build never overlap: each takes a lock
+file (`.index-build.lock`) in the store, so one waits for the other.
 
-`--wipe` deletes the whole store before building:
-`docker compose run --rm sre-ingest python -m scripts.ingest_runbooks --wipe` (arguments after the service name
-replace its command, so give the whole command). Use it only when
-Chroma cannot open the store at all. It gives up the "a failed build changes nothing" guarantee: if the build then
-fails, the store is empty until the next successful one.
+Run `sre-ingest` from the same image as `sre-agent` (`docker compose pull` updates both). An older image's runbooks
+give a different fingerprint, so the server's next check rebuilds over the manual build.
+
+`--wipe` deletes the whole store before building. Use it only when Chroma cannot open the store at all, and stop
+sre-agent first, because it deletes files the running server has open:
+
+```bash
+docker compose stop sre-agent
+docker compose run --rm sre-ingest python -m scripts.ingest_runbooks --wipe
+docker compose up -d sre-agent
+```
+
+Arguments after the service name replace its command, so give the whole command. `--wipe` gives up the "a failed
+build changes nothing" guarantee: if the build then fails, the store is empty until the next successful one.
 
 ## Permissions: the uid 1001 gotcha
 

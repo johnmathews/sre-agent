@@ -7,6 +7,7 @@ Usage:
 """
 
 import logging
+import os
 import shutil
 import sys
 
@@ -22,6 +23,11 @@ def main() -> None:
     Settings, the documents and one embedding call are checked before the old store is cleared, so a
     missing key or a bad config leaves the live index in place.
     """
+    # Ingest only embeds, and embeddings always use OpenAI. Under LLM_PROVIDER=anthropic the settings would also
+    # demand ANTHROPIC_API_KEY, which sre-ingest on infra does not have (#59). The openai provider's check asks for
+    # OPENAI_API_KEY, the one key ingest needs, so run as that provider.
+    os.environ["LLM_PROVIDER"] = "openai"
+
     documents = load_all_documents()
     if not documents:
         logger.error("No documents found — nothing to ingest; the existing vector store was left in place")

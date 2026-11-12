@@ -64,3 +64,24 @@ def test_success_clears_then_builds(store_dir: Path, monkeypatch: pytest.MonkeyP
     ingest_runbooks.main()
 
     assert seen_at_build == [False]
+
+
+def test_ingest_needs_no_llm_key(store_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """sre-ingest on infra: LLM_PROVIDER=anthropic, an OpenAI key, no Anthropic key. Ingest only embeds (#59)."""
+    from src.agent.retrieval import embeddings as embeddings_module
+    from src.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("PROMETHEUS_URL", "http://prometheus.test")
+    monkeypatch.setenv("GRAFANA_URL", "http://grafana.test")
+    monkeypatch.setenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "test-token")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(embeddings_module, "OpenAIEmbeddings", MagicMock())
+    build = MagicMock()
+    monkeypatch.setattr(ingest_runbooks, "build_vector_store", build)
+
+    ingest_runbooks.main()
+
+    build.assert_called_once()

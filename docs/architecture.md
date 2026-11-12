@@ -81,6 +81,16 @@ Embedded documents retrieved by semantic similarity. Used for operational knowle
 
 On `/ask` the agent decides which approach to use based on the question. On `/mcp` the client's own model decides.
 
+**Keeping the index current** (`src/agent/retrieval/index.py`). The store holds one live collection and a manifest,
+`index-manifest.json`, recording the fingerprint of the sources it was built from: every indexed `.md` file plus the
+chunking and embedding settings. A background task in the server's lifespan compares that with the files present at
+startup and every `RUNBOOK_INDEX_CHECK_INTERVAL_S` (default 600 s). When they differ and `RUNBOOK_INDEX_AUTO_REBUILD`
+is on (default), it embeds into a new collection, points the manifest at it and deletes the old one. A failed build
+leaves the live collection alone and the next check retries. Searches open the collection the manifest names, so a
+rebuild needs no restart. `scripts/ingest_runbooks.py` (the `sre-ingest` service) runs the same rebuild by hand. The
+`sre_assistant_runbook_index_*` series below report the state, and Grafana's "SRE agent on Infra VM: runbook index
+out of date" rule pages when `in_sync` stays 0 for 30 minutes. Operations: `runbooks/rebuilding-the-vector-store.md`.
+
 ## Service Dependencies
 
 ```
@@ -113,7 +123,7 @@ HomeLab SRE Assistant
 
 Required: LLM API (OpenAI or Anthropic), Prometheus, Grafana. Optional: TrueNAS, Loki, Proxmox VE, PBS (tools are
 conditionally registered based on config); Gatus and Pushover serve only the incident explainer. Local: Chroma vector
-store (rebuilt via `make ingest`).
+store (kept current by the server; see [RAG Retrieval](#rag-retrieval)).
 
 ## Request Lifecycle
 
@@ -432,6 +442,10 @@ in the log line), and `client` holds only fixed values.
 | `sre_assistant_upgrade_deploys_total`      | Counter   | `outcome`                                              |
 | `sre_assistant_incident_events_total`      | Counter   | `event`, `outcome`                                     |
 | `sre_assistant_incident_explanations_total` | Counter  | `outcome`                                              |
+| `sre_assistant_runbook_index_in_sync`      | Gauge     | — (1 = built from the runbooks present now and holds every chunk) |
+| `sre_assistant_runbook_index_chunks`       | Gauge     | — (chunks in the live collection)                      |
+| `sre_assistant_runbook_index_built_timestamp_seconds` | Gauge | — (0 = no manifest)                             |
+| `sre_assistant_runbook_index_rebuilds_total` | Counter | `status` (success/error); rebuilds the check loop started |
 
 ### Architecture
 

@@ -35,7 +35,7 @@ from src.agent.history import (
     rename_conversation,
     search_conversations,
 )
-from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.agent.retrieval.index import index_state, keep_index_current
 from src.agent.tool_registry import enabled_count
 from src.api.incidents import log_incident_explainer_status, missing_incident_settings, start_incident_recovery
 from src.api.incidents import router as incidents_router
@@ -53,6 +53,7 @@ from src.observability.metrics import (
     REQUEST_DURATION,
     REQUESTS_IN_PROGRESS,
     REQUESTS_TOTAL,
+    observe_runbook_index,
 )
 from src.report.email import is_email_configured, send_report_email
 from src.report.generator import generate_report
@@ -251,6 +252,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if settings.claude_credentials_check_interval_s > 0:
                 credentials_check = asyncio.create_task(keep_fresh(settings.claude_credentials_check_interval_s))
 
+        # The runbook index: checked now and every interval in the background, rebuilt when out of date, exported as
+        # the sre_assistant_runbook_index_* gauges. /health and /mcp serve while a rebuild runs.
+        observe_runbook_index(index_state)
+        index_check = asyncio.create_task(
+            keep_index_current(settings.runbook_index_check_interval_s, settings.runbook_index_auto_rebuild)
+        )
+
         start_scheduler()
         warn_if_approval_unconfigured()
         log_incident_explainer_status()
@@ -269,6 +277,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await wait_for_deploys(SHUTDOWN_DEPLOY_WAIT_SECONDS)
         if credentials_check is not None:
             credentials_check.cancel()
+        index_check.cancel()
         logger.info("Shutting down SRE assistant")
 
 
@@ -390,8 +399,11 @@ async def _with_heartbeats(
 
 @app.get("/metrics")
 async def metrics() -> Response:
-    """Expose Prometheus metrics in exposition format."""
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    """Expose Prometheus metrics in exposition format.
+
+    Rendered in a thread: the runbook index gauges read the store and the runbook files, which must not block /mcp.
+    """
+    return Response(content=await asyncio.to_thread(generate_latest), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -649,15 +661,20 @@ async def health() -> HealthResponse:
         except Exception as exc:
             components.append(ComponentHealth(name="oauth_token", status="unhealthy", detail=str(exc)))
 
-    # --- Vector store ---
-    if CHROMA_PERSIST_DIR.is_dir():
-        components.append(ComponentHealth(name="vector_store", status="healthy"))
+    # --- Vector store (the runbook index) ---
+    # Unhealthy when a search would find nothing. Out of date is healthy with a detail: the server rebuilds it, and
+    # Grafana's "runbook index out of date" rule pages when that keeps failing.
+    index = await asyncio.to_thread(index_state)
+    if index.chunks > 0 and index.error is None:
+        components.append(
+            ComponentHealth(name="vector_store", status="healthy", detail=None if index.in_sync else index.describe())
+        )
     else:
         components.append(
             ComponentHealth(
                 name="vector_store",
                 status="unhealthy",
-                detail=f"{CHROMA_PERSIST_DIR}/ not found — run 'make ingest'",
+                detail=f"{index.describe()}; see runbooks/rebuilding-the-vector-store.md",
             )
         )
 

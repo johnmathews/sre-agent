@@ -35,7 +35,7 @@ connection and logs one INFO line at startup naming its tools and the missing se
 | Grafana Dashboards | `grafana_get_dashboard`, `grafana_search_dashboards`                                                     | `GRAFANA_URL`               | Yes (required)            |
 | Upgrade Status   | `upgrade_status`                                                                                           | `PROMETHEUS_URL`; `UPGRADE_ADVISOR_DB_PATH` adds verdicts and deploys | Yes |
 | Service Health   | `service_health`                                                                                           | `PROMETHEUS_URL`, `GRAFANA_URL`; `LOKI_URL` adds the error count | Yes |
-| RAG              | `runbook_search`                                                                                           | None (reads the Chroma store that `make ingest` builds) | Yes (an empty or missing store finds nothing) |
+| RAG              | `runbook_search`                                                                                           | None (reads the Chroma store the server builds and keeps current) | Yes (a store not yet built returns an error) |
 | Loki             | `loki_query_logs`, `loki_metric_query`, `loki_list_label_values`, `loki_correlate_changes`                 | `LOKI_URL`                  | No                        |
 | Proxmox VE       | `proxmox_list_guests`, `proxmox_get_guest_config`, `proxmox_node_status`, `proxmox_list_tasks`             | `PROXMOX_URL`               | No                        |
 | TrueNAS SCALE    | `truenas_pool_status`, `truenas_list_shares`, `truenas_snapshots`, `truenas_system_status`, `truenas_apps` | `TRUENAS_URL`               | No                        |
@@ -580,10 +580,10 @@ Search operational runbooks for procedures, troubleshooting steps, and architect
 - **Input:** `query` (string), `num_results` (int, default 4, 1–10)
 - **Example questions:** "How do I restart the DNS stack?", "What's the procedure for NFS issues?"
 - **Returns:** Relevant runbook chunks, each headed with its source, title, section and relevance score
-- **Errors:** No match returns a "no relevant runbook content" message. So does an empty or missing store (before the
-  first ingest, or right after one until `sre-agent` restarts): chromadb then creates an empty collection, and
-  `/health` marks `vector_store` unhealthy. An unreadable store or a failed embedding call returns `Runbook search
-  failed (<class>): ...`.
+- **Errors:** No match returns a "no relevant runbook content" message. A store that has not been built yet (the server
+  builds it at startup), an unreadable store or a failed embedding call returns `Runbook search failed (<class>): ...`,
+  and `/health` marks `vector_store` unhealthy when the store is missing or empty. A search that races a rebuild
+  retries once on the new collection.
 
 ## Conversation History (MCP server only)
 

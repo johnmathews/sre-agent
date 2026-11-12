@@ -4,9 +4,15 @@ All metrics are module-level singletons registered with the default
 prometheus_client registry.  Import them wherever instrumentation is needed.
 """
 
+import logging
+import math
+import time
 from collections.abc import Callable
+from typing import Any, Protocol
 
 from prometheus_client import Counter, Gauge, Histogram, Info
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Histogram bucket definitions
@@ -206,6 +212,90 @@ UPGRADE_DEPLOYS_TOTAL = Counter(
     "Final outcome of each approved deploy: verified (ok, failed, digest_mismatch) or never verified (skipped, failed)",
     labelnames=["outcome"],
 )
+
+# ---------------------------------------------------------------------------
+# Runbook index metrics
+# ---------------------------------------------------------------------------
+
+RUNBOOK_INDEX_REBUILDS_TOTAL = Counter(
+    "sre_assistant_runbook_index_rebuilds_total",
+    "Runbook index rebuilds started by the server's check loop, by status (success, error)",
+    labelnames=["status"],
+)
+for _status in ("success", "error"):
+    RUNBOOK_INDEX_REBUILDS_TOTAL.labels(status=_status)
+
+
+class RunbookIndexReading(Protocol):
+    """What the runbook index gauges read: src.agent.retrieval.index.IndexState satisfies it."""
+
+    @property
+    def in_sync(self) -> bool: ...
+
+    @property
+    def chunks(self) -> int: ...
+
+    @property
+    def built_at(self) -> float: ...
+
+
+_runbook_index_gauges: tuple[Gauge, Gauge, Gauge] | None = None
+
+
+def observe_runbook_index(read: Callable[[], RunbookIndexReading], max_age_s: float = 5.0) -> None:
+    """Export the runbook index gauges, read from the store on each scrape.
+
+    ``sre_assistant_runbook_index_in_sync`` is 1 when the live collection was built from the runbooks present now
+    and holds every chunk, 0 otherwise. Grafana's "SRE agent: runbook index out of date" rule reads it. One reading
+    serves all three gauges for ``max_age_s``, so a scrape reads the store once. A failed read exports 0s.
+    """
+    global _runbook_index_gauges  # noqa: PLW0603
+
+    if _runbook_index_gauges is None:
+        _runbook_index_gauges = (
+            Gauge(
+                "sre_assistant_runbook_index_in_sync",
+                "1 when the runbook index matches the runbooks in this image and holds every chunk, else 0",
+            ),
+            Gauge("sre_assistant_runbook_index_chunks", "Chunks in the live runbook index collection"),
+            Gauge(
+                "sre_assistant_runbook_index_built_timestamp_seconds",
+                "Unix time the live runbook index was built (0 = no manifest)",
+            ),
+        )
+    in_sync, chunks, built_at = _runbook_index_gauges
+    cache: dict[str, Any] = {"at": -math.inf, "reading": None, "error": None}
+
+    def reading() -> RunbookIndexReading | None:
+        now = time.monotonic()
+        if now - cache["at"] >= max_age_s:
+            try:
+                cache["reading"] = read()
+                cache["error"] = None
+            except Exception as exc:
+                if cache["error"] != str(exc):
+                    logger.warning("Reading the runbook index for its metrics failed", exc_info=True)
+                cache["reading"], cache["error"] = None, str(exc)
+            cache["at"] = now
+        current: RunbookIndexReading | None = cache["reading"]
+        return current
+
+    def _in_sync() -> float:
+        current = reading()
+        return 1.0 if current is not None and current.in_sync else 0.0
+
+    def _chunks() -> float:
+        current = reading()
+        return float(current.chunks) if current is not None else 0.0
+
+    def _built_at() -> float:
+        current = reading()
+        return current.built_at if current is not None else 0.0
+
+    in_sync.set_function(_in_sync)
+    chunks.set_function(_chunks)
+    built_at.set_function(_built_at)
+
 
 # ---------------------------------------------------------------------------
 # Incident explainer metrics

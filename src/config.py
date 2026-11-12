@@ -86,6 +86,10 @@ class Settings(BaseSettings):
 
     # Extra document directories for RAG ingestion (comma-separated absolute paths)
     extra_docs_dirs: str = ""
+    # The server checks the runbook index at startup and every interval (0 = startup only), and rebuilds it when it
+    # is out of date with the runbooks in the image, unless auto-rebuild is off. See src/agent/retrieval/index.py.
+    runbook_index_auto_rebuild: bool = True
+    runbook_index_check_interval_s: float = 600.0
 
     # Conversation history — always writes to /app/conversations in Docker.
     # Host path is configured via bind mount in docker-compose, not here.

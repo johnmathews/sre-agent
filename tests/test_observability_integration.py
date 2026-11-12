@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from src.observability.metrics import COMPONENT_HEALTHY
+from tests._index_states import HEALTHY_INDEX
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -131,8 +132,7 @@ class TestHealthGauges:
         respx.get("https://proxmox.test:8006/api2/json/version").mock(return_value=httpx.Response(200, json={}))
         respx.get("https://pbs.test:8007/api2/json/version").mock(return_value=httpx.Response(200, json={}))
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_dir:
-            mock_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             client.get("/health")
 
         assert COMPONENT_HEALTHY.labels(component="prometheus")._value.get() == 1.0
@@ -148,8 +148,7 @@ class TestHealthGauges:
         respx.get("https://proxmox.test:8006/api2/json/version").mock(return_value=httpx.Response(200, json={}))
         respx.get("https://pbs.test:8007/api2/json/version").mock(return_value=httpx.Response(200, json={}))
 
-        with patch("src.api.main.CHROMA_PERSIST_DIR") as mock_dir:
-            mock_dir.is_dir.return_value = True
+        with patch("src.api.main.index_state", return_value=HEALTHY_INDEX):
             client.get("/health")
 
         assert COMPONENT_HEALTHY.labels(component="prometheus")._value.get() == 0.0

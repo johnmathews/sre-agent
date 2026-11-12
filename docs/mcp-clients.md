@@ -264,7 +264,7 @@ These tools are listed, but what they return depends on a setting or on data out
 | --- | --- | --- |
 | `upgrade_status` | `UPGRADE_ADVISOR_DB_PATH` | Prints `Upgrade Advisor not configured (UPGRADE_ADVISOR_DB_PATH is empty): no verdicts or deploy history`, and still shows the exporter's outdated images from Prometheus. |
 | `service_health` | `LOKI_URL` | The Loki source reads `unavailable: LOKI_URL not set`. The other four sources still decide the verdict. |
-| `runbook_search` | the Chroma store built by `sre-ingest` | Returns "No relevant runbook content found" before the first ingest, and after a re-ingest until sre-agent restarts. `Runbook search failed (...)` means the store can't be read, for example a permission error on its directory. |
+| `runbook_search` | the Chroma store, which sre-agent rebuilds when its runbooks change | `Runbook search failed (...)` means the store is not built yet or can't be read, for example a permission error on its directory. |
 | `container_status`, `service_health`, `upgrade_status` | the container-status exporter's metrics in Prometheus | The line for that source reads `unavailable: <reason>` and the rest still prints. |
 | `pbs_list_backups` without `datastore` | `PBS_DEFAULT_DATASTORE` | `No datastore specified and PBS_DEFAULT_DATASTORE is not configured. ...` |
 | `truenas_*`, and the TrueNAS part of `hdd_power_status` | an `https://` `TRUENAS_URL` | `TrueNAS URL must be https; refusing to send the API key over plain http`. |
@@ -448,13 +448,10 @@ parameter added by a deploy appears only in a new session.
 
 ### 10.8 A call succeeds but returns nothing useful
 
-- **`runbook_search` returns "No relevant runbook content found" right after a re-ingest.** The running process keeps
-  its Chroma client and doesn't see the rebuilt store. Restart sre-agent. If it's still empty, run the ingest again and
-  check its last line says the store contains documents.
-- **`runbook_search` always returns "No relevant runbook content found".** The vector store may never have been
-  built. Run `docker compose run --rm sre-ingest` on the sre-agent host, then restart sre-agent.
-- **`runbook_search` returns `Runbook search failed (...)`.** The process can't read the store. The message names the
-  exception, and `runbooks/rebuilding-the-vector-store.md` covers the permission case.
+- **`runbook_search` misses a runbook that was just added.** The server indexes a new image's runbooks at startup,
+  which takes a minute or two after a redeploy. `sre_assistant_runbook_index_in_sync` is 1 once it has.
+- **`runbook_search` returns `Runbook search failed (...)`.** The store is not built or can't be read. The message
+  names the exception, and `runbooks/rebuilding-the-vector-store.md` covers each case.
 - **A line reads `unavailable: <reason>`.** That source failed or isn't configured (§7). The reason names which.
 - **`upgrade_status` shows no verdicts.** `UPGRADE_ADVISOR_DB_PATH` is empty or the advisor hasn't run yet.
 

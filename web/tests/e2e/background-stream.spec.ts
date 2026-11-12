@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { buildSseBody, mockBackend, sampleConversations } from './fixtures'
+import { buildSseBody, mockBackend } from './fixtures'
 
 /**
  * Wire a delayed stream: the /ask/stream endpoint holds the connection open

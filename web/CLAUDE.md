@@ -164,7 +164,14 @@ they don't require the real FastAPI service. Add tests when:
 - Touching streaming or SSE parsing — these are the most fragile areas
 
 Run `npm test` (or `make web-check` from the repo root) before pushing UI
-changes. CI runs typecheck + Playwright on every PR that touches `web/`.
+changes. CI runs typecheck, ESLint and Playwright on every PR that touches `web/`.
+
+## Lint
+
+`npm run lint` (ESLint, `eslint.config.js`) runs Vue's `essential` rules and typescript-eslint's
+`recommended` rules with no warnings allowed; formatting rules are off. `vue/no-v-html` is an error:
+any `v-html` needs a disable comment saying how its input is made safe (`src/lib/markdown.ts` for
+model output, escaping for search snippets).
 
 ## Related
 

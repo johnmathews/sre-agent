@@ -127,6 +127,8 @@ function roleLabel(role: string): string {
           class="mt-0.5 text-xs text-gray-500 dark:text-gray-400"
         >
           <span class="font-medium text-gray-600 dark:text-gray-300">{{ roleLabel(match.role) }}:</span>
+          <!-- Safe: highlightSnippet HTML-escapes the snippet and the query before adding <mark>. -->
+          <!-- eslint-disable-next-line vue/no-v-html -->
           <span class="ml-1" v-html="highlightSnippet(match.snippet)"></span>
         </div>
       </button>

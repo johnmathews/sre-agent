@@ -8,7 +8,7 @@ bundle and reverse-proxies `/api/*` to the FastAPI backend.
 
 `ghcr.io/johnmathews/sre-webapp`, built from `web/` for `linux/amd64` by the
 `web-build` job in `.github/workflows/ci.yml`. It runs on a push to `main`
-that changed `web/`, after `web-test` (typecheck and Playwright) passes.
+that changed `web/`, after `web-test` (typecheck, ESLint and Playwright) passes.
 WUD on the infra VM redeploys `sre-webapp` when `latest` moves.
 
 Tags published:

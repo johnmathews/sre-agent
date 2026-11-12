@@ -77,7 +77,8 @@ uv run pytest tests/test_foo.py::test_bar  # Run a single test
 
 make web-install   # npm ci in web/ plus the Playwright browsers
 make web-dev       # Vite dev server on :5173, proxying /api/* to make serve on :8000
-make web-check     # Typecheck + the Playwright suite (mocked backend, no server needed)
+make web-lint      # ESLint on web/ (no warnings allowed)
+make web-check     # Typecheck + lint + the Playwright suite (mocked backend, no server needed)
 make web-image     # docker build the UI image as sre-webapp:local
 ```
 
@@ -103,7 +104,7 @@ Three test tiers:
 - **E2E tests** (`tests/test_e2e_live.py`, `@pytest.mark.e2e`) — hit real Prometheus/Grafana/LLM. Skipped by default, run with `--run-e2e`. Requires `.env`. Each test skips with a reason when its inputs are unset: the `/mcp` test needs `SRE_MCP_URL` plus an Access service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`); the model call runs only with `E2E_LLM=1`.
 
 Web UI: `tests/test_web_contract.py` (in `make test`) checks the UI's TypeScript types against the server, and
-`make web-check` runs the UI's Playwright suite in `web/tests/e2e/` against a mocked backend.
+`make web-check` runs the UI's typecheck, ESLint and Playwright suite (`web/tests/e2e/`, mocked backend).
 
 `make test` runs unit + integration (safe for CI) under `coverage` with `-rf`, then prints the report (`src/` only). The
 floor is `fail_under` in `pyproject.toml` (91 against a 92.43% baseline); `make test` exits non-zero below it. Raise it

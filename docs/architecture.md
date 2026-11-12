@@ -904,7 +904,7 @@ the standalone version.
 
 `make smoke` runs the same image check locally.
 
-The web UI follows the same pattern: a push that touched `web/` runs `web-test` (typecheck and Playwright), then
+The web UI follows the same pattern: a push that touched `web/` runs `web-test` (typecheck, ESLint and Playwright), then
 `web-build` pushes `ghcr.io/johnmathews/sre-webapp:latest` and `:sha-<commit>` from `web/`, and WUD redeploys
 `sre-webapp`. A UI-only push does not restart the server, so `/mcp` stays up.
 

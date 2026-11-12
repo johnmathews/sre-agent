@@ -7,8 +7,8 @@
   root) — only needed for live chat; the E2E test suite mocks the backend.
 
 From the repo root, `make web-install` runs `npm ci` and installs the
-Playwright browsers, `make web-dev` starts Vite, `make web-check` runs
-the typecheck and the Playwright suite, and `make web-image` builds the
+Playwright browsers, `make web-dev` starts Vite, `make web-lint` runs ESLint,
+`make web-check` runs the typecheck, ESLint and the Playwright suite, and `make web-image` builds the
 production image locally as `sre-webapp:local`. When a reply errors in
 production, start with the
 [stream-failure runbook](runbooks/triaging-webapp-stream-failures.md). The npm commands below run inside
@@ -20,6 +20,7 @@ production, start with the
 npm ci                # install deps; browsers: npx playwright install chromium webkit (or make web-install)
 npm run dev           # Vite dev server on :5173 (auto-picks :5174 if busy)
 npm run build         # vue-tsc -b + vite build -> dist/
+npm run lint          # ESLint, no warnings allowed (npm run lint:fix to autofix)
 npm run preview       # serve the built bundle locally
 npm test              # Playwright E2E tests (mocked backend)
 npm run test:headed   # same, but with a visible browser

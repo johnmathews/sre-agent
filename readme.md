@@ -102,7 +102,7 @@ make check
 ```
 
 The web UI lives in `web/` (Vue 3, npm, Node 22). `make web-install` once, then `make web-dev` serves it on `:5173` and
-proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck and Playwright suite, and `make web-image` builds its image locally.
+proxies `/api` to `make serve` on `:8000`. `make web-check` runs its typecheck, ESLint and Playwright suite, and `make web-image` builds its image locally.
 
 Web UI docs: [architecture](docs/web/architecture.md), [API integration](docs/web/api-integration.md),
 [deployment](docs/web/deployment.md), [development](docs/web/development.md) and the
@@ -311,7 +311,7 @@ sorts each push into the server's files (`src/`, `scripts/`, `runbooks/`, `pypro
    `make test`. `make test` runs the unit and integration tests under `coverage` and fails below the floor
    (`fail_under` in `pyproject.toml`). It includes `tests/test_web_contract.py`, which checks the UI's types against
    the server.
-2. **web-test** runs when `web/` changed: the UI's typecheck and its Playwright suite on four browser projects.
+2. **web-test** runs when `web/` changed: the UI's typecheck, ESLint and its Playwright suite on four browser projects.
 3. **build** runs on pushes to `main` that changed the server's files, after `check` passes. It builds the image, smoke-tests it, then pushes
    `ghcr.io/johnmathews/sre-agent:latest` and `:sha-<commit>`. The smoke test (`scripts/smoke_image.sh`, or `make smoke`
    locally) starts the image with dummy config and checks `/health`, the `/mcp` `initialize` and `tools/list` calls (at

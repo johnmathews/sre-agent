@@ -2,6 +2,7 @@
 
 import logging
 
+from chromadb.errors import NotFoundError
 from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableType]
 from pydantic import BaseModel, Field
 
@@ -52,13 +53,19 @@ def runbook_search(query: str, num_results: int = DEFAULT_K) -> str:
     logger.info("Searching runbooks for: %s (k=%d)", query, num_results)
 
     try:
-        vector_store = load_vector_store()
-        results = vector_store.similarity_search_with_relevance_scores(query, k=num_results)
+        try:
+            results = load_vector_store().similarity_search_with_relevance_scores(query, k=num_results)
+        except NotFoundError:
+            # A rebuild swapped in a new collection and deleted the one this search had opened. Reopening reads
+            # the manifest again, which names the new one.
+            logger.info("Runbook collection was swapped out mid-search; retrying once")
+            results = load_vector_store().similarity_search_with_relevance_scores(query, k=num_results)
     except Exception as e:
         logger.exception("Runbook search failed")
         return (
             f"Runbook search failed ({type(e).__name__}): {e}. "
-            "Likely causes: vector store not yet built (run 'make ingest'), "
+            "Likely causes: the index is not built yet (the server builds it at startup; "
+            "see runbooks/rebuilding-the-vector-store.md), "
             "permission error on the persist directory, or a chromadb version mismatch."
         )
 

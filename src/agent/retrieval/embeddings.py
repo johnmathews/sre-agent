@@ -5,6 +5,7 @@ from pathlib import Path
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 from pydantic import SecretStr
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 RUNBOOKS_DIR = Path(__file__).resolve().parents[3] / "runbooks"
 CHROMA_PERSIST_DIR = Path(__file__).resolve().parents[3] / ".chroma_db"
 COLLECTION_NAME = "runbooks"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Chunking parameters
 CHUNK_SIZE = 800
@@ -189,17 +191,13 @@ def _load_markdown_dir(directory: Path) -> list[Document]:
     return documents
 
 
-def load_all_documents() -> list[Document]:
-    """Load documents from runbooks/ and any extra directories configured in settings.
+def source_dirs() -> list[Path]:
+    """The directories the index is built from: runbooks/, then each usable EXTRA_DOCS_DIRS entry.
 
-    Extra directories are specified via the EXTRA_DOCS_DIRS environment variable
-    as comma-separated absolute paths. Each directory is read-only — only .md files
-    are read via Path.read_text().
-
-    Returns:
-        Combined list of Documents from all configured directories.
+    Extra directories are specified via the EXTRA_DOCS_DIRS environment variable as comma-separated absolute
+    paths. Relative and missing paths are skipped with a warning.
     """
-    documents = _load_markdown_dir(RUNBOOKS_DIR)
+    dirs = [RUNBOOKS_DIR]
 
     try:
         settings = get_settings()
@@ -217,10 +215,22 @@ def load_all_documents() -> list[Document]:
             if not dir_path.is_dir():
                 logger.warning("Skipping non-existent directory: %s", dir_path)
                 continue
-            documents.extend(_load_markdown_dir(dir_path))
+            dirs.append(dir_path)
+    return dirs
 
+
+def load_documents(dirs: list[Path]) -> list[Document]:
+    """Load and chunk the markdown files in each directory, in order. Only .md files are read."""
+    documents: list[Document] = []
+    for directory in dirs:
+        documents.extend(_load_markdown_dir(directory))
     logger.info("Total documents loaded from all sources: %d", len(documents))
     return documents
+
+
+def load_all_documents() -> list[Document]:
+    """Load documents from runbooks/ and any extra directories configured in settings (see source_dirs)."""
+    return load_documents(source_dirs())
 
 
 def get_embeddings() -> OpenAIEmbeddings:
@@ -237,7 +247,7 @@ def get_embeddings() -> OpenAIEmbeddings:
         )
     return OpenAIEmbeddings(
         api_key=SecretStr(settings.openai_api_key),
-        model="text-embedding-3-small",
+        model=EMBEDDING_MODEL,
         base_url=settings.openai_base_url or None,
     )
 
@@ -245,10 +255,14 @@ def get_embeddings() -> OpenAIEmbeddings:
 def build_vector_store(
     documents: list[Document] | None = None,
     persist_directory: Path | None = None,
+    *,
+    embeddings: Embeddings | None = None,
+    collection_name: str = COLLECTION_NAME,
 ) -> Chroma:
-    """Build (or rebuild) the Chroma vector store from runbook documents.
+    """Embed documents into a Chroma collection, creating it or adding to it.
 
-    If documents is None, loads from the default runbooks directory.
+    If documents is None, loads from the default runbooks directory. The index's own rebuild path is
+    src.agent.retrieval.index.rebuild_index, which builds a fresh collection and records it in the manifest.
     """
     docs = documents if documents is not None else load_runbooks()
     persist_dir = str(persist_directory or CHROMA_PERSIST_DIR)
@@ -256,13 +270,13 @@ def build_vector_store(
     if not docs:
         logger.warning("No documents to embed — vector store will be empty")
 
-    embeddings = get_embeddings()
-
-    logger.info("Building vector store with %d documents at %s", len(docs), persist_dir)
+    logger.info(
+        "Building vector store with %d documents at %s (collection %s)", len(docs), persist_dir, collection_name
+    )
     vector_store = Chroma.from_documents(  # pyright: ignore[reportUnknownMemberType]
         documents=docs,
-        embedding=embeddings,
-        collection_name=COLLECTION_NAME,
+        embedding=embeddings or get_embeddings(),
+        collection_name=collection_name,
         persist_directory=persist_dir,
     )
     logger.info("Vector store built successfully")
@@ -270,12 +284,7 @@ def build_vector_store(
 
 
 def load_vector_store(persist_directory: Path | None = None) -> Chroma:
-    """Load an existing Chroma vector store from disk."""
-    persist_dir = str(persist_directory or CHROMA_PERSIST_DIR)
-    embeddings = get_embeddings()
+    """Open the live index: the collection the manifest names, or 'runbooks' for a store built before it."""
+    from src.agent.retrieval.index import open_index
 
-    return Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
+    return open_index(persist_dir=persist_directory)

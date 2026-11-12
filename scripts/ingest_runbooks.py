@@ -1,62 +1,67 @@
-"""Ingest runbooks into the Chroma vector store.
+"""Rebuild the runbook index (the Chroma vector store) by hand.
+
+The running server rebuilds the index itself when the runbooks in its image change, so this is the fallback.
 
 Usage:
-    uv run python -m scripts.ingest_runbooks
-    # or via Makefile:
-    make ingest
+    uv run python -m scripts.ingest_runbooks          # or: make ingest
+    uv run python -m scripts.ingest_runbooks --wipe   # delete the whole store first (see the runbook)
 """
 
+import argparse
 import logging
 import os
 import shutil
 import sys
 
-from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR, build_vector_store, get_embeddings, load_all_documents
+from src.agent.retrieval.embeddings import CHROMA_PERSIST_DIR
+from src.agent.retrieval.index import IndexBuildError, rebuild_index
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    """Load runbooks, embed them, and persist the vector store.
+def _wipe_store() -> None:
+    """Delete the store's contents, not the directory: in Docker it is a volume mountpoint (EBUSY)."""
+    if not CHROMA_PERSIST_DIR.exists():
+        return
+    logger.info("Wiping the vector store at %s", CHROMA_PERSIST_DIR)
+    for child in CHROMA_PERSIST_DIR.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
-    Settings, the documents and one embedding call are checked before the old store is cleared, so a
-    missing key or a bad config leaves the live index in place.
+
+def main(argv: list[str] | None = None) -> None:
+    """Build a new index collection and make it live.
+
+    The documents and one embedding call are checked first, and the new collection replaces the old one only once it
+    holds every chunk, so a missing key, a bad config or an API error leaves the live index in place. --wipe deletes
+    the whole store first (recovery from a store Chroma cannot open); it gives up that guarantee.
     """
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--wipe", action="store_true", help="delete the whole store before building")
+    args = parser.parse_args(argv)
+
     # Ingest only embeds, and embeddings always use OpenAI. Under LLM_PROVIDER=anthropic the settings would also
     # demand ANTHROPIC_API_KEY, which sre-ingest on infra does not have (#59). The openai provider's check asks for
     # OPENAI_API_KEY, the one key ingest needs, so run as that provider.
     os.environ["LLM_PROVIDER"] = "openai"
 
-    documents = load_all_documents()
-    if not documents:
-        logger.error("No documents found — nothing to ingest; the existing vector store was left in place")
-        sys.exit(1)
+    if args.wipe:
+        _wipe_store()
 
     try:
-        get_embeddings().embed_query("ingest preflight")
-    except Exception:
-        logger.exception("Preflight failed (settings or embeddings API); the existing vector store was left in place")
+        manifest = rebuild_index("ingest")
+    except IndexBuildError:
+        logger.exception("Ingest failed; the existing vector store was left in place")
         sys.exit(1)
 
-    # Clear existing store for a clean rebuild.
-    # Delete contents rather than the directory itself — when running in Docker,
-    # the directory is a volume mountpoint and cannot be removed (EBUSY).
-    if CHROMA_PERSIST_DIR.exists():
-        logger.info("Clearing existing vector store at %s", CHROMA_PERSIST_DIR)
-        for child in CHROMA_PERSIST_DIR.iterdir():
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-
-    logger.info("Ingesting %d document chunks from all sources...", len(documents))
-    store = build_vector_store(documents)
-
-    # Verify
-    count = store._collection.count()  # pyright: ignore[reportPrivateUsage]
     logger.info(
-        "Done! Vector store contains %d documents. Restart a running sre-agent so it reads the new store.", count
+        "Done! Collection %s holds %d chunks from %d files. A running sre-agent reads it on its next search.",
+        manifest.collection,
+        manifest.chunks,
+        manifest.files,
     )
 
 
